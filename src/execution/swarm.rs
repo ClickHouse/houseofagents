@@ -125,7 +125,17 @@ pub async fn run_swarm(
                         });
                         let filename = format!("{}_iter{}.md", kind.config_key(), iter);
                         let path = run_dir.join(&filename);
-                        let _ = std::fs::write(&path, &resp.content);
+                        if let Err(e) = std::fs::write(&path, &resp.content) {
+                            let err =
+                                format!("Failed to write output file {}: {e}", path.display());
+                            let _ = tx.send(ProgressEvent::AgentError {
+                                kind,
+                                iteration: iter,
+                                error: err.clone(),
+                                details: Some(err),
+                            });
+                            return (i, provider, None);
+                        }
                         let _ = tx.send(ProgressEvent::AgentFinished {
                             kind,
                             iteration: iter,
@@ -466,7 +476,9 @@ mod tests {
         .expect("run");
 
         let events = collect(rx);
-        assert!(events.iter().any(|e| matches!(e, ProgressEvent::AgentError { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, ProgressEvent::AgentError { .. })));
         assert!(events.iter().any(|e| matches!(e, ProgressEvent::AllDone)));
     }
 
@@ -501,5 +513,52 @@ mod tests {
         let events = collect(rx);
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0], ProgressEvent::AllDone));
+    }
+
+    #[tokio::test]
+    async fn run_swarm_write_failure_emits_agent_error() {
+        let dir = tempdir().expect("tempdir");
+        let out = OutputManager::new(&dir.path().to_path_buf(), None).expect("out");
+        std::fs::create_dir_all(out.run_dir().join("anthropic_iter1.md")).expect("mkdir");
+        let recv = Arc::new(Mutex::new(Vec::new()));
+        let providers: Vec<Box<dyn Provider>> = vec![Box::new(MockProvider::with_responses(
+            ProviderKind::Anthropic,
+            vec![ok("x")],
+            recv,
+        ))];
+        let (tx, rx) = mpsc::unbounded_channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        run_swarm(
+            "prompt",
+            providers,
+            1,
+            1,
+            HashMap::new(),
+            HashMap::new(),
+            &out,
+            tx,
+            cancel,
+        )
+        .await
+        .expect("run");
+
+        let events = collect(rx);
+        assert!(events.iter().any(|e| {
+            matches!(
+                e,
+                ProgressEvent::AgentError { kind: ProviderKind::Anthropic, error, .. }
+                if error.contains("Failed to write output file")
+            )
+        }));
+        assert!(!events.iter().any(|e| {
+            matches!(
+                e,
+                ProgressEvent::AgentFinished {
+                    kind: ProviderKind::Anthropic,
+                    ..
+                }
+            )
+        }));
     }
 }

@@ -35,6 +35,49 @@ impl AnthropicProvider {
     }
 }
 
+fn extract_text_content(resp_body: &serde_json::Value) -> Result<String, AppError> {
+    let content = resp_body
+        .get("content")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| AppError::Provider {
+            provider: "Anthropic".into(),
+            message: "Missing `content` array in response".into(),
+        })?;
+
+    let text_blocks: Vec<&str> = content
+        .iter()
+        .filter_map(|block| {
+            let block_type = block.get("type").and_then(serde_json::Value::as_str);
+            if block_type == Some("text") {
+                block.get("text").and_then(serde_json::Value::as_str)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if !text_blocks.is_empty() {
+        return Ok(text_blocks.concat());
+    }
+
+    // Legacy fallback where `type` is omitted but `text` still exists.
+    if let Some(text) = content
+        .iter()
+        .find_map(|block| block.get("text").and_then(serde_json::Value::as_str))
+    {
+        return Ok(text.to_string());
+    }
+
+    if let Some(text) = content.first().and_then(serde_json::Value::as_str) {
+        return Ok(text.to_string());
+    }
+
+    Err(AppError::Provider {
+        provider: "Anthropic".into(),
+        message: "No text content found in response".into(),
+    })
+}
+
 #[async_trait]
 impl Provider for AnthropicProvider {
     fn kind(&self) -> ProviderKind {
@@ -100,10 +143,7 @@ impl Provider for AnthropicProvider {
                 message: format!("Failed to parse response: {e}"),
             })?;
 
-        let content = resp_body["content"][0]["text"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
+        let content = extract_text_content(&resp_body)?;
 
         self.history.push(Message {
             role: Role::Assistant,
@@ -154,4 +194,58 @@ pub async fn list_models(api_key: &str, client: &reqwest::Client) -> Result<Vec<
 
     entries.sort_by(|a, b| b.1.cmp(&a.1));
     Ok(entries.into_iter().map(|(id, _)| id).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_text_content;
+    use serde_json::json;
+
+    #[test]
+    fn extract_text_content_uses_text_block_when_thinking_block_is_first() {
+        let body = json!({
+            "content": [
+                { "type": "thinking", "thinking": "internal" },
+                { "type": "text", "text": "final answer" }
+            ]
+        });
+        let content = extract_text_content(&body).expect("extract");
+        assert_eq!(content, "final answer");
+    }
+
+    #[test]
+    fn extract_text_content_concatenates_multiple_text_blocks() {
+        let body = json!({
+            "content": [
+                { "type": "text", "text": "part 1 " },
+                { "type": "text", "text": "part 2" }
+            ]
+        });
+        let content = extract_text_content(&body).expect("extract");
+        assert_eq!(content, "part 1 part 2");
+    }
+
+    #[test]
+    fn extract_text_content_accepts_legacy_text_without_type() {
+        let body = json!({
+            "content": [
+                { "text": "legacy answer" }
+            ]
+        });
+        let content = extract_text_content(&body).expect("extract");
+        assert_eq!(content, "legacy answer");
+    }
+
+    #[test]
+    fn extract_text_content_errors_when_no_text_exists() {
+        let body = json!({
+            "content": [
+                { "type": "tool_use", "name": "x" }
+            ]
+        });
+        let err = extract_text_content(&body).expect_err("should fail");
+        assert!(err
+            .to_string()
+            .contains("No text content found in response"));
+    }
 }

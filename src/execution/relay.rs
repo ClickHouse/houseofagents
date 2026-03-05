@@ -117,13 +117,39 @@ pub async fn run_relay(
                             truncate_chars(&preview, 80)
                         ),
                     });
-                    let _ = output.write_agent_output(kind, iteration, &resp.content);
+                    if let Err(e) = output.write_agent_output(kind, iteration, &resp.content) {
+                        let err_str =
+                            format!("Failed to write output file for {kind} iter{iteration}: {e}");
+                        if let Err(log_err) = output.append_error(&err_str) {
+                            let _ = progress_tx.send(ProgressEvent::AgentLog {
+                                kind,
+                                iteration,
+                                message: format!("Failed to append error log: {log_err}"),
+                            });
+                        }
+                        let _ = progress_tx.send(ProgressEvent::AgentError {
+                            kind,
+                            iteration,
+                            error: err_str.clone(),
+                            details: Some(err_str),
+                        });
+                        let _ = progress_tx.send(ProgressEvent::AllDone);
+                        return Ok(());
+                    }
                     let _ = progress_tx.send(ProgressEvent::AgentFinished { kind, iteration });
                     last_output = resp.content;
                 }
                 Err(e) => {
                     let err_str = e.to_string();
-                    let _ = output.append_error(&format!("{kind} iter{iteration}: {err_str}"));
+                    if let Err(log_err) =
+                        output.append_error(&format!("{kind} iter{iteration}: {err_str}"))
+                    {
+                        let _ = progress_tx.send(ProgressEvent::AgentLog {
+                            kind,
+                            iteration,
+                            message: format!("Failed to append error log: {log_err}"),
+                        });
+                    }
                     let _ = progress_tx.send(ProgressEvent::AgentError {
                         kind,
                         iteration,
@@ -352,7 +378,9 @@ mod tests {
         let log = std::fs::read_to_string(out.run_dir().join("_errors.log")).expect("log");
         assert!(log.contains("iter1"));
         let events = collect(rx);
-        assert!(events.iter().any(|e| matches!(e, ProgressEvent::AgentError { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, ProgressEvent::AgentError { .. })));
         assert!(events.iter().any(|e| matches!(e, ProgressEvent::AllDone)));
     }
 
@@ -377,5 +405,43 @@ mod tests {
         let events = collect(rx);
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0], ProgressEvent::AllDone));
+    }
+
+    #[tokio::test]
+    async fn run_relay_write_failure_emits_agent_error_and_stops() {
+        let dir = tempdir().expect("tempdir");
+        let out = OutputManager::new(&dir.path().to_path_buf(), None).expect("out");
+        std::fs::create_dir_all(out.run_dir().join("anthropic_iter1.md")).expect("mkdir");
+        let recv = Arc::new(Mutex::new(Vec::new()));
+        let providers: Vec<Box<dyn Provider>> = vec![Box::new(MockProvider::with_responses(
+            ProviderKind::Anthropic,
+            vec![ok("x")],
+            recv,
+        ))];
+        let (tx, rx) = mpsc::unbounded_channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        run_relay("p", providers, 2, 1, None, HashMap::new(), &out, tx, cancel)
+            .await
+            .expect("run");
+
+        let events = collect(rx);
+        assert!(events.iter().any(|e| {
+            matches!(
+                e,
+                ProgressEvent::AgentError { kind: ProviderKind::Anthropic, error, .. }
+                if error.contains("Failed to write output file")
+            )
+        }));
+        assert!(events.iter().any(|e| matches!(e, ProgressEvent::AllDone)));
+        assert!(!events.iter().any(|e| {
+            matches!(
+                e,
+                ProgressEvent::AgentFinished {
+                    kind: ProviderKind::Anthropic,
+                    ..
+                }
+            )
+        }));
     }
 }

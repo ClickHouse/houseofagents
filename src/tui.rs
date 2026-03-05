@@ -1498,13 +1498,30 @@ fn start_execution(app: &mut App) {
     };
 
     if !resumed_run {
-        let _ = output.write_prompt(&prompt);
-        let _ = output.write_session_info(&mode, &agents, iterations, session_name, &run_models);
+        if let Err(e) = output.write_prompt(&prompt) {
+            app.error_modal = Some(format!("Failed to write prompt file: {e}"));
+            app.screen = Screen::Prompt;
+            app.is_running = false;
+            return;
+        }
+        if let Err(e) =
+            output.write_session_info(&mode, &agents, iterations, session_name, &run_models)
+        {
+            app.error_modal = Some(format!("Failed to write session metadata: {e}"));
+            app.screen = Screen::Prompt;
+            app.is_running = false;
+            return;
+        }
     } else {
-        let _ = output.append_error(&format!(
+        if let Err(e) = output.append_error(&format!(
             "Resumed {} mode for {} additional iteration(s), starting at iter {}",
             mode, iterations, start_iteration
-        ));
+        )) {
+            app.error_modal = Some(format!("Failed to write resume log entry: {e}"));
+            app.screen = Screen::Prompt;
+            app.is_running = false;
+            return;
+        }
     }
 
     // Store run dir for results screen
@@ -2289,7 +2306,10 @@ mod tests {
 
     #[test]
     fn parse_iteration_from_filename_consolidated() {
-        assert_eq!(parse_iteration_from_filename("consolidated_anthropic.md"), None);
+        assert_eq!(
+            parse_iteration_from_filename("consolidated_anthropic.md"),
+            None
+        );
     }
 
     #[test]

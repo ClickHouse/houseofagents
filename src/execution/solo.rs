@@ -104,7 +104,16 @@ async fn solo_agent(
             });
             let filename = format!("{}_iter1.md", kind.config_key());
             let path = run_dir.join(&filename);
-            let _ = std::fs::write(&path, &resp.content);
+            if let Err(e) = std::fs::write(&path, &resp.content) {
+                let err = format!("Failed to write output file {}: {e}", path.display());
+                let _ = tx.send(ProgressEvent::AgentError {
+                    kind,
+                    iteration: 1,
+                    error: err.clone(),
+                    details: Some(err),
+                });
+                return;
+            }
             let _ = tx.send(ProgressEvent::AgentFinished { kind, iteration: 1 });
         }
         Err(e) => {
@@ -179,14 +188,12 @@ mod tests {
             if let Some(tx) = self.live_tx.as_ref() {
                 let _ = tx.send("live".to_string());
             }
-            self.responses
-                .pop_front()
-                .unwrap_or_else(|| {
-                    Ok(CompletionResponse {
-                        content: String::new(),
-                        debug_logs: Vec::new(),
-                    })
+            self.responses.pop_front().unwrap_or_else(|| {
+                Ok(CompletionResponse {
+                    content: String::new(),
+                    debug_logs: Vec::new(),
                 })
+            })
         }
     }
 
@@ -209,7 +216,11 @@ mod tests {
                 "a1",
                 received.clone(),
             )),
-            Box::new(MockProvider::ok(ProviderKind::OpenAI, "o1", received.clone())),
+            Box::new(MockProvider::ok(
+                ProviderKind::OpenAI,
+                "o1",
+                received.clone(),
+            )),
         ];
         let (tx, rx) = mpsc::unbounded_channel();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -224,12 +235,20 @@ mod tests {
 
         let events = collect_events(rx);
         assert!(events.iter().any(|e| matches!(e, ProgressEvent::AllDone)));
-        assert!(events.iter().any(
-            |e| matches!(e, ProgressEvent::AgentStarted { kind: ProviderKind::Anthropic, .. })
-        ));
-        assert!(events.iter().any(
-            |e| matches!(e, ProgressEvent::AgentFinished { kind: ProviderKind::OpenAI, .. })
-        ));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            ProgressEvent::AgentStarted {
+                kind: ProviderKind::Anthropic,
+                ..
+            }
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            ProgressEvent::AgentFinished {
+                kind: ProviderKind::OpenAI,
+                ..
+            }
+        )));
     }
 
     #[tokio::test]
@@ -237,10 +256,8 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let out = OutputManager::new(&dir.path().to_path_buf(), None).expect("out");
         let received = Arc::new(Mutex::new(Vec::new()));
-        let providers: Vec<Box<dyn Provider>> = vec![Box::new(MockProvider::err(
-            ProviderKind::Gemini,
-            received,
-        ))];
+        let providers: Vec<Box<dyn Provider>> =
+            vec![Box::new(MockProvider::err(ProviderKind::Gemini, received))];
         let (tx, rx) = mpsc::unbounded_channel();
         let cancel = Arc::new(AtomicBool::new(false));
 
@@ -259,6 +276,43 @@ mod tests {
             )
         }));
         assert!(events.iter().any(|e| matches!(e, ProgressEvent::AllDone)));
+    }
+
+    #[tokio::test]
+    async fn run_solo_write_failure_emits_agent_error() {
+        let dir = tempdir().expect("tempdir");
+        let out = OutputManager::new(&dir.path().to_path_buf(), None).expect("out");
+        std::fs::create_dir_all(out.run_dir().join("anthropic_iter1.md")).expect("mkdir");
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let providers: Vec<Box<dyn Provider>> = vec![Box::new(MockProvider::ok(
+            ProviderKind::Anthropic,
+            "content",
+            received,
+        ))];
+        let (tx, rx) = mpsc::unbounded_channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        run_solo("prompt", providers, &out, tx, cancel)
+            .await
+            .expect("run");
+
+        let events = collect_events(rx);
+        assert!(events.iter().any(|e| {
+            matches!(
+                e,
+                ProgressEvent::AgentError { kind: ProviderKind::Anthropic, error, .. }
+                if error.contains("Failed to write output file")
+            )
+        }));
+        assert!(!events.iter().any(|e| {
+            matches!(
+                e,
+                ProgressEvent::AgentFinished {
+                    kind: ProviderKind::Anthropic,
+                    ..
+                }
+            )
+        }));
     }
 
     #[tokio::test]
