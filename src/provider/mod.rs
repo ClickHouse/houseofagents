@@ -1,0 +1,113 @@
+pub mod anthropic;
+pub mod gemini;
+pub mod openai;
+
+use crate::config::ProviderConfig;
+use crate::error::AppError;
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use std::fmt;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ProviderKind {
+    Anthropic,
+    OpenAI,
+    Gemini,
+}
+
+impl ProviderKind {
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            ProviderKind::Anthropic => "Claude",
+            ProviderKind::OpenAI => "Codex",
+            ProviderKind::Gemini => "Gemini",
+        }
+    }
+
+    pub fn config_key(&self) -> &'static str {
+        match self {
+            ProviderKind::Anthropic => "anthropic",
+            ProviderKind::OpenAI => "openai",
+            ProviderKind::Gemini => "gemini",
+        }
+    }
+
+    pub fn all() -> &'static [ProviderKind] {
+        &[ProviderKind::Anthropic, ProviderKind::OpenAI, ProviderKind::Gemini]
+    }
+}
+
+impl fmt::Display for ProviderKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.display_name())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Message {
+    pub role: Role,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    User,
+    Assistant,
+}
+
+pub struct CompletionResponse {
+    pub content: String,
+}
+
+#[async_trait]
+pub trait Provider: Send + Sync {
+    fn kind(&self) -> ProviderKind;
+    async fn send(&mut self, message: &str) -> Result<CompletionResponse, AppError>;
+}
+
+/// Prune message history keeping the first message (initial prompt) and most recent messages.
+pub fn prune_history(history: &mut Vec<Message>, max_messages: usize) {
+    if max_messages < 4 || history.len() <= max_messages {
+        return;
+    }
+    // Keep first 2 messages (initial user prompt + first response) and last (max-2) messages
+    let keep_start = 2;
+    let keep_end = max_messages - keep_start;
+    let drain_end = history.len() - keep_end;
+    if drain_end > keep_start {
+        history.drain(keep_start..drain_end);
+    }
+}
+
+pub fn create_provider(
+    kind: ProviderKind,
+    config: &ProviderConfig,
+    client: reqwest::Client,
+    max_tokens: u32,
+    max_history_messages: usize,
+) -> Box<dyn Provider> {
+    match kind {
+        ProviderKind::Anthropic => Box::new(anthropic::AnthropicProvider::new(
+            config.api_key.clone(),
+            config.model.clone(),
+            client,
+            max_tokens,
+            max_history_messages,
+        )),
+        ProviderKind::OpenAI => Box::new(openai::OpenAIProvider::new(
+            config.api_key.clone(),
+            config.model.clone(),
+            client,
+            max_tokens,
+            max_history_messages,
+        )),
+        ProviderKind::Gemini => Box::new(gemini::GeminiProvider::new(
+            config.api_key.clone(),
+            config.model.clone(),
+            client,
+            max_tokens,
+            max_history_messages,
+        )),
+    }
+}
