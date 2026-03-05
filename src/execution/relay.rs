@@ -175,75 +175,9 @@ pub async fn run_relay(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::CompletionResponse;
-    use async_trait::async_trait;
-    use std::collections::VecDeque;
+    use crate::execution::test_utils::{collect_progress_events, ok_response, MockProvider};
     use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
-
-    struct MockProvider {
-        kind: ProviderKind,
-        responses: VecDeque<Result<CompletionResponse, AppError>>,
-        received: Arc<Mutex<Vec<String>>>,
-        live_tx: Option<mpsc::UnboundedSender<String>>,
-    }
-
-    impl MockProvider {
-        fn with_responses(
-            kind: ProviderKind,
-            responses: Vec<Result<CompletionResponse, AppError>>,
-            received: Arc<Mutex<Vec<String>>>,
-        ) -> Self {
-            Self {
-                kind,
-                responses: VecDeque::from(responses),
-                received,
-                live_tx: None,
-            }
-        }
-    }
-
-    #[async_trait]
-    impl Provider for MockProvider {
-        fn kind(&self) -> ProviderKind {
-            self.kind
-        }
-
-        fn set_live_log_sender(&mut self, tx: Option<mpsc::UnboundedSender<String>>) {
-            self.live_tx = tx;
-        }
-
-        async fn send(&mut self, message: &str) -> Result<CompletionResponse, AppError> {
-            self.received
-                .lock()
-                .expect("lock")
-                .push(message.to_string());
-            if let Some(tx) = self.live_tx.as_ref() {
-                let _ = tx.send("relay-live".to_string());
-            }
-            self.responses.pop_front().unwrap_or_else(|| {
-                Ok(CompletionResponse {
-                    content: "default".to_string(),
-                    debug_logs: Vec::new(),
-                })
-            })
-        }
-    }
-
-    fn ok(content: &str) -> Result<CompletionResponse, AppError> {
-        Ok(CompletionResponse {
-            content: content.to_string(),
-            debug_logs: vec!["dbg".to_string()],
-        })
-    }
-
-    fn collect(mut rx: mpsc::UnboundedReceiver<ProgressEvent>) -> Vec<ProgressEvent> {
-        let mut out = Vec::new();
-        while let Ok(ev) = rx.try_recv() {
-            out.push(ev);
-        }
-        out
-    }
 
     #[tokio::test]
     async fn run_relay_one_iteration_passes_previous_output_to_next_agent() {
@@ -254,12 +188,12 @@ mod tests {
         let providers: Vec<Box<dyn Provider>> = vec![
             Box::new(MockProvider::with_responses(
                 ProviderKind::Anthropic,
-                vec![ok("first output")],
+                vec![ok_response("first output")],
                 recv_a.clone(),
             )),
             Box::new(MockProvider::with_responses(
                 ProviderKind::OpenAI,
-                vec![ok("second output")],
+                vec![ok_response("second output")],
                 recv_b.clone(),
             )),
         ];
@@ -286,7 +220,7 @@ mod tests {
         assert!(b_msgs[0].contains("first output"));
         assert!(out.run_dir().join("anthropic_iter1.md").exists());
         assert!(out.run_dir().join("openai_iter1.md").exists());
-        let events = collect(rx);
+        let events = collect_progress_events(rx);
         assert!(events
             .iter()
             .any(|e| matches!(e, ProgressEvent::IterationComplete { iteration: 1 })));
@@ -302,12 +236,12 @@ mod tests {
         let providers: Vec<Box<dyn Provider>> = vec![
             Box::new(MockProvider::with_responses(
                 ProviderKind::Anthropic,
-                vec![ok("a out")],
+                vec![ok_response("a out")],
                 recv_a,
             )),
             Box::new(MockProvider::with_responses(
                 ProviderKind::OpenAI,
-                vec![ok("b out")],
+                vec![ok_response("b out")],
                 recv_b.clone(),
             )),
         ];
@@ -332,7 +266,7 @@ mod tests {
         let recv = Arc::new(Mutex::new(Vec::new()));
         let providers: Vec<Box<dyn Provider>> = vec![Box::new(MockProvider::with_responses(
             ProviderKind::Anthropic,
-            vec![ok("new")],
+            vec![ok_response("new")],
             recv.clone(),
         ))];
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -364,7 +298,7 @@ mod tests {
         let recv = Arc::new(Mutex::new(Vec::new()));
         let providers: Vec<Box<dyn Provider>> = vec![Box::new(MockProvider::with_responses(
             ProviderKind::Anthropic,
-            vec![ok("new")],
+            vec![ok_response("new")],
             recv.clone(),
         ))];
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -394,12 +328,9 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let out = OutputManager::new(dir.path(), None).expect("out");
         let recv = Arc::new(Mutex::new(Vec::new()));
-        let providers: Vec<Box<dyn Provider>> = vec![Box::new(MockProvider::with_responses(
+        let providers: Vec<Box<dyn Provider>> = vec![Box::new(MockProvider::err(
             ProviderKind::Anthropic,
-            vec![Err(AppError::Provider {
-                provider: "mock".to_string(),
-                message: "bad".to_string(),
-            })],
+            "bad",
             recv,
         ))];
         let (tx, rx) = mpsc::unbounded_channel();
@@ -411,7 +342,7 @@ mod tests {
 
         let log = std::fs::read_to_string(out.run_dir().join("_errors.log")).expect("log");
         assert!(log.contains("iter1"));
-        let events = collect(rx);
+        let events = collect_progress_events(rx);
         assert!(events
             .iter()
             .any(|e| matches!(e, ProgressEvent::AgentError { .. })));
@@ -425,7 +356,7 @@ mod tests {
         let recv = Arc::new(Mutex::new(Vec::new()));
         let providers: Vec<Box<dyn Provider>> = vec![Box::new(MockProvider::with_responses(
             ProviderKind::Anthropic,
-            vec![ok("x")],
+            vec![ok_response("x")],
             recv.clone(),
         ))];
         let (tx, rx) = mpsc::unbounded_channel();
@@ -436,7 +367,7 @@ mod tests {
             .expect("run");
 
         assert!(recv.lock().expect("lock").is_empty());
-        let events = collect(rx);
+        let events = collect_progress_events(rx);
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0], ProgressEvent::AllDone));
     }
@@ -449,7 +380,7 @@ mod tests {
         let recv = Arc::new(Mutex::new(Vec::new()));
         let providers: Vec<Box<dyn Provider>> = vec![Box::new(MockProvider::with_responses(
             ProviderKind::Anthropic,
-            vec![ok("x")],
+            vec![ok_response("x")],
             recv,
         ))];
         let (tx, rx) = mpsc::unbounded_channel();
@@ -459,7 +390,7 @@ mod tests {
             .await
             .expect("run");
 
-        let events = collect(rx);
+        let events = collect_progress_events(rx);
         assert!(events.iter().any(|e| {
             matches!(
                 e,

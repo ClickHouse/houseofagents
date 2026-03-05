@@ -1,6 +1,8 @@
 pub mod relay;
 pub mod solo;
 pub mod swarm;
+#[cfg(test)]
+pub(crate) mod test_utils;
 
 use crate::provider::ProviderKind;
 use serde::{Deserialize, Serialize};

@@ -35,6 +35,42 @@ impl GeminiProvider {
     }
 }
 
+fn extract_content(resp_body: &serde_json::Value) -> Result<String, AppError> {
+    let candidates = resp_body
+        .get("candidates")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| AppError::Provider {
+            provider: "Gemini".into(),
+            message: "Missing `candidates` array in response".into(),
+        })?;
+
+    for candidate in candidates {
+        let parts = candidate
+            .get("content")
+            .and_then(|content| content.get("parts"))
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| AppError::Provider {
+                provider: "Gemini".into(),
+                message: "Missing `content.parts` in response candidate".into(),
+            })?;
+
+        let joined = parts
+            .iter()
+            .filter_map(|part| part.get("text").and_then(serde_json::Value::as_str))
+            .collect::<Vec<_>>()
+            .concat();
+
+        if !joined.is_empty() {
+            return Ok(joined);
+        }
+    }
+
+    Err(AppError::Provider {
+        provider: "Gemini".into(),
+        message: "No text content found in response".into(),
+    })
+}
+
 #[async_trait]
 impl Provider for GeminiProvider {
     fn kind(&self) -> ProviderKind {
@@ -104,10 +140,7 @@ impl Provider for GeminiProvider {
                 message: format!("Failed to parse response: {e}"),
             })?;
 
-        let content = resp_body["candidates"][0]["content"]["parts"][0]["text"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
+        let content = extract_content(&resp_body)?;
 
         self.history.push(Message {
             role: Role::Assistant,
@@ -154,4 +187,71 @@ pub async fn list_models(api_key: &str, client: &reqwest::Client) -> Result<Vec<
     // Gemini API doesn't expose created timestamps; reverse to show newest first
     models.reverse();
     Ok(models)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_content;
+    use serde_json::json;
+
+    #[test]
+    fn extract_content_reads_text_parts() {
+        let body = json!({
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [
+                            { "text": "answer" }
+                        ]
+                    }
+                }
+            ]
+        });
+        let content = extract_content(&body).expect("extract");
+        assert_eq!(content, "answer");
+    }
+
+    #[test]
+    fn extract_content_concatenates_multiple_parts() {
+        let body = json!({
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [
+                            { "text": "a " },
+                            { "text": "b" }
+                        ]
+                    }
+                }
+            ]
+        });
+        let content = extract_content(&body).expect("extract");
+        assert_eq!(content, "a b");
+    }
+
+    #[test]
+    fn extract_content_errors_when_candidates_missing() {
+        let body = json!({});
+        let err = extract_content(&body).expect_err("expected error");
+        assert!(err.to_string().contains("Missing `candidates` array"));
+    }
+
+    #[test]
+    fn extract_content_errors_when_no_text() {
+        let body = json!({
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [
+                            { "type": "inline_data" }
+                        ]
+                    }
+                }
+            ]
+        });
+        let err = extract_content(&body).expect_err("expected error");
+        assert!(err
+            .to_string()
+            .contains("No text content found in response"));
+    }
 }
