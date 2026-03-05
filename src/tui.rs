@@ -1576,7 +1576,7 @@ fn start_consolidation(app: &mut App) {
     app.progress_events.push(ProgressEvent::AgentLog {
         kind: provider_kind,
         iteration: last_iteration + 1,
-        message: format!("{} consolidating reports", provider_kind.display_name()),
+        message: "consolidating reports".into(),
     });
 
     let output_path = run_dir.join(format!("consolidated_{}.md", provider_kind.config_key()));
@@ -1710,10 +1710,7 @@ fn maybe_start_diagnostics(app: &mut App) {
     app.progress_events.push(ProgressEvent::AgentLog {
         kind: diagnostic_kind,
         iteration: 0,
-        message: format!(
-            "{} analyzing reports for errors",
-            diagnostic_kind.display_name()
-        ),
+        message: "analyzing reports for errors".into(),
     });
     app.diagnostic_running = true;
     app.is_running = true;
