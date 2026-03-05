@@ -1903,7 +1903,7 @@ fn start_consolidation(app: &mut App) {
     tokio::spawn(async move {
         let mut provider = provider;
         let result = match provider.send(&prompt).await {
-            Ok(resp) => match std::fs::write(&output_path, &resp.content) {
+            Ok(resp) => match tokio::fs::write(&output_path, &resp.content).await {
                 Ok(()) => Ok(output_path.display().to_string()),
                 Err(e) => Err(format!("Failed to write consolidation output: {e}")),
             },
@@ -2044,7 +2044,7 @@ fn maybe_start_diagnostics(app: &mut App) {
     tokio::spawn(async move {
         let mut provider = provider;
         let result = match provider.send(&prompt).await {
-            Ok(resp) => match std::fs::write(&output_path, &resp.content) {
+            Ok(resp) => match tokio::fs::write(&output_path, &resp.content).await {
                 Ok(()) => Ok(output_path.display().to_string()),
                 Err(e) => Err(format!("Failed to write errors.md: {e}")),
             },
@@ -2081,16 +2081,7 @@ fn handle_diagnostic_result(app: &mut App, result: Result<String, String>) {
 }
 
 fn diagnostic_provider_kind(app: &App) -> Option<ProviderKind> {
-    let raw = app
-        .config
-        .diagnostic_provider
-        .as_deref()?
-        .trim()
-        .to_lowercase();
-    ProviderKind::all()
-        .iter()
-        .copied()
-        .find(|kind| kind.config_key() == raw || kind.display_name().to_lowercase() == raw)
+    ProviderKind::from_selector(app.config.diagnostic_provider.as_deref()?)
 }
 
 fn collect_report_files(run_dir: &std::path::Path) -> Vec<std::path::PathBuf> {

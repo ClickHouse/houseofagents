@@ -18,6 +18,7 @@ pub async fn run_relay(
     progress_tx: mpsc::UnboundedSender<ProgressEvent>,
     cancel: Arc<AtomicBool>,
 ) -> Result<(), AppError> {
+    let has_initial_last_output = initial_last_output.is_some();
     let mut last_output = initial_last_output.unwrap_or_default();
 
     // Pre-compute agent kinds for building messages without borrowing providers
@@ -40,7 +41,7 @@ pub async fn run_relay(
                 message: "Sending request...".into(),
             });
 
-            let message = if iteration == 1 && i == 0 {
+            let message = if !has_initial_last_output && offset == 0 && i == 0 {
                 prompt.to_string()
             } else {
                 let prev_kind = if i == 0 {
@@ -353,6 +354,38 @@ mod tests {
         let msg = recv.lock().expect("lock")[0].clone();
         assert!(msg.contains("resume seed"));
         assert!(out.run_dir().join("anthropic_iter2.md").exists());
+    }
+
+    #[tokio::test]
+    async fn run_relay_starting_later_without_seed_uses_prompt_for_first_agent() {
+        let dir = tempdir().expect("tempdir");
+        let out = OutputManager::new(&dir.path().to_path_buf(), None).expect("out");
+        let recv = Arc::new(Mutex::new(Vec::new()));
+        let providers: Vec<Box<dyn Provider>> = vec![Box::new(MockProvider::with_responses(
+            ProviderKind::Anthropic,
+            vec![ok("new")],
+            recv.clone(),
+        ))];
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        run_relay(
+            "initial prompt",
+            providers,
+            1,
+            3,
+            None,
+            HashMap::new(),
+            &out,
+            tx,
+            cancel,
+        )
+        .await
+        .expect("run");
+
+        let msg = recv.lock().expect("lock")[0].clone();
+        assert_eq!(msg, "initial prompt");
+        assert!(out.run_dir().join("anthropic_iter3.md").exists());
     }
 
     #[tokio::test]

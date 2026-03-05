@@ -896,22 +896,29 @@ fn cli_dependent_style(use_cli: bool) -> Style {
 }
 
 fn mask_key(key: &str) -> String {
-    if key.len() <= 8 {
+    let total_chars = key.chars().count();
+    if total_chars <= 8 {
         "****".into()
     } else {
-        format!("{}...{}", &key[..4], &key[key.len() - 4..])
+        let prefix: String = key.chars().take(4).collect();
+        let suffix: String = key
+            .chars()
+            .rev()
+            .take(4)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        format!("{prefix}...{suffix}")
     }
 }
 
 fn is_diagnostic_provider(app: &App, kind: ProviderKind) -> bool {
-    app.config.diagnostic_provider.as_deref() == Some(kind.config_key())
+    diagnostic_provider_kind(app) == Some(kind)
 }
 
 fn diagnostic_provider_kind(app: &App) -> Option<ProviderKind> {
-    ProviderKind::all()
-        .iter()
-        .copied()
-        .find(|k| app.config.diagnostic_provider.as_deref() == Some(k.config_key()))
+    ProviderKind::from_selector(app.config.diagnostic_provider.as_deref()?)
 }
 
 #[cfg(test)]
@@ -969,6 +976,11 @@ mod tests {
     }
 
     #[test]
+    fn mask_key_long_values_unicode_safe() {
+        assert_eq!(mask_key("ééééabcdéééé"), "éééé...éééé");
+    }
+
+    #[test]
     fn is_diagnostic_provider_true_when_matching() {
         let app = app_with_diagnostic(Some("openai"));
         assert!(is_diagnostic_provider(&app, ProviderKind::OpenAI));
@@ -985,5 +997,11 @@ mod tests {
     fn diagnostic_provider_kind_none_when_missing() {
         let app = app_with_diagnostic(None);
         assert_eq!(diagnostic_provider_kind(&app), None);
+    }
+
+    #[test]
+    fn diagnostic_provider_kind_matches_display_name_case_insensitive() {
+        let app = app_with_diagnostic(Some("cOdEx"));
+        assert_eq!(diagnostic_provider_kind(&app), Some(ProviderKind::OpenAI));
     }
 }

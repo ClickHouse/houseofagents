@@ -93,8 +93,15 @@ pub async fn wait_for_cancel(cancel: &Arc<AtomicBool>) {
 }
 
 pub fn truncate_chars(s: &str, max_chars: usize) -> String {
-    let out: String = s.chars().take(max_chars).collect();
-    if s.chars().count() > max_chars {
+    let mut iter = s.chars();
+    let mut out = String::new();
+    for _ in 0..max_chars {
+        match iter.next() {
+            Some(ch) => out.push(ch),
+            None => return out,
+        }
+    }
+    if iter.next().is_some() {
         format!("{out}...")
     } else {
         out
@@ -156,8 +163,11 @@ mod tests {
             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
             cancel_setter.store(true, Ordering::Relaxed);
         });
-        tokio::time::timeout(tokio::time::Duration::from_secs(1), wait_for_cancel(&cancel))
-            .await
-            .expect("wait_for_cancel should complete");
+        tokio::time::timeout(
+            tokio::time::Duration::from_secs(1),
+            wait_for_cancel(&cancel),
+        )
+        .await
+        .expect("wait_for_cancel should complete");
     }
 }

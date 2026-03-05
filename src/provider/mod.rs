@@ -41,6 +41,13 @@ impl ProviderKind {
             ProviderKind::Gemini,
         ]
     }
+
+    pub fn from_selector(raw: &str) -> Option<ProviderKind> {
+        let selector = raw.trim().to_lowercase();
+        Self::all().iter().copied().find(|kind| {
+            kind.config_key() == selector || kind.display_name().to_lowercase() == selector
+        })
+    }
 }
 
 impl fmt::Display for ProviderKind {
@@ -208,6 +215,23 @@ mod tests {
     }
 
     #[test]
+    fn provider_kind_from_selector_accepts_key_and_display_name() {
+        assert_eq!(
+            ProviderKind::from_selector("anthropic"),
+            Some(ProviderKind::Anthropic)
+        );
+        assert_eq!(
+            ProviderKind::from_selector(" Codex "),
+            Some(ProviderKind::OpenAI)
+        );
+    }
+
+    #[test]
+    fn provider_kind_from_selector_unknown_returns_none() {
+        assert_eq!(ProviderKind::from_selector("unknown"), None);
+    }
+
+    #[test]
     fn effort_to_budget_low_medium_high() {
         assert_eq!(effort_to_budget("low"), 4096);
         assert_eq!(effort_to_budget("medium"), 8192);
@@ -271,7 +295,11 @@ mod tests {
     fn prune_history_keeps_first_two_and_last_n() {
         let mut history: Vec<Message> = (0..10)
             .map(|i| Message {
-                role: if i % 2 == 0 { Role::User } else { Role::Assistant },
+                role: if i % 2 == 0 {
+                    Role::User
+                } else {
+                    Role::Assistant
+                },
                 content: format!("m{i}"),
             })
             .collect();

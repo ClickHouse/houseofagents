@@ -104,7 +104,7 @@ async fn solo_agent(
             });
             let filename = format!("{}_iter1.md", kind.config_key());
             let path = run_dir.join(&filename);
-            if let Err(e) = std::fs::write(&path, &resp.content) {
+            if let Err(e) = tokio::fs::write(&path, &resp.content).await {
                 let err = format!("Failed to write output file {}: {e}", path.display());
                 let _ = tx.send(ProgressEvent::AgentError {
                     kind,

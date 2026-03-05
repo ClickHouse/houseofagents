@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
+use tokio::fs;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
@@ -148,7 +149,6 @@ impl CliProvider {
                 }
                 None
             }
-            Value::String(s) => Uuid::parse_str(s).ok().map(|_| s.to_string()),
             _ => None,
         }
     }
@@ -422,7 +422,7 @@ impl Provider for CliProvider {
                 Ok(Ok(status)) => status,
                 Ok(Err(e)) => {
                     if let Some(path) = codex_output_path.as_ref() {
-                        let _ = std::fs::remove_file(path);
+                        let _ = fs::remove_file(path).await;
                     }
                     debug_logs.push(format!(
                         "cli wait failed after {} ms",
@@ -439,7 +439,7 @@ impl Provider for CliProvider {
                 }
                 Err(_) => {
                     if let Some(path) = codex_output_path.as_ref() {
-                        let _ = std::fs::remove_file(path);
+                        let _ = fs::remove_file(path).await;
                     }
                     let _ = child.kill().await;
                     let _ = child.wait().await;
@@ -505,7 +505,7 @@ impl Provider for CliProvider {
 
         if !status.success() {
             if let Some(path) = codex_output_path.as_ref() {
-                let _ = std::fs::remove_file(path);
+                let _ = fs::remove_file(path).await;
             }
             return Err(Self::provider_error_with_debug(
                 bin,
@@ -535,8 +535,10 @@ impl Provider for CliProvider {
 
         let content = if self.kind == ProviderKind::OpenAI {
             if let Some(path) = codex_output_path.as_ref() {
-                let text = std::fs::read_to_string(path).unwrap_or_else(|_| stdout_text.clone());
-                let _ = std::fs::remove_file(path);
+                let text = fs::read_to_string(path)
+                    .await
+                    .unwrap_or_else(|_| stdout_text.clone());
+                let _ = fs::remove_file(path).await;
                 debug_logs.push(format!("codex output chars: {}", text.chars().count()));
                 text
             } else {
@@ -563,6 +565,7 @@ impl Provider for CliProvider {
 mod tests {
     use super::CliProvider;
     use crate::provider::ProviderKind;
+    use serde_json::json;
 
     fn provider_with_extra(extra: &str) -> CliProvider {
         CliProvider::new(
@@ -599,5 +602,29 @@ mod tests {
             provider.extra_cli_arg(),
             Some("--opt \"quoted value\"".to_string())
         );
+    }
+
+    #[test]
+    fn find_session_id_matches_expected_keys() {
+        let value = json!({
+            "meta": {
+                "session_id": "123e4567-e89b-12d3-a456-426614174000"
+            }
+        });
+        let found = CliProvider::find_session_id(&value);
+        assert_eq!(
+            found.as_deref(),
+            Some("123e4567-e89b-12d3-a456-426614174000")
+        );
+    }
+
+    #[test]
+    fn find_session_id_does_not_match_unrelated_uuid_strings() {
+        let value = json!({
+            "path": "123e4567-e89b-12d3-a456-426614174000",
+            "data": ["123e4567-e89b-12d3-a456-426614174001"]
+        });
+        let found = CliProvider::find_session_id(&value);
+        assert_eq!(found, None);
     }
 }
