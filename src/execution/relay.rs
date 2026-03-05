@@ -143,3 +143,239 @@ pub async fn run_relay(
     let _ = progress_tx.send(ProgressEvent::AllDone);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::CompletionResponse;
+    use async_trait::async_trait;
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+    use tempfile::tempdir;
+
+    struct MockProvider {
+        kind: ProviderKind,
+        responses: VecDeque<Result<CompletionResponse, AppError>>,
+        received: Arc<Mutex<Vec<String>>>,
+        live_tx: Option<mpsc::UnboundedSender<String>>,
+    }
+
+    impl MockProvider {
+        fn with_responses(
+            kind: ProviderKind,
+            responses: Vec<Result<CompletionResponse, AppError>>,
+            received: Arc<Mutex<Vec<String>>>,
+        ) -> Self {
+            Self {
+                kind,
+                responses: VecDeque::from(responses),
+                received,
+                live_tx: None,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for MockProvider {
+        fn kind(&self) -> ProviderKind {
+            self.kind
+        }
+
+        fn set_live_log_sender(&mut self, tx: Option<mpsc::UnboundedSender<String>>) {
+            self.live_tx = tx;
+        }
+
+        async fn send(&mut self, message: &str) -> Result<CompletionResponse, AppError> {
+            self.received
+                .lock()
+                .expect("lock")
+                .push(message.to_string());
+            if let Some(tx) = self.live_tx.as_ref() {
+                let _ = tx.send("relay-live".to_string());
+            }
+            self.responses.pop_front().unwrap_or_else(|| {
+                Ok(CompletionResponse {
+                    content: "default".to_string(),
+                    debug_logs: Vec::new(),
+                })
+            })
+        }
+    }
+
+    fn ok(content: &str) -> Result<CompletionResponse, AppError> {
+        Ok(CompletionResponse {
+            content: content.to_string(),
+            debug_logs: vec!["dbg".to_string()],
+        })
+    }
+
+    fn collect(mut rx: mpsc::UnboundedReceiver<ProgressEvent>) -> Vec<ProgressEvent> {
+        let mut out = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            out.push(ev);
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn run_relay_one_iteration_passes_previous_output_to_next_agent() {
+        let dir = tempdir().expect("tempdir");
+        let out = OutputManager::new(&dir.path().to_path_buf(), Some("relay")).expect("out");
+        let recv_a = Arc::new(Mutex::new(Vec::new()));
+        let recv_b = Arc::new(Mutex::new(Vec::new()));
+        let providers: Vec<Box<dyn Provider>> = vec![
+            Box::new(MockProvider::with_responses(
+                ProviderKind::Anthropic,
+                vec![ok("first output")],
+                recv_a.clone(),
+            )),
+            Box::new(MockProvider::with_responses(
+                ProviderKind::OpenAI,
+                vec![ok("second output")],
+                recv_b.clone(),
+            )),
+        ];
+        let (tx, rx) = mpsc::unbounded_channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        run_relay(
+            "initial prompt",
+            providers,
+            1,
+            1,
+            None,
+            HashMap::new(),
+            &out,
+            tx,
+            cancel,
+        )
+        .await
+        .expect("run");
+
+        let a_msgs = recv_a.lock().expect("lock");
+        let b_msgs = recv_b.lock().expect("lock");
+        assert_eq!(a_msgs[0], "initial prompt");
+        assert!(b_msgs[0].contains("first output"));
+        assert!(out.run_dir().join("anthropic_iter1.md").exists());
+        assert!(out.run_dir().join("openai_iter1.md").exists());
+        let events = collect(rx);
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, ProgressEvent::IterationComplete { iteration: 1 })));
+        assert!(events.iter().any(|e| matches!(e, ProgressEvent::AllDone)));
+    }
+
+    #[tokio::test]
+    async fn run_relay_uses_file_instruction_for_cli_receivers() {
+        let dir = tempdir().expect("tempdir");
+        let out = OutputManager::new(&dir.path().to_path_buf(), None).expect("out");
+        let recv_a = Arc::new(Mutex::new(Vec::new()));
+        let recv_b = Arc::new(Mutex::new(Vec::new()));
+        let providers: Vec<Box<dyn Provider>> = vec![
+            Box::new(MockProvider::with_responses(
+                ProviderKind::Anthropic,
+                vec![ok("a out")],
+                recv_a,
+            )),
+            Box::new(MockProvider::with_responses(
+                ProviderKind::OpenAI,
+                vec![ok("b out")],
+                recv_b.clone(),
+            )),
+        ];
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut use_cli = HashMap::new();
+        use_cli.insert(ProviderKind::OpenAI, true);
+
+        run_relay("p", providers, 1, 1, None, use_cli, &out, tx, cancel)
+            .await
+            .expect("run");
+
+        let b_msgs = recv_b.lock().expect("lock");
+        assert!(b_msgs[0].contains("Read the previous agent output from file"));
+        assert!(b_msgs[0].contains("anthropic_iter1.md"));
+    }
+
+    #[tokio::test]
+    async fn run_relay_uses_initial_last_output_for_resumed_run() {
+        let dir = tempdir().expect("tempdir");
+        let out = OutputManager::new(&dir.path().to_path_buf(), None).expect("out");
+        let recv = Arc::new(Mutex::new(Vec::new()));
+        let providers: Vec<Box<dyn Provider>> = vec![Box::new(MockProvider::with_responses(
+            ProviderKind::Anthropic,
+            vec![ok("new")],
+            recv.clone(),
+        ))];
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        run_relay(
+            "ignored",
+            providers,
+            1,
+            2,
+            Some("resume seed".to_string()),
+            HashMap::new(),
+            &out,
+            tx,
+            cancel,
+        )
+        .await
+        .expect("run");
+
+        let msg = recv.lock().expect("lock")[0].clone();
+        assert!(msg.contains("resume seed"));
+        assert!(out.run_dir().join("anthropic_iter2.md").exists());
+    }
+
+    #[tokio::test]
+    async fn run_relay_error_stops_and_writes_error_log() {
+        let dir = tempdir().expect("tempdir");
+        let out = OutputManager::new(&dir.path().to_path_buf(), None).expect("out");
+        let recv = Arc::new(Mutex::new(Vec::new()));
+        let providers: Vec<Box<dyn Provider>> = vec![Box::new(MockProvider::with_responses(
+            ProviderKind::Anthropic,
+            vec![Err(AppError::Provider {
+                provider: "mock".to_string(),
+                message: "bad".to_string(),
+            })],
+            recv,
+        ))];
+        let (tx, rx) = mpsc::unbounded_channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        run_relay("p", providers, 2, 1, None, HashMap::new(), &out, tx, cancel)
+            .await
+            .expect("run");
+
+        let log = std::fs::read_to_string(out.run_dir().join("_errors.log")).expect("log");
+        assert!(log.contains("iter1"));
+        let events = collect(rx);
+        assert!(events.iter().any(|e| matches!(e, ProgressEvent::AgentError { .. })));
+        assert!(events.iter().any(|e| matches!(e, ProgressEvent::AllDone)));
+    }
+
+    #[tokio::test]
+    async fn run_relay_cancel_before_iteration_sends_all_done() {
+        let dir = tempdir().expect("tempdir");
+        let out = OutputManager::new(&dir.path().to_path_buf(), None).expect("out");
+        let recv = Arc::new(Mutex::new(Vec::new()));
+        let providers: Vec<Box<dyn Provider>> = vec![Box::new(MockProvider::with_responses(
+            ProviderKind::Anthropic,
+            vec![ok("x")],
+            recv.clone(),
+        ))];
+        let (tx, rx) = mpsc::unbounded_channel();
+        let cancel = Arc::new(AtomicBool::new(true));
+
+        run_relay("p", providers, 1, 1, None, HashMap::new(), &out, tx, cancel)
+            .await
+            .expect("run");
+
+        assert!(recv.lock().expect("lock").is_empty());
+        let events = collect(rx);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], ProgressEvent::AllDone));
+    }
+}

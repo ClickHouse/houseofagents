@@ -1688,21 +1688,23 @@ fn run_dir_matches_mode_and_agents(
         return false;
     };
 
-    if let Some(stored_mode) = value.get("mode").and_then(|v| v.as_str()) {
-        if stored_mode != mode.as_str() {
-            return false;
-        }
+    let Some(stored_mode) = value.get("mode").and_then(|v| v.as_str()) else {
+        return false;
+    };
+    if stored_mode != mode.as_str() {
+        return false;
     }
 
-    if let Some(stored_agents) = value.get("agents").and_then(|v| v.as_array()) {
-        let stored: std::collections::HashSet<String> = stored_agents
-            .iter()
-            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-            .collect();
-        for kind in agents {
-            if !stored.contains(kind.config_key()) {
-                return false;
-            }
+    let Some(stored_agents) = value.get("agents").and_then(|v| v.as_array()) else {
+        return false;
+    };
+    let stored: std::collections::HashSet<String> = stored_agents
+        .iter()
+        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+        .collect();
+    for kind in agents {
+        if !stored.contains(kind.config_key()) {
+            return false;
         }
     }
 
@@ -1722,12 +1724,12 @@ fn parse_agent_iteration_filename(name: &str, agent_key: &str) -> Option<u32> {
 }
 
 fn parse_iteration_from_filename(name: &str) -> Option<u32> {
-    if !name.ends_with(".md") {
-        return None;
+    for kind in ProviderKind::all() {
+        if let Some(iter) = parse_agent_iteration_filename(name, kind.config_key()) {
+            return Some(iter);
+        }
     }
-    let (prefix, _ext) = name.rsplit_once('.')?;
-    let (_, iter_part) = prefix.rsplit_once("_iter")?;
-    iter_part.parse::<u32>().ok()
+    None
 }
 
 fn start_consolidation(app: &mut App) {
@@ -2196,5 +2198,554 @@ fn update_preview(app: &mut App) {
             std::fs::read_to_string(path).unwrap_or_else(|e| format!("Error: {e}"));
     } else {
         app.result_preview = String::new();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AppConfig;
+    use crate::execution::ProgressEvent;
+    use std::collections::HashMap;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use tempfile::tempdir;
+
+    fn test_config() -> AppConfig {
+        AppConfig {
+            output_dir: "/tmp".to_string(),
+            default_max_tokens: 4096,
+            max_history_messages: 50,
+            http_timeout_seconds: 120,
+            model_fetch_timeout_seconds: 30,
+            cli_timeout_seconds: 300,
+            diagnostic_provider: None,
+            providers: HashMap::new(),
+            diagnostics: HashMap::new(),
+        }
+    }
+
+    fn test_app() -> App {
+        App::new(test_config())
+    }
+
+    fn write_session_toml(run_dir: &Path, mode: &str, agents: &[&str]) {
+        let agent_values = agents
+            .iter()
+            .map(|a| format!("\"{a}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        fs::write(
+            run_dir.join("session.toml"),
+            format!("mode = \"{mode}\"\nagents = [{agent_values}]\n"),
+        )
+        .unwrap();
+    }
+
+    fn write_agent_iter(run_dir: &Path, agent_key: &str, iter: u32) {
+        fs::write(
+            run_dir.join(format!("{agent_key}_iter{iter}.md")),
+            format!("{agent_key} {iter}"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn parse_agent_iteration_valid() {
+        assert_eq!(
+            parse_agent_iteration_filename("anthropic_iter3.md", "anthropic"),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn parse_agent_iteration_wrong_agent() {
+        assert_eq!(
+            parse_agent_iteration_filename("openai_iter3.md", "anthropic"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_agent_iteration_not_md() {
+        assert_eq!(
+            parse_agent_iteration_filename("anthropic_iter3.txt", "anthropic"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_agent_iteration_no_number() {
+        assert_eq!(
+            parse_agent_iteration_filename("anthropic_iter.md", "anthropic"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_iteration_from_filename_valid() {
+        assert_eq!(parse_iteration_from_filename("openai_iter5.md"), Some(5));
+    }
+
+    #[test]
+    fn parse_iteration_from_filename_consolidated() {
+        assert_eq!(parse_iteration_from_filename("consolidated_anthropic.md"), None);
+    }
+
+    #[test]
+    fn parse_iteration_from_filename_non_md() {
+        assert_eq!(parse_iteration_from_filename("session.toml"), None);
+    }
+
+    #[test]
+    fn parse_iteration_from_filename_rejects_non_agent_files_with_iter_suffix() {
+        assert_eq!(parse_iteration_from_filename("notes_iter42.md"), None);
+    }
+
+    #[test]
+    fn find_last_iteration_multiple_files() {
+        let dir = tempdir().unwrap();
+        write_agent_iter(dir.path(), "anthropic", 1);
+        write_agent_iter(dir.path(), "openai", 3);
+        write_agent_iter(dir.path(), "gemini", 2);
+        fs::write(dir.path().join("notes_iter99.md"), "ignore").unwrap();
+
+        assert_eq!(find_last_iteration(dir.path()), Some(3));
+    }
+
+    #[test]
+    fn run_dir_matches_exact() {
+        let dir = tempdir().unwrap();
+        write_session_toml(dir.path(), "relay", &["anthropic", "openai"]);
+
+        assert!(run_dir_matches_mode_and_agents(
+            dir.path(),
+            ExecutionMode::Relay,
+            &[ProviderKind::Anthropic, ProviderKind::OpenAI]
+        ));
+    }
+
+    #[test]
+    fn run_dir_matches_wrong_mode() {
+        let dir = tempdir().unwrap();
+        write_session_toml(dir.path(), "swarm", &["anthropic", "openai"]);
+
+        assert!(!run_dir_matches_mode_and_agents(
+            dir.path(),
+            ExecutionMode::Relay,
+            &[ProviderKind::Anthropic, ProviderKind::OpenAI]
+        ));
+    }
+
+    #[test]
+    fn run_dir_matches_subset_agents() {
+        let dir = tempdir().unwrap();
+        write_session_toml(dir.path(), "relay", &["anthropic", "openai"]);
+
+        assert!(run_dir_matches_mode_and_agents(
+            dir.path(),
+            ExecutionMode::Relay,
+            &[ProviderKind::Anthropic]
+        ));
+    }
+
+    #[test]
+    fn run_dir_matches_missing_agent() {
+        let dir = tempdir().unwrap();
+        write_session_toml(dir.path(), "relay", &["anthropic"]);
+
+        assert!(!run_dir_matches_mode_and_agents(
+            dir.path(),
+            ExecutionMode::Relay,
+            &[ProviderKind::Anthropic, ProviderKind::Gemini]
+        ));
+    }
+
+    #[test]
+    fn run_dir_matches_no_session_toml() {
+        let dir = tempdir().unwrap();
+        assert!(!run_dir_matches_mode_and_agents(
+            dir.path(),
+            ExecutionMode::Relay,
+            &[ProviderKind::Anthropic]
+        ));
+    }
+
+    #[test]
+    fn run_dir_matches_mode_and_agents_missing_mode_field() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("session.toml"),
+            "agents = [\"anthropic\", \"openai\"]\n",
+        )
+        .unwrap();
+
+        assert!(!run_dir_matches_mode_and_agents(
+            dir.path(),
+            ExecutionMode::Relay,
+            &[ProviderKind::Anthropic, ProviderKind::OpenAI]
+        ));
+    }
+
+    #[test]
+    fn run_dir_matches_mode_and_agents_missing_agents_field() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("session.toml"), "mode = \"relay\"\n").unwrap();
+
+        assert!(!run_dir_matches_mode_and_agents(
+            dir.path(),
+            ExecutionMode::Relay,
+            &[ProviderKind::Anthropic, ProviderKind::OpenAI]
+        ));
+    }
+
+    #[test]
+    fn find_latest_compatible_run_ordering() {
+        let dir = tempdir().unwrap();
+
+        let run1 = dir.path().join("20260101_000000");
+        fs::create_dir_all(&run1).unwrap();
+        write_session_toml(&run1, "relay", &["anthropic", "openai"]);
+        write_agent_iter(&run1, "anthropic", 1);
+        write_agent_iter(&run1, "openai", 1);
+
+        let run2 = dir.path().join("20260201_000000");
+        fs::create_dir_all(&run2).unwrap();
+        write_session_toml(&run2, "relay", &["anthropic", "openai"]);
+        write_agent_iter(&run2, "anthropic", 1);
+        write_agent_iter(&run2, "openai", 1);
+
+        let run3 = dir.path().join("20260301_000000");
+        fs::create_dir_all(&run3).unwrap();
+        write_session_toml(&run3, "swarm", &["anthropic", "openai"]);
+        write_agent_iter(&run3, "anthropic", 1);
+        write_agent_iter(&run3, "openai", 1);
+
+        assert_eq!(
+            find_latest_compatible_run(
+                dir.path(),
+                ExecutionMode::Relay,
+                &[ProviderKind::Anthropic, ProviderKind::OpenAI]
+            ),
+            Some(run2)
+        );
+    }
+
+    #[test]
+    fn find_latest_compatible_run_none() {
+        let dir = tempdir().unwrap();
+        let run = dir.path().join("20260101_000000");
+        fs::create_dir_all(&run).unwrap();
+        write_session_toml(&run, "relay", &["anthropic", "openai"]);
+        write_agent_iter(&run, "anthropic", 1);
+
+        assert_eq!(
+            find_latest_compatible_run(
+                dir.path(),
+                ExecutionMode::Relay,
+                &[ProviderKind::Anthropic, ProviderKind::OpenAI]
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn find_latest_compatible_run_ignores_invalid_session_toml() {
+        let dir = tempdir().unwrap();
+
+        let good = dir.path().join("20260101_000000");
+        fs::create_dir_all(&good).unwrap();
+        write_session_toml(&good, "relay", &["anthropic", "openai"]);
+        write_agent_iter(&good, "anthropic", 1);
+        write_agent_iter(&good, "openai", 1);
+
+        let bad = dir.path().join("20260201_000000");
+        fs::create_dir_all(&bad).unwrap();
+        fs::write(bad.join("session.toml"), "mode = ").unwrap();
+        write_agent_iter(&bad, "anthropic", 1);
+        write_agent_iter(&bad, "openai", 1);
+
+        assert_eq!(
+            find_latest_compatible_run(
+                dir.path(),
+                ExecutionMode::Relay,
+                &[ProviderKind::Anthropic, ProviderKind::OpenAI]
+            ),
+            Some(good)
+        );
+    }
+
+    #[test]
+    fn find_last_complete_iteration_for_agents_returns_last_complete() {
+        let dir = tempdir().unwrap();
+        write_agent_iter(dir.path(), "anthropic", 1);
+        write_agent_iter(dir.path(), "openai", 1);
+        write_agent_iter(dir.path(), "anthropic", 2);
+
+        assert_eq!(
+            find_last_complete_iteration_for_agents(
+                dir.path(),
+                &[ProviderKind::Anthropic, ProviderKind::OpenAI]
+            ),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn find_last_complete_iteration_for_agents_none_complete() {
+        let dir = tempdir().unwrap();
+        write_agent_iter(dir.path(), "anthropic", 1);
+        write_agent_iter(dir.path(), "openai", 2);
+
+        assert_eq!(
+            find_last_complete_iteration_for_agents(
+                dir.path(),
+                &[ProviderKind::Anthropic, ProviderKind::OpenAI]
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn collect_report_files_excludes_prompt_and_errors() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("prompt.md"), "prompt").unwrap();
+        fs::write(dir.path().join("errors.md"), "errors").unwrap();
+        fs::write(dir.path().join("anthropic_iter1.md"), "report").unwrap();
+        fs::write(dir.path().join("session.toml"), "mode = \"relay\"").unwrap();
+
+        let files = collect_report_files(dir.path());
+        assert_eq!(files.len(), 1);
+        assert_eq!(
+            files[0].file_name().and_then(|n| n.to_str()),
+            Some("anthropic_iter1.md")
+        );
+    }
+
+    #[test]
+    fn collect_report_files_sorted() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("b.md"), "b").unwrap();
+        fs::write(dir.path().join("a.md"), "a").unwrap();
+        fs::write(dir.path().join("c.md"), "c").unwrap();
+
+        let files = collect_report_files(dir.path());
+        let names: Vec<String> = files
+            .iter()
+            .map(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(names, vec!["a.md", "b.md", "c.md"]);
+    }
+
+    #[test]
+    fn collect_report_files_empty_dir() {
+        let dir = tempdir().unwrap();
+        assert!(collect_report_files(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn collect_application_errors_deduplicates() {
+        let dir = tempdir().unwrap();
+        let mut app = test_app();
+        app.progress_events.push(ProgressEvent::AgentError {
+            kind: ProviderKind::Anthropic,
+            iteration: 1,
+            error: "boom".to_string(),
+            details: None,
+        });
+        app.progress_events.push(ProgressEvent::AgentError {
+            kind: ProviderKind::Anthropic,
+            iteration: 1,
+            error: "boom".to_string(),
+            details: None,
+        });
+        fs::write(dir.path().join("_errors.log"), "[Claude iter 1] boom\n").unwrap();
+
+        let errors = collect_application_errors(&app, dir.path());
+        assert_eq!(errors, vec!["[Claude iter 1] boom".to_string()]);
+    }
+
+    #[test]
+    fn collect_application_errors_merges_log_file() {
+        let dir = tempdir().unwrap();
+        let mut app = test_app();
+        app.progress_events.push(ProgressEvent::AgentError {
+            kind: ProviderKind::OpenAI,
+            iteration: 2,
+            error: "api failed".to_string(),
+            details: Some("rate limited".to_string()),
+        });
+        fs::write(dir.path().join("_errors.log"), "tool timeout\n\n").unwrap();
+
+        let errors = collect_application_errors(&app, dir.path());
+        assert_eq!(errors.len(), 2);
+        assert!(errors.iter().any(|e| e == "[Codex iter 2] rate limited"));
+        assert!(errors.iter().any(|e| e == "tool timeout"));
+    }
+
+    #[test]
+    fn collect_application_errors_empty_sources() {
+        let dir = tempdir().unwrap();
+        let app = test_app();
+        assert!(collect_application_errors(&app, dir.path()).is_empty());
+    }
+
+    #[test]
+    fn build_diagnostic_prompt_cli_mode() {
+        let dir = tempdir().unwrap();
+        let report = dir.path().join("anthropic_iter1.md");
+        fs::write(&report, "hidden content").unwrap();
+
+        let prompt = build_diagnostic_prompt(&[report], &[], true);
+        assert!(prompt.contains("Read each listed file from disk"));
+        assert!(!prompt.contains("hidden content"));
+    }
+
+    #[test]
+    fn build_diagnostic_prompt_api_mode() {
+        let dir = tempdir().unwrap();
+        let report = dir.path().join("anthropic_iter1.md");
+        fs::write(&report, "file body").unwrap();
+
+        let prompt = build_diagnostic_prompt(&[report], &[], false);
+        assert!(prompt.contains("=== BEGIN anthropic_iter1.md ==="));
+        assert!(prompt.contains("file body"));
+        assert!(prompt.contains("=== END anthropic_iter1.md ==="));
+    }
+
+    #[test]
+    fn build_diagnostic_prompt_no_report_files() {
+        let prompt = build_diagnostic_prompt(&[], &[], false);
+        assert!(prompt.contains("Reports to analyze:\n- none"));
+        assert!(!prompt.contains("Report contents:"));
+    }
+
+    #[test]
+    fn build_diagnostic_prompt_unreadable_file_in_api_mode() {
+        let missing = PathBuf::from("/tmp/does-not-exist-for-houseofagents-tests.md");
+        let prompt = build_diagnostic_prompt(&[missing], &[], false);
+        assert!(prompt.contains("Failed to read file:"));
+    }
+
+    #[test]
+    fn prev_char_boundary_ascii() {
+        assert_eq!(prev_char_boundary("hello", 3), 2);
+    }
+
+    #[test]
+    fn prev_char_boundary_multibyte() {
+        assert_eq!(prev_char_boundary("héllo", 3), 1);
+    }
+
+    #[test]
+    fn prev_char_boundary_at_zero() {
+        assert_eq!(prev_char_boundary("hello", 0), 0);
+    }
+
+    #[test]
+    fn next_char_boundary_ascii() {
+        assert_eq!(next_char_boundary("hello", 2), 3);
+    }
+
+    #[test]
+    fn next_char_boundary_at_end() {
+        assert_eq!(next_char_boundary("hello", 5), 5);
+    }
+
+    #[test]
+    fn next_char_boundary_multibyte() {
+        assert_eq!(next_char_boundary("café", 3), 5);
+    }
+
+    #[test]
+    fn word_move_left_skips_whitespace_then_word() {
+        let mut app = test_app();
+        app.prompt_text = "hello world".to_string();
+        app.prompt_cursor = app.prompt_text.len();
+
+        move_prompt_cursor_word_left(&mut app);
+        assert_eq!(app.prompt_cursor, 6);
+    }
+
+    #[test]
+    fn move_prompt_cursor_word_right_skips_whitespace_and_word() {
+        let mut app = test_app();
+        app.prompt_text = "hello   world  next".to_string();
+        app.prompt_cursor = 5;
+
+        move_prompt_cursor_word_right(&mut app);
+        assert_eq!(app.prompt_cursor, 13);
+    }
+
+    #[test]
+    fn delete_prompt_char_left_multibyte() {
+        let mut app = test_app();
+        app.prompt_text = "aé".to_string();
+        app.prompt_cursor = app.prompt_text.len();
+
+        delete_prompt_char_left(&mut app);
+        assert_eq!(app.prompt_text, "a");
+        assert_eq!(app.prompt_cursor, 1);
+    }
+
+    #[test]
+    fn delete_prompt_word_left_multibyte_boundary_safe() {
+        let mut app = test_app();
+        app.prompt_text = "hello café".to_string();
+        app.prompt_cursor = app.prompt_text.len();
+
+        delete_prompt_word_left(&mut app);
+        assert_eq!(app.prompt_text, "hello ");
+        assert_eq!(app.prompt_cursor, 6);
+    }
+
+    #[test]
+    fn sync_iterations_buf_empty() {
+        let mut app = test_app();
+        app.iterations_buf.clear();
+        sync_iterations_buf(&mut app);
+        assert_eq!(app.iterations, 1);
+        assert_eq!(app.iterations_buf, "1");
+    }
+
+    #[test]
+    fn sync_iterations_buf_valid() {
+        let mut app = test_app();
+        app.iterations_buf = "5".to_string();
+        sync_iterations_buf(&mut app);
+        assert_eq!(app.iterations, 5);
+        assert_eq!(app.iterations_buf, "5");
+    }
+
+    #[test]
+    fn sync_iterations_buf_over_99() {
+        let mut app = test_app();
+        app.iterations_buf = "150".to_string();
+        sync_iterations_buf(&mut app);
+        assert_eq!(app.iterations, 99);
+        assert_eq!(app.iterations_buf, "99");
+    }
+
+    #[test]
+    fn sync_iterations_buf_zero() {
+        let mut app = test_app();
+        app.iterations_buf = "0".to_string();
+        sync_iterations_buf(&mut app);
+        assert_eq!(app.iterations, 1);
+        assert_eq!(app.iterations_buf, "1");
+    }
+
+    #[test]
+    fn sync_iterations_buf_non_numeric() {
+        let mut app = test_app();
+        app.iterations_buf = "abc".to_string();
+        sync_iterations_buf(&mut app);
+        assert_eq!(app.iterations, 1);
+        assert_eq!(app.iterations_buf, "1");
     }
 }

@@ -913,3 +913,77 @@ fn diagnostic_provider_kind(app: &App) -> Option<ProviderKind> {
         .copied()
         .find(|k| app.config.diagnostic_provider.as_deref() == Some(k.config_key()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AppConfig;
+    use std::collections::HashMap;
+
+    fn app_with_diagnostic(diag: Option<&str>) -> App {
+        App::new(AppConfig {
+            output_dir: "/tmp".to_string(),
+            default_max_tokens: 4096,
+            max_history_messages: 50,
+            http_timeout_seconds: 120,
+            model_fetch_timeout_seconds: 30,
+            cli_timeout_seconds: 300,
+            diagnostic_provider: diag.map(|s| s.to_string()),
+            providers: HashMap::new(),
+            diagnostics: HashMap::new(),
+        })
+    }
+
+    #[test]
+    fn help_lines_contains_mode_headers() {
+        let joined = help_lines()
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("Relay"));
+        assert!(joined.contains("Swarm"));
+        assert!(joined.contains("Solo"));
+    }
+
+    #[test]
+    fn cli_dependent_style_for_cli_mode_is_default() {
+        let style = cli_dependent_style(true);
+        assert_eq!(style.fg, None);
+    }
+
+    #[test]
+    fn cli_dependent_style_for_api_mode_is_dimmed() {
+        let style = cli_dependent_style(false);
+        assert_eq!(style.fg, Some(Color::DarkGray));
+    }
+
+    #[test]
+    fn mask_key_short_values() {
+        assert_eq!(mask_key("abcd"), "****");
+    }
+
+    #[test]
+    fn mask_key_long_values() {
+        assert_eq!(mask_key("abcdefghijkl"), "abcd...ijkl");
+    }
+
+    #[test]
+    fn is_diagnostic_provider_true_when_matching() {
+        let app = app_with_diagnostic(Some("openai"));
+        assert!(is_diagnostic_provider(&app, ProviderKind::OpenAI));
+        assert!(!is_diagnostic_provider(&app, ProviderKind::Anthropic));
+    }
+
+    #[test]
+    fn diagnostic_provider_kind_matches_config_key() {
+        let app = app_with_diagnostic(Some("gemini"));
+        assert_eq!(diagnostic_provider_kind(&app), Some(ProviderKind::Gemini));
+    }
+
+    #[test]
+    fn diagnostic_provider_kind_none_when_missing() {
+        let app = app_with_diagnostic(None);
+        assert_eq!(diagnostic_provider_kind(&app), None);
+    }
+}

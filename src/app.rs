@@ -316,3 +316,272 @@ impl App {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ProviderConfig;
+
+    fn provider_cfg(api_key: &str, use_cli: bool) -> ProviderConfig {
+        ProviderConfig {
+            api_key: api_key.to_string(),
+            model: "m".to_string(),
+            reasoning_effort: Some("medium".to_string()),
+            thinking_effort: Some("medium".to_string()),
+            use_cli,
+            extra_cli_args: String::new(),
+        }
+    }
+
+    fn base_config() -> AppConfig {
+        let mut providers = HashMap::new();
+        providers.insert(
+            ProviderKind::Anthropic.config_key().to_string(),
+            provider_cfg("k1", false),
+        );
+        providers.insert(
+            ProviderKind::OpenAI.config_key().to_string(),
+            provider_cfg("k2", false),
+        );
+        providers.insert(
+            ProviderKind::Gemini.config_key().to_string(),
+            provider_cfg("", true),
+        );
+
+        let mut diagnostics = HashMap::new();
+        diagnostics.insert(
+            ProviderKind::OpenAI.config_key().to_string(),
+            provider_cfg("diag", false),
+        );
+
+        AppConfig {
+            output_dir: "/tmp/out".to_string(),
+            default_max_tokens: 4096,
+            max_history_messages: 50,
+            http_timeout_seconds: 120,
+            model_fetch_timeout_seconds: 30,
+            cli_timeout_seconds: 300,
+            diagnostic_provider: Some("openai".to_string()),
+            providers,
+            diagnostics,
+        }
+    }
+
+    fn app_with_known_cli() -> App {
+        let mut app = App::new(base_config());
+        app.cli_available.insert(ProviderKind::Anthropic, true);
+        app.cli_available.insert(ProviderKind::OpenAI, false);
+        app.cli_available.insert(ProviderKind::Gemini, true);
+        app
+    }
+
+    #[test]
+    fn app_new_initial_state() {
+        let app = App::new(base_config());
+        assert_eq!(app.screen, Screen::Home);
+        assert!(!app.should_quit);
+        assert!(app.selected_agents.is_empty());
+        assert_eq!(app.selected_mode, crate::execution::ExecutionMode::Solo);
+        assert_eq!(app.iterations, 1);
+        assert_eq!(app.iterations_buf, "1");
+        assert!(!app.is_running);
+    }
+
+    #[test]
+    fn effective_provider_config_prefers_session_override() {
+        let mut app = app_with_known_cli();
+        app.session_overrides.insert(
+            ProviderKind::OpenAI.config_key().to_string(),
+            provider_cfg("override", true),
+        );
+        let cfg = app
+            .effective_provider_config(ProviderKind::OpenAI)
+            .expect("config");
+        assert_eq!(cfg.api_key, "override");
+        assert!(cfg.use_cli);
+    }
+
+    #[test]
+    fn effective_provider_config_falls_back_to_global() {
+        let app = app_with_known_cli();
+        let cfg = app
+            .effective_provider_config(ProviderKind::Anthropic)
+            .expect("config");
+        assert_eq!(cfg.api_key, "k1");
+        assert!(!cfg.use_cli);
+    }
+
+    #[test]
+    fn effective_diagnostic_config_prefers_session_override() {
+        let mut app = app_with_known_cli();
+        app.session_diagnostic_overrides.insert(
+            ProviderKind::OpenAI.config_key().to_string(),
+            provider_cfg("diag-override", true),
+        );
+        let cfg = app
+            .effective_diagnostic_config(ProviderKind::OpenAI)
+            .expect("config");
+        assert_eq!(cfg.api_key, "diag-override");
+        assert!(cfg.use_cli);
+    }
+
+    #[test]
+    fn effective_diagnostic_config_falls_back_to_global() {
+        let app = app_with_known_cli();
+        let cfg = app
+            .effective_diagnostic_config(ProviderKind::OpenAI)
+            .expect("config");
+        assert_eq!(cfg.api_key, "diag");
+    }
+
+    #[test]
+    fn effective_timeout_values_use_global_defaults() {
+        let app = app_with_known_cli();
+        assert_eq!(app.effective_http_timeout_seconds(), 120);
+        assert_eq!(app.effective_model_fetch_timeout_seconds(), 30);
+        assert_eq!(app.effective_cli_timeout_seconds(), 300);
+    }
+
+    #[test]
+    fn effective_timeout_values_use_session_overrides() {
+        let mut app = app_with_known_cli();
+        app.session_http_timeout_seconds = Some(9);
+        app.session_model_fetch_timeout_seconds = Some(8);
+        app.session_cli_timeout_seconds = Some(7);
+        assert_eq!(app.effective_http_timeout_seconds(), 9);
+        assert_eq!(app.effective_model_fetch_timeout_seconds(), 8);
+        assert_eq!(app.effective_cli_timeout_seconds(), 7);
+    }
+
+    #[test]
+    fn toggle_agent_adds_and_removes() {
+        let mut app = app_with_known_cli();
+        app.toggle_agent(ProviderKind::Anthropic);
+        assert_eq!(app.selected_agents, vec![ProviderKind::Anthropic]);
+        app.toggle_agent(ProviderKind::Anthropic);
+        assert!(app.selected_agents.is_empty());
+    }
+
+    #[test]
+    fn move_order_up_without_grabbed_only_moves_cursor() {
+        let mut app = app_with_known_cli();
+        app.selected_agents = vec![
+            ProviderKind::Anthropic,
+            ProviderKind::OpenAI,
+            ProviderKind::Gemini,
+        ];
+        app.order_cursor = 2;
+        app.move_order_up();
+        assert_eq!(app.order_cursor, 1);
+        assert_eq!(
+            app.selected_agents,
+            vec![
+                ProviderKind::Anthropic,
+                ProviderKind::OpenAI,
+                ProviderKind::Gemini
+            ]
+        );
+    }
+
+    #[test]
+    fn move_order_up_with_grabbed_swaps_agents() {
+        let mut app = app_with_known_cli();
+        app.selected_agents = vec![
+            ProviderKind::Anthropic,
+            ProviderKind::OpenAI,
+            ProviderKind::Gemini,
+        ];
+        app.order_cursor = 2;
+        app.order_grabbed = Some(2);
+        app.move_order_up();
+        assert_eq!(
+            app.selected_agents,
+            vec![
+                ProviderKind::Anthropic,
+                ProviderKind::Gemini,
+                ProviderKind::OpenAI
+            ]
+        );
+        assert_eq!(app.order_cursor, 1);
+        assert_eq!(app.order_grabbed, Some(1));
+    }
+
+    #[test]
+    fn move_order_down_without_grabbed_only_moves_cursor() {
+        let mut app = app_with_known_cli();
+        app.selected_agents = vec![
+            ProviderKind::Anthropic,
+            ProviderKind::OpenAI,
+            ProviderKind::Gemini,
+        ];
+        app.order_cursor = 0;
+        app.move_order_down();
+        assert_eq!(app.order_cursor, 1);
+        assert_eq!(
+            app.selected_agents,
+            vec![
+                ProviderKind::Anthropic,
+                ProviderKind::OpenAI,
+                ProviderKind::Gemini
+            ]
+        );
+    }
+
+    #[test]
+    fn move_order_down_with_grabbed_swaps_agents() {
+        let mut app = app_with_known_cli();
+        app.selected_agents = vec![
+            ProviderKind::Anthropic,
+            ProviderKind::OpenAI,
+            ProviderKind::Gemini,
+        ];
+        app.order_cursor = 0;
+        app.order_grabbed = Some(0);
+        app.move_order_down();
+        assert_eq!(
+            app.selected_agents,
+            vec![
+                ProviderKind::OpenAI,
+                ProviderKind::Anthropic,
+                ProviderKind::Gemini
+            ]
+        );
+        assert_eq!(app.order_cursor, 1);
+        assert_eq!(app.order_grabbed, Some(1));
+    }
+
+    #[test]
+    fn available_providers_api_requires_key() {
+        let mut app = app_with_known_cli();
+        app.session_overrides.insert(
+            ProviderKind::Anthropic.config_key().to_string(),
+            provider_cfg("", false),
+        );
+        let map: HashMap<ProviderKind, bool> = app.available_providers().into_iter().collect();
+        assert_eq!(map.get(&ProviderKind::Anthropic), Some(&false));
+    }
+
+    #[test]
+    fn available_providers_cli_requires_installed_cli() {
+        let mut app = app_with_known_cli();
+        app.session_overrides.insert(
+            ProviderKind::OpenAI.config_key().to_string(),
+            provider_cfg("", true),
+        );
+        app.cli_available.insert(ProviderKind::OpenAI, false);
+        let map: HashMap<ProviderKind, bool> = app.available_providers().into_iter().collect();
+        assert_eq!(map.get(&ProviderKind::OpenAI), Some(&false));
+    }
+
+    #[test]
+    fn available_providers_cli_available_when_installed() {
+        let mut app = app_with_known_cli();
+        app.session_overrides.insert(
+            ProviderKind::Gemini.config_key().to_string(),
+            provider_cfg("", true),
+        );
+        app.cli_available.insert(ProviderKind::Gemini, true);
+        let map: HashMap<ProviderKind, bool> = app.available_providers().into_iter().collect();
+        assert_eq!(map.get(&ProviderKind::Gemini), Some(&true));
+    }
+}

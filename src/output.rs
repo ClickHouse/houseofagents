@@ -144,3 +144,155 @@ impl OutputManager {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn sanitize_session_name_replaces_invalid_chars() {
+        assert_eq!(
+            OutputManager::sanitize_session_name("hello world/test:1"),
+            "hello_world_test_1"
+        );
+    }
+
+    #[test]
+    fn sanitize_session_name_keeps_alnum_dash_underscore() {
+        assert_eq!(
+            OutputManager::sanitize_session_name("abc-XYZ_123"),
+            "abc-XYZ_123"
+        );
+    }
+
+    #[test]
+    fn new_creates_run_dir_without_session_name() {
+        let base = tempdir().expect("tempdir");
+        let mgr = OutputManager::new(&base.path().to_path_buf(), None).expect("new");
+        assert!(mgr.run_dir().exists());
+        assert!(mgr.run_dir().starts_with(base.path()));
+    }
+
+    #[test]
+    fn new_creates_run_dir_with_sanitized_session_name() {
+        let base = tempdir().expect("tempdir");
+        let mgr = OutputManager::new(&base.path().to_path_buf(), Some("my session")).expect("new");
+        let name = mgr
+            .run_dir()
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        assert!(name.ends_with("_my_session"));
+    }
+
+    #[test]
+    fn from_existing_accepts_directory() {
+        let base = tempdir().expect("tempdir");
+        let dir = base.path().join("run");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let mgr = OutputManager::from_existing(dir.clone()).expect("from_existing");
+        assert_eq!(mgr.run_dir(), &dir);
+    }
+
+    #[test]
+    fn from_existing_rejects_missing_directory() {
+        let base = tempdir().expect("tempdir");
+        let dir = base.path().join("missing");
+        let err = match OutputManager::from_existing(dir) {
+            Ok(_) => panic!("should fail"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("Run directory does not exist"));
+    }
+
+    #[test]
+    fn find_latest_session_run_returns_none_when_base_missing() {
+        let base = tempdir().expect("tempdir");
+        let missing = base.path().join("none");
+        let found = OutputManager::find_latest_session_run(&missing, "abc").expect("find");
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn find_latest_session_run_picks_lexicographically_latest_match() {
+        let base = tempdir().expect("tempdir");
+        let p1 = base.path().join("20260101_000000_111_alpha");
+        let p2 = base.path().join("20260201_000000_222_alpha");
+        let p3 = base.path().join("20260301_000000_333_beta");
+        std::fs::create_dir_all(&p1).expect("mkdir");
+        std::fs::create_dir_all(&p2).expect("mkdir");
+        std::fs::create_dir_all(&p3).expect("mkdir");
+
+        let found = OutputManager::find_latest_session_run(base.path(), "alpha")
+            .expect("find")
+            .expect("some");
+        assert_eq!(found, p2);
+    }
+
+    #[test]
+    fn write_prompt_creates_prompt_file() {
+        let base = tempdir().expect("tempdir");
+        let mgr = OutputManager::new(&base.path().to_path_buf(), Some("s")).expect("new");
+        mgr.write_prompt("hello prompt").expect("write");
+        let content = std::fs::read_to_string(mgr.run_dir().join("prompt.md")).expect("read");
+        assert_eq!(content, "hello prompt");
+    }
+
+    #[test]
+    fn write_session_info_writes_expected_fields() {
+        let base = tempdir().expect("tempdir");
+        let mgr = OutputManager::new(&base.path().to_path_buf(), Some("sess")).expect("new");
+        mgr.write_session_info(
+            &ExecutionMode::Relay,
+            &[ProviderKind::Anthropic, ProviderKind::OpenAI],
+            3,
+            Some("sess"),
+            &[
+                (ProviderKind::Anthropic, "claude".to_string()),
+                (ProviderKind::OpenAI, "gpt".to_string()),
+            ],
+        )
+        .expect("write");
+
+        let content = std::fs::read_to_string(mgr.run_dir().join("session.toml")).expect("read");
+        let value = content.parse::<Value>().expect("toml parse");
+        assert_eq!(value["name"].as_str(), Some("sess"));
+        assert_eq!(value["mode"].as_str(), Some("relay"));
+        assert_eq!(value["iterations"].as_integer(), Some(3));
+        let agents = value["agents"].as_array().expect("agents");
+        assert_eq!(agents.len(), 2);
+        assert!(agents
+            .iter()
+            .any(|v| v.as_str() == Some(ProviderKind::Anthropic.config_key())));
+        assert!(agents
+            .iter()
+            .any(|v| v.as_str() == Some(ProviderKind::OpenAI.config_key())));
+        assert_eq!(value["models"]["anthropic"].as_str(), Some("claude"));
+        assert_eq!(value["models"]["openai"].as_str(), Some("gpt"));
+    }
+
+    #[test]
+    fn write_agent_output_writes_file_with_expected_name() {
+        let base = tempdir().expect("tempdir");
+        let mgr = OutputManager::new(&base.path().to_path_buf(), None).expect("new");
+        let path = mgr
+            .write_agent_output(ProviderKind::Gemini, 7, "answer")
+            .expect("write");
+        assert!(path.ends_with("gemini_iter7.md"));
+        let content = std::fs::read_to_string(path).expect("read");
+        assert_eq!(content, "answer");
+    }
+
+    #[test]
+    fn append_error_appends_multiple_lines() {
+        let base = tempdir().expect("tempdir");
+        let mgr = OutputManager::new(&base.path().to_path_buf(), None).expect("new");
+        mgr.append_error("one").expect("append");
+        mgr.append_error("two").expect("append");
+        let content = std::fs::read_to_string(mgr.run_dir().join("_errors.log")).expect("read");
+        assert!(content.contains("one"));
+        assert!(content.contains("two"));
+        assert_eq!(content.lines().count(), 2);
+    }
+}

@@ -47,3 +47,18 @@ impl EventHandler {
         self.rx.recv().await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn event_handler_emits_event() {
+        let mut handler = EventHandler::new(Duration::from_millis(5));
+        let evt = tokio::time::timeout(Duration::from_millis(200), handler.next())
+            .await
+            .expect("timeout waiting for event");
+        assert!(evt.is_some());
+    }
+}

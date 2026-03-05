@@ -161,3 +161,158 @@ pub async fn list_models(
         ProviderKind::Gemini => gemini::list_models(api_key, client).await,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ProviderConfig;
+
+    fn cfg(use_cli: bool) -> ProviderConfig {
+        ProviderConfig {
+            api_key: "k".to_string(),
+            model: "m".to_string(),
+            reasoning_effort: Some("medium".to_string()),
+            thinking_effort: Some("low".to_string()),
+            use_cli,
+            extra_cli_args: "--x".to_string(),
+        }
+    }
+
+    #[test]
+    fn provider_kind_display_names() {
+        assert_eq!(ProviderKind::Anthropic.display_name(), "Claude");
+        assert_eq!(ProviderKind::OpenAI.display_name(), "Codex");
+        assert_eq!(ProviderKind::Gemini.display_name(), "Gemini");
+    }
+
+    #[test]
+    fn provider_kind_config_keys() {
+        assert_eq!(ProviderKind::Anthropic.config_key(), "anthropic");
+        assert_eq!(ProviderKind::OpenAI.config_key(), "openai");
+        assert_eq!(ProviderKind::Gemini.config_key(), "gemini");
+    }
+
+    #[test]
+    fn provider_kind_all_has_three_unique() {
+        let all = ProviderKind::all();
+        assert_eq!(all.len(), 3);
+        assert!(all.contains(&ProviderKind::Anthropic));
+        assert!(all.contains(&ProviderKind::OpenAI));
+        assert!(all.contains(&ProviderKind::Gemini));
+    }
+
+    #[test]
+    fn provider_kind_display_trait() {
+        assert_eq!(ProviderKind::Anthropic.to_string(), "Claude");
+        assert_eq!(ProviderKind::OpenAI.to_string(), "Codex");
+    }
+
+    #[test]
+    fn effort_to_budget_low_medium_high() {
+        assert_eq!(effort_to_budget("low"), 4096);
+        assert_eq!(effort_to_budget("medium"), 8192);
+        assert_eq!(effort_to_budget("high"), 16384);
+    }
+
+    #[test]
+    fn effort_to_budget_unknown_defaults_to_high_budget() {
+        assert_eq!(effort_to_budget("unexpected"), 16384);
+    }
+
+    #[test]
+    fn prune_history_noop_when_below_min_threshold() {
+        let mut history = vec![
+            Message {
+                role: Role::User,
+                content: "u1".to_string(),
+            },
+            Message {
+                role: Role::Assistant,
+                content: "a1".to_string(),
+            },
+            Message {
+                role: Role::User,
+                content: "u2".to_string(),
+            },
+            Message {
+                role: Role::Assistant,
+                content: "a2".to_string(),
+            },
+            Message {
+                role: Role::User,
+                content: "u3".to_string(),
+            },
+        ];
+        prune_history(&mut history, 3);
+        assert_eq!(history.len(), 5);
+    }
+
+    #[test]
+    fn prune_history_noop_when_len_within_max() {
+        let mut history = vec![
+            Message {
+                role: Role::User,
+                content: "u1".to_string(),
+            },
+            Message {
+                role: Role::Assistant,
+                content: "a1".to_string(),
+            },
+            Message {
+                role: Role::User,
+                content: "u2".to_string(),
+            },
+        ];
+        prune_history(&mut history, 10);
+        assert_eq!(history.len(), 3);
+    }
+
+    #[test]
+    fn prune_history_keeps_first_two_and_last_n() {
+        let mut history: Vec<Message> = (0..10)
+            .map(|i| Message {
+                role: if i % 2 == 0 { Role::User } else { Role::Assistant },
+                content: format!("m{i}"),
+            })
+            .collect();
+
+        prune_history(&mut history, 6);
+        let contents: Vec<String> = history.into_iter().map(|m| m.content).collect();
+        assert_eq!(contents, vec!["m0", "m1", "m6", "m7", "m8", "m9"]);
+    }
+
+    #[test]
+    fn create_provider_cli_returns_expected_kind() {
+        let client = reqwest::Client::new();
+        for kind in ProviderKind::all() {
+            let p = create_provider(*kind, &cfg(true), client.clone(), 100, 20, 5);
+            assert_eq!(p.kind(), *kind);
+        }
+    }
+
+    #[test]
+    fn create_provider_api_returns_expected_kind() {
+        let client = reqwest::Client::new();
+        for kind in ProviderKind::all() {
+            let p = create_provider(*kind, &cfg(false), client.clone(), 100, 20, 5);
+            assert_eq!(p.kind(), *kind);
+        }
+    }
+
+    #[tokio::test]
+    async fn list_models_empty_key_returns_user_friendly_error() {
+        let client = reqwest::Client::new();
+        let err = list_models(ProviderKind::OpenAI, "", &client)
+            .await
+            .expect_err("should reject empty key");
+        assert!(err.contains("Add API key"));
+    }
+
+    #[test]
+    fn role_serialization_is_lowercase() {
+        let user = serde_json::to_string(&Role::User).expect("serialize");
+        let assistant = serde_json::to_string(&Role::Assistant).expect("serialize");
+        assert_eq!(user, "\"user\"");
+        assert_eq!(assistant, "\"assistant\"");
+    }
+}

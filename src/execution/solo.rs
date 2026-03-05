@@ -118,3 +118,195 @@ async fn solo_agent(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::{CompletionResponse, ProviderKind};
+    use async_trait::async_trait;
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+    use tempfile::tempdir;
+
+    struct MockProvider {
+        kind: ProviderKind,
+        responses: VecDeque<Result<CompletionResponse, AppError>>,
+        received: Arc<Mutex<Vec<String>>>,
+        live_tx: Option<mpsc::UnboundedSender<String>>,
+    }
+
+    impl MockProvider {
+        fn ok(kind: ProviderKind, content: &str, received: Arc<Mutex<Vec<String>>>) -> Self {
+            Self {
+                kind,
+                responses: VecDeque::from(vec![Ok(CompletionResponse {
+                    content: content.to_string(),
+                    debug_logs: vec!["dbg".to_string()],
+                })]),
+                received,
+                live_tx: None,
+            }
+        }
+
+        fn err(kind: ProviderKind, received: Arc<Mutex<Vec<String>>>) -> Self {
+            Self {
+                kind,
+                responses: VecDeque::from(vec![Err(AppError::Provider {
+                    provider: "mock".to_string(),
+                    message: "boom".to_string(),
+                })]),
+                received,
+                live_tx: None,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for MockProvider {
+        fn kind(&self) -> ProviderKind {
+            self.kind
+        }
+
+        fn set_live_log_sender(&mut self, tx: Option<mpsc::UnboundedSender<String>>) {
+            self.live_tx = tx;
+        }
+
+        async fn send(&mut self, message: &str) -> Result<CompletionResponse, AppError> {
+            self.received
+                .lock()
+                .expect("lock")
+                .push(message.to_string());
+            if let Some(tx) = self.live_tx.as_ref() {
+                let _ = tx.send("live".to_string());
+            }
+            self.responses
+                .pop_front()
+                .unwrap_or_else(|| {
+                    Ok(CompletionResponse {
+                        content: String::new(),
+                        debug_logs: Vec::new(),
+                    })
+                })
+        }
+    }
+
+    fn collect_events(mut rx: mpsc::UnboundedReceiver<ProgressEvent>) -> Vec<ProgressEvent> {
+        let mut out = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            out.push(ev);
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn run_solo_success_writes_outputs_and_all_done() {
+        let dir = tempdir().expect("tempdir");
+        let out = OutputManager::new(&dir.path().to_path_buf(), Some("solo")).expect("out");
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let providers: Vec<Box<dyn Provider>> = vec![
+            Box::new(MockProvider::ok(
+                ProviderKind::Anthropic,
+                "a1",
+                received.clone(),
+            )),
+            Box::new(MockProvider::ok(ProviderKind::OpenAI, "o1", received.clone())),
+        ];
+        let (tx, rx) = mpsc::unbounded_channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        run_solo("prompt", providers, &out, tx, cancel)
+            .await
+            .expect("run");
+
+        assert_eq!(received.lock().expect("lock").len(), 2);
+        assert!(out.run_dir().join("anthropic_iter1.md").exists());
+        assert!(out.run_dir().join("openai_iter1.md").exists());
+
+        let events = collect_events(rx);
+        assert!(events.iter().any(|e| matches!(e, ProgressEvent::AllDone)));
+        assert!(events.iter().any(
+            |e| matches!(e, ProgressEvent::AgentStarted { kind: ProviderKind::Anthropic, .. })
+        ));
+        assert!(events.iter().any(
+            |e| matches!(e, ProgressEvent::AgentFinished { kind: ProviderKind::OpenAI, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn run_solo_provider_error_emits_agent_error() {
+        let dir = tempdir().expect("tempdir");
+        let out = OutputManager::new(&dir.path().to_path_buf(), None).expect("out");
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let providers: Vec<Box<dyn Provider>> = vec![Box::new(MockProvider::err(
+            ProviderKind::Gemini,
+            received,
+        ))];
+        let (tx, rx) = mpsc::unbounded_channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        run_solo("prompt", providers, &out, tx, cancel)
+            .await
+            .expect("run");
+
+        let events = collect_events(rx);
+        assert!(events.iter().any(|e| {
+            matches!(
+                e,
+                ProgressEvent::AgentError {
+                    kind: ProviderKind::Gemini,
+                    ..
+                }
+            )
+        }));
+        assert!(events.iter().any(|e| matches!(e, ProgressEvent::AllDone)));
+    }
+
+    #[tokio::test]
+    async fn run_solo_cancelled_before_start_skips_agent_work() {
+        let dir = tempdir().expect("tempdir");
+        let out = OutputManager::new(&dir.path().to_path_buf(), None).expect("out");
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let providers: Vec<Box<dyn Provider>> = vec![Box::new(MockProvider::ok(
+            ProviderKind::Anthropic,
+            "unused",
+            received.clone(),
+        ))];
+        let (tx, rx) = mpsc::unbounded_channel();
+        let cancel = Arc::new(AtomicBool::new(true));
+
+        run_solo("prompt", providers, &out, tx, cancel)
+            .await
+            .expect("run");
+
+        assert!(received.lock().expect("lock").is_empty());
+        assert!(!out.run_dir().join("anthropic_iter1.md").exists());
+        let events = collect_events(rx);
+        assert!(events.iter().any(|e| matches!(e, ProgressEvent::AllDone)));
+    }
+
+    #[tokio::test]
+    async fn run_solo_emits_live_cli_log_lines() {
+        let dir = tempdir().expect("tempdir");
+        let out = OutputManager::new(&dir.path().to_path_buf(), None).expect("out");
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let providers: Vec<Box<dyn Provider>> = vec![Box::new(MockProvider::ok(
+            ProviderKind::Anthropic,
+            "ok",
+            received,
+        ))];
+        let (tx, rx) = mpsc::unbounded_channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        run_solo("prompt", providers, &out, tx, cancel)
+            .await
+            .expect("run");
+
+        let events = collect_events(rx);
+        assert!(events.iter().any(|e| {
+            matches!(
+                e,
+                ProgressEvent::AgentLog { message, .. } if message.contains("CLI live")
+            )
+        }));
+    }
+}

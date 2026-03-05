@@ -264,3 +264,44 @@ fn prompt_cursor_layout(
     let scroll = row.saturating_sub(height - 1) as u16;
     (scroll, col, row)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::prompt_cursor_layout;
+
+    #[test]
+    fn prompt_cursor_layout_zero_size_returns_origin() {
+        assert_eq!(prompt_cursor_layout("hello", 3, 0, 2), (0, 0, 0));
+        assert_eq!(prompt_cursor_layout("hello", 3, 4, 0), (0, 0, 0));
+    }
+
+    #[test]
+    fn prompt_cursor_layout_single_line_no_wrap() {
+        assert_eq!(prompt_cursor_layout("hello", 2, 10, 5), (0, 2, 0));
+    }
+
+    #[test]
+    fn prompt_cursor_layout_wraps_when_width_exceeded() {
+        assert_eq!(prompt_cursor_layout("abcdef", 6, 3, 5), (0, 0, 2));
+    }
+
+    #[test]
+    fn prompt_cursor_layout_handles_newline() {
+        assert_eq!(prompt_cursor_layout("ab\ncd", 4, 10, 5), (0, 1, 1));
+    }
+
+    #[test]
+    fn prompt_cursor_layout_clamps_non_boundary_cursor() {
+        // "é" occupies bytes [0..2], index 1 is not a char boundary and should clamp to 0
+        assert_eq!(prompt_cursor_layout("éx", 1, 10, 5), (0, 0, 0));
+    }
+
+    #[test]
+    fn prompt_cursor_layout_scrolls_when_cursor_below_visible_height() {
+        let text = "a\nb\nc\nd\ne";
+        let (scroll, col, row) = prompt_cursor_layout(text, text.len(), 10, 2);
+        assert_eq!(col, 1);
+        assert_eq!(row, 4);
+        assert_eq!(scroll, 3);
+    }
+}

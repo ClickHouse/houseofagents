@@ -517,3 +517,193 @@ fn current_status(app: &App) -> String {
         format!("{} thinking...", active_agents.join(", "))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::App;
+    use crate::config::AppConfig;
+    use crate::execution::{ExecutionMode, ProgressEvent};
+    use crate::provider::ProviderKind;
+
+    fn app() -> App {
+        App::new(AppConfig {
+            output_dir: "/tmp".to_string(),
+            default_max_tokens: 4096,
+            max_history_messages: 50,
+            http_timeout_seconds: 120,
+            model_fetch_timeout_seconds: 30,
+            cli_timeout_seconds: 300,
+            diagnostic_provider: None,
+            providers: std::collections::HashMap::new(),
+            diagnostics: std::collections::HashMap::new(),
+        })
+    }
+
+    #[test]
+    fn truncate_line_uses_first_line_only() {
+        assert_eq!(truncate_line("first\nsecond", 20), "first");
+    }
+
+    #[test]
+    fn truncate_line_adds_ellipsis_when_truncated() {
+        assert_eq!(truncate_line("abcdef", 3), "abc...");
+    }
+
+    #[test]
+    fn spinner_frame_returns_valid_character() {
+        let c = spinner_frame();
+        assert!(matches!(c, '|' | '/' | '-' | '\\'));
+    }
+
+    #[test]
+    fn compute_total_steps_solo_is_agent_count() {
+        let mut a = app();
+        a.selected_mode = ExecutionMode::Solo;
+        a.selected_agents = vec![ProviderKind::Anthropic, ProviderKind::OpenAI];
+        a.iterations = 9;
+        assert_eq!(compute_total_steps(&a), 2);
+    }
+
+    #[test]
+    fn compute_total_steps_relay_uses_iterations() {
+        let mut a = app();
+        a.selected_mode = ExecutionMode::Relay;
+        a.selected_agents = vec![ProviderKind::Anthropic, ProviderKind::OpenAI];
+        a.iterations = 3;
+        assert_eq!(compute_total_steps(&a), 6);
+    }
+
+    #[test]
+    fn compute_total_steps_swarm_uses_iterations() {
+        let mut a = app();
+        a.selected_mode = ExecutionMode::Swarm;
+        a.selected_agents = vec![ProviderKind::Anthropic];
+        a.iterations = 4;
+        assert_eq!(compute_total_steps(&a), 4);
+    }
+
+    #[test]
+    fn count_completed_steps_counts_finished_and_error_only() {
+        let mut a = app();
+        a.progress_events = vec![
+            ProgressEvent::AgentStarted {
+                kind: ProviderKind::Anthropic,
+                iteration: 1,
+            },
+            ProgressEvent::AgentFinished {
+                kind: ProviderKind::Anthropic,
+                iteration: 1,
+            },
+            ProgressEvent::AgentError {
+                kind: ProviderKind::OpenAI,
+                iteration: 1,
+                error: "x".to_string(),
+                details: Some("x".to_string()),
+            },
+        ];
+        assert_eq!(count_completed_steps(&a), 2);
+    }
+
+    #[test]
+    fn collect_active_agent_logs_returns_last_10_in_order() {
+        let mut a = app();
+        for i in 0..12 {
+            a.progress_events.push(ProgressEvent::AgentLog {
+                kind: ProviderKind::Anthropic,
+                iteration: i,
+                message: format!("m{i}"),
+            });
+        }
+        let logs = collect_active_agent_logs(&a);
+        assert_eq!(logs.len(), 10);
+        assert_eq!(logs[0].1, "[iter 2] m2");
+        assert_eq!(logs[9].1, "[iter 11] m11");
+    }
+
+    #[test]
+    fn find_last_error_prefers_most_recent_with_details() {
+        let mut a = app();
+        a.progress_events = vec![
+            ProgressEvent::AgentError {
+                kind: ProviderKind::Anthropic,
+                iteration: 1,
+                error: "old".to_string(),
+                details: Some("old details".to_string()),
+            },
+            ProgressEvent::AgentError {
+                kind: ProviderKind::OpenAI,
+                iteration: 2,
+                error: "new".to_string(),
+                details: Some("new details".to_string()),
+            },
+        ];
+        assert_eq!(
+            find_last_error(&a),
+            Some((ProviderKind::OpenAI, "new details".to_string()))
+        );
+    }
+
+    #[test]
+    fn find_last_error_ignores_missing_details() {
+        let mut a = app();
+        a.progress_events.push(ProgressEvent::AgentError {
+            kind: ProviderKind::OpenAI,
+            iteration: 1,
+            error: "x".to_string(),
+            details: None,
+        });
+        assert!(find_last_error(&a).is_none());
+    }
+
+    #[test]
+    fn current_status_reports_done_when_not_running() {
+        let mut a = app();
+        a.is_running = false;
+        assert_eq!(current_status(&a), "Done");
+    }
+
+    #[test]
+    fn current_status_reports_diagnostic_and_consolidation() {
+        let mut a = app();
+        a.is_running = true;
+        a.diagnostic_running = true;
+        assert_eq!(current_status(&a), "Analyzing reports for errors...");
+        a.diagnostic_running = false;
+        a.consolidation_running = true;
+        assert_eq!(current_status(&a), "Consolidating reports...");
+    }
+
+    #[test]
+    fn current_status_reports_waiting_when_no_active_agents() {
+        let mut a = app();
+        a.is_running = true;
+        a.selected_agents = vec![ProviderKind::Anthropic];
+        a.progress_events = vec![ProgressEvent::AgentFinished {
+            kind: ProviderKind::Anthropic,
+            iteration: 1,
+        }];
+        assert_eq!(current_status(&a), "Waiting...");
+    }
+
+    #[test]
+    fn current_status_reports_active_agent_names() {
+        let mut a = app();
+        a.is_running = true;
+        a.selected_agents = vec![ProviderKind::Anthropic, ProviderKind::OpenAI];
+        a.progress_events = vec![
+            ProgressEvent::AgentStarted {
+                kind: ProviderKind::Anthropic,
+                iteration: 1,
+            },
+            ProgressEvent::AgentStarted {
+                kind: ProviderKind::OpenAI,
+                iteration: 1,
+            },
+        ];
+        let s = current_status(&a);
+        assert!(s.contains("Claude"));
+        assert!(s.contains("Codex"));
+        assert!(s.contains("thinking"));
+    }
+}

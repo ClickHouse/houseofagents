@@ -36,3 +36,24 @@ pub fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
         ])
         .split(popup_layout[1])[1]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn centered_rect_returns_expected_size() {
+        let area = Rect::new(0, 0, 100, 40);
+        let centered = centered_rect(60, 50, area);
+        assert_eq!(centered.width, 60);
+        assert_eq!(centered.height, 20);
+    }
+
+    #[test]
+    fn centered_rect_is_positioned_in_center() {
+        let area = Rect::new(0, 0, 80, 24);
+        let centered = centered_rect(50, 50, area);
+        assert_eq!(centered.x, 20);
+        assert_eq!(centered.y, 6);
+    }
+}

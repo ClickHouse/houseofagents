@@ -202,3 +202,304 @@ fn build_swarm_file_message(
     msg.push_str("\nUse the file contents as the source of truth.");
     msg
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::CompletionResponse;
+    use async_trait::async_trait;
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+    use tempfile::tempdir;
+
+    struct MockProvider {
+        kind: ProviderKind,
+        responses: VecDeque<Result<CompletionResponse, AppError>>,
+        received: Arc<Mutex<Vec<String>>>,
+        live_tx: Option<mpsc::UnboundedSender<String>>,
+    }
+
+    impl MockProvider {
+        fn with_responses(
+            kind: ProviderKind,
+            responses: Vec<Result<CompletionResponse, AppError>>,
+            received: Arc<Mutex<Vec<String>>>,
+        ) -> Self {
+            Self {
+                kind,
+                responses: VecDeque::from(responses),
+                received,
+                live_tx: None,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for MockProvider {
+        fn kind(&self) -> ProviderKind {
+            self.kind
+        }
+
+        fn set_live_log_sender(&mut self, tx: Option<mpsc::UnboundedSender<String>>) {
+            self.live_tx = tx;
+        }
+
+        async fn send(&mut self, message: &str) -> Result<CompletionResponse, AppError> {
+            self.received
+                .lock()
+                .expect("lock")
+                .push(message.to_string());
+            if let Some(tx) = self.live_tx.as_ref() {
+                let _ = tx.send("swarm-live".to_string());
+            }
+            self.responses.pop_front().unwrap_or_else(|| {
+                Ok(CompletionResponse {
+                    content: "default".to_string(),
+                    debug_logs: Vec::new(),
+                })
+            })
+        }
+    }
+
+    fn ok(content: &str) -> Result<CompletionResponse, AppError> {
+        Ok(CompletionResponse {
+            content: content.to_string(),
+            debug_logs: vec!["dbg".to_string()],
+        })
+    }
+
+    fn collect(mut rx: mpsc::UnboundedReceiver<ProgressEvent>) -> Vec<ProgressEvent> {
+        let mut out = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            out.push(ev);
+        }
+        out
+    }
+
+    #[test]
+    fn build_swarm_message_includes_all_available_outputs() {
+        let mut outputs = HashMap::new();
+        outputs.insert(ProviderKind::Anthropic, "a".to_string());
+        outputs.insert(ProviderKind::OpenAI, "b".to_string());
+        let msg = build_swarm_message(ProviderKind::Gemini, &outputs);
+        assert!(msg.contains("Claude"));
+        assert!(msg.contains("Codex"));
+        assert!(msg.contains("a"));
+        assert!(msg.contains("b"));
+    }
+
+    #[test]
+    fn build_swarm_file_message_includes_expected_paths() {
+        let dir = tempdir().expect("tempdir");
+        let mut outputs = HashMap::new();
+        outputs.insert(ProviderKind::Anthropic, "a".to_string());
+        let msg = build_swarm_file_message(&outputs, dir.path(), 3);
+        assert!(msg.contains("anthropic_iter3.md"));
+        assert!(msg.contains("source of truth"));
+    }
+
+    #[tokio::test]
+    async fn run_swarm_single_iteration_writes_outputs_and_events() {
+        let dir = tempdir().expect("tempdir");
+        let out = OutputManager::new(&dir.path().to_path_buf(), Some("swarm")).expect("out");
+        let recv_a = Arc::new(Mutex::new(Vec::new()));
+        let recv_b = Arc::new(Mutex::new(Vec::new()));
+        let providers: Vec<Box<dyn Provider>> = vec![
+            Box::new(MockProvider::with_responses(
+                ProviderKind::Anthropic,
+                vec![ok("a1")],
+                recv_a,
+            )),
+            Box::new(MockProvider::with_responses(
+                ProviderKind::OpenAI,
+                vec![ok("o1")],
+                recv_b,
+            )),
+        ];
+        let (tx, rx) = mpsc::unbounded_channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        run_swarm(
+            "prompt",
+            providers,
+            1,
+            1,
+            HashMap::new(),
+            HashMap::new(),
+            &out,
+            tx,
+            cancel,
+        )
+        .await
+        .expect("run");
+
+        assert!(out.run_dir().join("anthropic_iter1.md").exists());
+        assert!(out.run_dir().join("openai_iter1.md").exists());
+        let events = collect(rx);
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, ProgressEvent::IterationComplete { iteration: 1 })));
+        assert!(events.iter().any(|e| matches!(e, ProgressEvent::AllDone)));
+    }
+
+    #[tokio::test]
+    async fn run_swarm_second_round_receives_prior_outputs() {
+        let dir = tempdir().expect("tempdir");
+        let out = OutputManager::new(&dir.path().to_path_buf(), None).expect("out");
+        let recv_a = Arc::new(Mutex::new(Vec::new()));
+        let recv_b = Arc::new(Mutex::new(Vec::new()));
+        let providers: Vec<Box<dyn Provider>> = vec![
+            Box::new(MockProvider::with_responses(
+                ProviderKind::Anthropic,
+                vec![ok("a1"), ok("a2")],
+                recv_a.clone(),
+            )),
+            Box::new(MockProvider::with_responses(
+                ProviderKind::OpenAI,
+                vec![ok("o1"), ok("o2")],
+                recv_b.clone(),
+            )),
+        ];
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        run_swarm(
+            "prompt",
+            providers,
+            2,
+            1,
+            HashMap::new(),
+            HashMap::new(),
+            &out,
+            tx,
+            cancel,
+        )
+        .await
+        .expect("run");
+
+        let a_msgs = recv_a.lock().expect("lock");
+        let b_msgs = recv_b.lock().expect("lock");
+        assert_eq!(a_msgs[0], "prompt");
+        assert_eq!(b_msgs[0], "prompt");
+        assert!(a_msgs[1].contains("previous round"));
+        assert!(b_msgs[1].contains("previous round"));
+    }
+
+    #[tokio::test]
+    async fn run_swarm_cli_mode_uses_file_messages_in_followup_rounds() {
+        let dir = tempdir().expect("tempdir");
+        let out = OutputManager::new(&dir.path().to_path_buf(), None).expect("out");
+        let recv_a = Arc::new(Mutex::new(Vec::new()));
+        let recv_b = Arc::new(Mutex::new(Vec::new()));
+        let providers: Vec<Box<dyn Provider>> = vec![
+            Box::new(MockProvider::with_responses(
+                ProviderKind::Anthropic,
+                vec![ok("a1"), ok("a2")],
+                recv_a.clone(),
+            )),
+            Box::new(MockProvider::with_responses(
+                ProviderKind::OpenAI,
+                vec![ok("o1"), ok("o2")],
+                recv_b.clone(),
+            )),
+        ];
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut use_cli = HashMap::new();
+        use_cli.insert(ProviderKind::Anthropic, true);
+        use_cli.insert(ProviderKind::OpenAI, true);
+
+        run_swarm(
+            "prompt",
+            providers,
+            2,
+            1,
+            HashMap::new(),
+            use_cli,
+            &out,
+            tx,
+            cancel,
+        )
+        .await
+        .expect("run");
+
+        assert!(recv_a.lock().expect("lock")[1].contains("Files:"));
+        assert!(recv_b.lock().expect("lock")[1].contains("iter1.md"));
+    }
+
+    #[tokio::test]
+    async fn run_swarm_handles_agent_error_without_failing_run() {
+        let dir = tempdir().expect("tempdir");
+        let out = OutputManager::new(&dir.path().to_path_buf(), None).expect("out");
+        let recv_a = Arc::new(Mutex::new(Vec::new()));
+        let recv_b = Arc::new(Mutex::new(Vec::new()));
+        let providers: Vec<Box<dyn Provider>> = vec![
+            Box::new(MockProvider::with_responses(
+                ProviderKind::Anthropic,
+                vec![Err(AppError::Provider {
+                    provider: "mock".to_string(),
+                    message: "bad".to_string(),
+                })],
+                recv_a,
+            )),
+            Box::new(MockProvider::with_responses(
+                ProviderKind::OpenAI,
+                vec![ok("ok")],
+                recv_b,
+            )),
+        ];
+        let (tx, rx) = mpsc::unbounded_channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        run_swarm(
+            "prompt",
+            providers,
+            1,
+            1,
+            HashMap::new(),
+            HashMap::new(),
+            &out,
+            tx,
+            cancel,
+        )
+        .await
+        .expect("run");
+
+        let events = collect(rx);
+        assert!(events.iter().any(|e| matches!(e, ProgressEvent::AgentError { .. })));
+        assert!(events.iter().any(|e| matches!(e, ProgressEvent::AllDone)));
+    }
+
+    #[tokio::test]
+    async fn run_swarm_cancel_before_start_sends_all_done() {
+        let dir = tempdir().expect("tempdir");
+        let out = OutputManager::new(&dir.path().to_path_buf(), None).expect("out");
+        let recv = Arc::new(Mutex::new(Vec::new()));
+        let providers: Vec<Box<dyn Provider>> = vec![Box::new(MockProvider::with_responses(
+            ProviderKind::Anthropic,
+            vec![ok("x")],
+            recv.clone(),
+        ))];
+        let (tx, rx) = mpsc::unbounded_channel();
+        let cancel = Arc::new(AtomicBool::new(true));
+
+        run_swarm(
+            "prompt",
+            providers,
+            1,
+            1,
+            HashMap::new(),
+            HashMap::new(),
+            &out,
+            tx,
+            cancel,
+        )
+        .await
+        .expect("run");
+
+        assert!(recv.lock().expect("lock").is_empty());
+        let events = collect(rx);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], ProgressEvent::AllDone));
+    }
+}

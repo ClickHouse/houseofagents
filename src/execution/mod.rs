@@ -100,3 +100,64 @@ pub fn truncate_chars(s: &str, max_chars: usize) -> String {
         out
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    #[test]
+    fn execution_mode_as_str_values() {
+        assert_eq!(ExecutionMode::Relay.as_str(), "relay");
+        assert_eq!(ExecutionMode::Swarm.as_str(), "swarm");
+        assert_eq!(ExecutionMode::Solo.as_str(), "solo");
+    }
+
+    #[test]
+    fn execution_mode_display_values() {
+        assert_eq!(ExecutionMode::Relay.to_string(), "Relay");
+        assert_eq!(ExecutionMode::Swarm.to_string(), "Swarm");
+        assert_eq!(ExecutionMode::Solo.to_string(), "Solo");
+    }
+
+    #[test]
+    fn execution_mode_description_not_empty() {
+        for mode in ExecutionMode::all() {
+            assert!(!mode.description().trim().is_empty());
+        }
+    }
+
+    #[test]
+    fn truncate_chars_no_truncation() {
+        assert_eq!(truncate_chars("hello", 5), "hello");
+    }
+
+    #[test]
+    fn truncate_chars_with_truncation_ascii() {
+        assert_eq!(truncate_chars("hello world", 5), "hello...");
+    }
+
+    #[test]
+    fn truncate_chars_with_multibyte() {
+        assert_eq!(truncate_chars("héllö", 3), "hél...");
+    }
+
+    #[test]
+    fn truncate_chars_zero_limit() {
+        assert_eq!(truncate_chars("abc", 0), "...");
+    }
+
+    #[tokio::test]
+    async fn wait_for_cancel_returns_when_flag_set() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_setter = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            cancel_setter.store(true, Ordering::Relaxed);
+        });
+        tokio::time::timeout(tokio::time::Duration::from_secs(1), wait_for_cancel(&cancel))
+            .await
+            .expect("wait_for_cancel should complete");
+    }
+}

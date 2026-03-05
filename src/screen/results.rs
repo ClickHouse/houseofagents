@@ -288,3 +288,133 @@ fn flush_line(lines: &mut Vec<Line<'static>>, current: &mut Vec<Span<'static>>, 
         lines.push(Line::from(std::mem::take(current)));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::App;
+    use crate::config::AppConfig;
+    use std::collections::HashMap;
+
+    fn app_with_files(files: Vec<PathBuf>, cursor: usize) -> App {
+        let cfg = AppConfig {
+            output_dir: "/tmp".to_string(),
+            default_max_tokens: 4096,
+            max_history_messages: 50,
+            http_timeout_seconds: 120,
+            model_fetch_timeout_seconds: 30,
+            cli_timeout_seconds: 300,
+            diagnostic_provider: None,
+            providers: HashMap::new(),
+            diagnostics: HashMap::new(),
+        };
+        let mut app = App::new(cfg);
+        app.result_files = files;
+        app.result_cursor = cursor;
+        app
+    }
+
+    #[test]
+    fn absolute_path_keeps_absolute() {
+        let p = PathBuf::from("/tmp/test.md");
+        assert_eq!(absolute_path(&p), p);
+    }
+
+    #[test]
+    fn absolute_path_converts_relative() {
+        let p = PathBuf::from("test.md");
+        let out = absolute_path(&p);
+        assert!(out.is_absolute());
+        assert!(out.ends_with("test.md"));
+    }
+
+    #[test]
+    fn selected_file_returns_none_when_out_of_bounds() {
+        let app = app_with_files(vec![PathBuf::from("a.md")], 5);
+        assert!(selected_file(&app).is_none());
+    }
+
+    #[test]
+    fn selected_file_returns_current_file() {
+        let app = app_with_files(vec![PathBuf::from("a.md"), PathBuf::from("b.md")], 1);
+        assert_eq!(selected_file(&app), Some(&PathBuf::from("b.md")));
+    }
+
+    #[test]
+    fn is_markdown_file_recognizes_extensions() {
+        assert!(is_markdown_file(Some(&PathBuf::from("a.md"))));
+        assert!(is_markdown_file(Some(&PathBuf::from("a.markdown"))));
+        assert!(is_markdown_file(Some(&PathBuf::from("a.mdx"))));
+    }
+
+    #[test]
+    fn is_markdown_file_rejects_non_markdown() {
+        assert!(!is_markdown_file(Some(&PathBuf::from("a.txt"))));
+        assert!(!is_markdown_file(None));
+    }
+
+    #[test]
+    fn render_preview_plain_text_for_non_markdown() {
+        let out = render_preview("hello", Some(&PathBuf::from("a.txt")));
+        assert_eq!(out.lines.len(), 1);
+        assert_eq!(out.lines[0].spans[0].content, "hello");
+    }
+
+    #[test]
+    fn render_preview_uses_markdown_renderer() {
+        let out = render_preview("# Title", Some(&PathBuf::from("a.md")));
+        assert!(!out.lines.is_empty());
+    }
+
+    #[test]
+    fn render_markdown_handles_heading_and_text() {
+        let out = render_markdown("# Title\nBody");
+        assert!(out.lines.len() >= 2);
+    }
+
+    #[test]
+    fn render_markdown_handles_list_and_quote_prefixes() {
+        let out = render_markdown("> quote\n- item");
+        let joined = out
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(joined.contains(">"));
+        assert!(joined.contains("•"));
+    }
+
+    #[test]
+    fn current_style_applies_heading_and_emphasis_modifiers() {
+        let state = MarkdownState {
+            in_code_block: false,
+            in_heading: true,
+            in_strong: 1,
+            in_emphasis: 1,
+            list_depth: 0,
+            quote_depth: 0,
+            item_prefix_needed: false,
+        };
+        let style = current_style(&state);
+        assert_eq!(style.fg, Some(Color::Cyan));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+        assert!(style.add_modifier.contains(Modifier::ITALIC));
+    }
+
+    #[test]
+    fn flush_line_pushes_when_forced_or_non_empty() {
+        let mut lines = Vec::new();
+        let mut current = Vec::new();
+        flush_line(&mut lines, &mut current, false);
+        assert!(lines.is_empty());
+
+        current.push(Span::raw("x"));
+        flush_line(&mut lines, &mut current, false);
+        assert_eq!(lines.len(), 1);
+        assert!(current.is_empty());
+
+        flush_line(&mut lines, &mut current, true);
+        assert_eq!(lines.len(), 2);
+    }
+}
