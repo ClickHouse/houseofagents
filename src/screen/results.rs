@@ -303,7 +303,7 @@ mod tests {
             max_history_messages: 50,
             http_timeout_seconds: 120,
             model_fetch_timeout_seconds: 30,
-            cli_timeout_seconds: 300,
+            cli_timeout_seconds: 600,
             diagnostic_provider: None,
             providers: HashMap::new(),
             diagnostics: HashMap::new(),

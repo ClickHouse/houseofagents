@@ -360,8 +360,8 @@ mod tests {
             max_history_messages: 50,
             http_timeout_seconds: 120,
             model_fetch_timeout_seconds: 30,
-            cli_timeout_seconds: 300,
-            diagnostic_provider: Some("openai".to_string()),
+            cli_timeout_seconds: 600,
+            diagnostic_provider: None,
             providers,
             diagnostics,
         }
@@ -439,7 +439,7 @@ mod tests {
         let app = app_with_known_cli();
         assert_eq!(app.effective_http_timeout_seconds(), 120);
         assert_eq!(app.effective_model_fetch_timeout_seconds(), 30);
-        assert_eq!(app.effective_cli_timeout_seconds(), 300);
+        assert_eq!(app.effective_cli_timeout_seconds(), 600);
     }
 
     #[test]

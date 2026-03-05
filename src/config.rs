@@ -59,7 +59,7 @@ fn default_model_fetch_timeout_seconds() -> u64 {
 }
 
 fn default_cli_timeout_seconds() -> u64 {
-    300
+    600
 }
 
 impl AppConfig {
@@ -140,52 +140,52 @@ default_max_tokens = 4096
 max_history_messages = 50
 http_timeout_seconds = 120
 model_fetch_timeout_seconds = 30
-cli_timeout_seconds = 300
+cli_timeout_seconds = 600
 
 # Optional: set one diagnostics provider ("anthropic", "openai", "gemini")
 # diagnostic_provider = "openai"
 
-[providers.anthropic]
-api_key = ""
-model = "claude-sonnet-4-5"
-thinking_effort = "medium"
-use_cli = false
-extra_cli_args = ""
-
 [providers.openai]
 api_key = ""
-model = "gpt-5"
-reasoning_effort = "medium"
-use_cli = false
+model = "gpt-5.3-codex"
+reasoning_effort = "high"
+use_cli = true
+extra_cli_args = ""
+
+[providers.anthropic]
+api_key = ""
+model = "claude-opus-4-6"
+thinking_effort = "high"
+use_cli = true
 extra_cli_args = ""
 
 [providers.gemini]
 api_key = ""
 model = "gemini-2.5-pro"
 thinking_effort = "medium"
-use_cli = false
+use_cli = true
 extra_cli_args = ""
 
 # Diagnostics are configured separately from run providers.
 [diagnostics.anthropic]
 api_key = ""
-model = "claude-sonnet-4-5"
+model = "claude-opus-4-6"
 thinking_effort = "low"
-use_cli = false
+use_cli = true
 extra_cli_args = ""
 
 [diagnostics.openai]
 api_key = ""
-model = "gpt-5-mini"
+model = "gpt-5.3-codex"
 reasoning_effort = "low"
-use_cli = false
+use_cli = true
 extra_cli_args = ""
 
 [diagnostics.gemini]
 api_key = ""
 model = "gemini-2.5-pro"
 thinking_effort = "low"
-use_cli = false
+use_cli = true
 extra_cli_args = ""
 "#;
 
@@ -219,8 +219,8 @@ mod tests {
             max_history_messages: 50,
             http_timeout_seconds: 120,
             model_fetch_timeout_seconds: 30,
-            cli_timeout_seconds: 300,
-            diagnostic_provider: Some("openai".to_string()),
+            cli_timeout_seconds: 600,
+            diagnostic_provider: None,
             providers: HashMap::new(),
             diagnostics: HashMap::new(),
         }
@@ -282,6 +282,10 @@ mod tests {
         assert!(body.contains("output_dir"));
         assert!(body.contains("[providers.openai]"));
         assert!(body.contains("[diagnostics.gemini]"));
+        assert!(!body
+            .lines()
+            .any(|line| line.trim() == "diagnostic_provider = \"openai\""));
+        assert!(body.contains("# diagnostic_provider = \"openai\""));
     }
 
     #[test]
@@ -332,8 +336,9 @@ model = "gpt-5"
         let cfg: AppConfig = toml::from_str(body).expect("parse");
         assert_eq!(cfg.http_timeout_seconds, 120);
         assert_eq!(cfg.model_fetch_timeout_seconds, 30);
-        assert_eq!(cfg.cli_timeout_seconds, 300);
+        assert_eq!(cfg.cli_timeout_seconds, 600);
         assert_eq!(cfg.default_max_tokens, 4096);
         assert_eq!(cfg.max_history_messages, 50);
+        assert_eq!(cfg.diagnostic_provider, None);
     }
 }
