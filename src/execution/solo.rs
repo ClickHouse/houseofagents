@@ -177,7 +177,7 @@ mod tests {
                 )),
             ),
             named(
-                "Codex",
+                "OpenAI",
                 ProviderKind::OpenAI,
                 Box::new(MockProvider::ok(
                     ProviderKind::OpenAI,
@@ -195,7 +195,7 @@ mod tests {
 
         assert_eq!(received.lock().expect("lock").len(), 2);
         assert!(out.run_dir().join("Claude_iter1.md").exists());
-        assert!(out.run_dir().join("Codex_iter1.md").exists());
+        assert!(out.run_dir().join("OpenAI_iter1.md").exists());
 
         let events = collect_progress_events(rx);
         assert!(events.iter().any(|e| matches!(e, ProgressEvent::AllDone)));

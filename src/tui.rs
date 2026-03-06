@@ -3637,10 +3637,10 @@ mod tests {
     fn find_last_iteration_multiple_files() {
         let dir = tempdir().unwrap();
         write_agent_iter(dir.path(), "Claude", 1);
-        write_agent_iter(dir.path(), "Codex", 3);
+        write_agent_iter(dir.path(), "OpenAI", 3);
         write_agent_iter(dir.path(), "Gemini", 2);
 
-        let keys: Vec<String> = ["Claude", "Codex", "Gemini"]
+        let keys: Vec<String> = ["Claude", "OpenAI", "Gemini"]
             .iter()
             .map(|n| App::agent_file_key(n))
             .collect();
@@ -3922,7 +3922,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut app = test_app();
         app.progress_events.push(ProgressEvent::AgentError {
-            agent: "Codex".to_string(),
+            agent: "OpenAI".to_string(),
             kind: ProviderKind::OpenAI,
             iteration: 2,
             error: "api failed".to_string(),
@@ -3932,7 +3932,7 @@ mod tests {
 
         let errors = collect_application_errors(&app, dir.path());
         assert_eq!(errors.len(), 2);
-        assert!(errors.iter().any(|e| e == "[Codex iter 2] rate limited"));
+        assert!(errors.iter().any(|e| e == "[OpenAI iter 2] rate limited"));
         assert!(errors.iter().any(|e| e == "tool timeout"));
     }
 

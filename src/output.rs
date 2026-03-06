@@ -293,13 +293,13 @@ mod tests {
             &ExecutionMode::Relay,
             &[
                 ("Claude".to_string(), "anthropic".to_string()),
-                ("Codex".to_string(), "openai".to_string()),
+                ("OpenAI".to_string(), "openai".to_string()),
             ],
             3,
             Some("sess"),
             &[
                 ("Claude".to_string(), "claude-model".to_string()),
-                ("Codex".to_string(), "gpt-model".to_string()),
+                ("OpenAI".to_string(), "gpt-model".to_string()),
             ],
         )
         .expect("write");
@@ -312,9 +312,9 @@ mod tests {
         let agents = value["agents"].as_array().expect("agents");
         assert_eq!(agents.len(), 2);
         assert!(agents.iter().any(|v| v.as_str() == Some("Claude")));
-        assert!(agents.iter().any(|v| v.as_str() == Some("Codex")));
+        assert!(agents.iter().any(|v| v.as_str() == Some("OpenAI")));
         assert_eq!(value["models"]["Claude"].as_str(), Some("claude-model"));
-        assert_eq!(value["models"]["Codex"].as_str(), Some("gpt-model"));
+        assert_eq!(value["models"]["OpenAI"].as_str(), Some("gpt-model"));
     }
 
     #[test]

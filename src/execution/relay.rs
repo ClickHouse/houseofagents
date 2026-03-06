@@ -222,7 +222,7 @@ mod tests {
                 vec![ok_response("first output")],
                 recv_a.clone(),
             ))),
-            named("Codex", ProviderKind::OpenAI, Box::new(MockProvider::with_responses(
+            named("OpenAI", ProviderKind::OpenAI, Box::new(MockProvider::with_responses(
                 ProviderKind::OpenAI,
                 vec![ok_response("second output")],
                 recv_b.clone(),
@@ -251,7 +251,7 @@ mod tests {
         assert_eq!(a_msgs[0], "initial prompt");
         assert!(b_msgs[0].contains("first output"));
         assert!(out.run_dir().join("Claude_iter1.md").exists());
-        assert!(out.run_dir().join("Codex_iter1.md").exists());
+        assert!(out.run_dir().join("OpenAI_iter1.md").exists());
         let events = collect_progress_events(rx);
         assert!(events
             .iter()
@@ -271,7 +271,7 @@ mod tests {
                 vec![ok_response("a out")],
                 recv_a,
             ))),
-            named("Codex", ProviderKind::OpenAI, Box::new(MockProvider::with_responses(
+            named("OpenAI", ProviderKind::OpenAI, Box::new(MockProvider::with_responses(
                 ProviderKind::OpenAI,
                 vec![ok_response("b out")],
                 recv_b.clone(),
@@ -280,7 +280,7 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let mut use_cli = HashMap::new();
-        use_cli.insert("Codex".to_string(), true);
+        use_cli.insert("OpenAI".to_string(), true);
 
         run_relay("p", agents, 1, 1, None, false, use_cli, &out, tx, cancel)
             .await
@@ -447,7 +447,7 @@ mod tests {
                 vec![ok_response("first output")],
                 recv_a.clone(),
             ))),
-            named("Codex", ProviderKind::OpenAI, Box::new(MockProvider::with_responses(
+            named("OpenAI", ProviderKind::OpenAI, Box::new(MockProvider::with_responses(
                 ProviderKind::OpenAI,
                 vec![ok_response("second output")],
                 recv_b.clone(),
@@ -491,7 +491,7 @@ mod tests {
                 vec![ok_response("first output")],
                 recv_a,
             ))),
-            named("Codex", ProviderKind::OpenAI, Box::new(MockProvider::with_responses(
+            named("OpenAI", ProviderKind::OpenAI, Box::new(MockProvider::with_responses(
                 ProviderKind::OpenAI,
                 vec![ok_response("second output")],
                 recv_b.clone(),
@@ -500,7 +500,7 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let mut use_cli = HashMap::new();
-        use_cli.insert("Codex".to_string(), true);
+        use_cli.insert("OpenAI".to_string(), true);
 
         run_relay(
             "write a poem",

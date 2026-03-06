@@ -4,7 +4,7 @@
 
 **Multi-agent prompt runner with a terminal UI**
 
-Run Claude, Codex, and Gemini in collaborative execution modes and save all artifacts to disk.
+Run Claude, OpenAI, and Gemini in collaborative execution modes and save all artifacts to disk.
 
 [![Rust](https://img.shields.io/badge/Rust-1.88%2B-orange?logo=rust)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -27,7 +27,7 @@ Run Claude, Codex, and Gemini in collaborative execution modes and save all arti
 | Provider | API | CLI |
 |----------|:---:|:---:|
 | **Anthropic** (Claude) | `api_key` | `claude` binary |
-| **OpenAI** (Codex) | `api_key` | `codex` binary |
+| **OpenAI** | `api_key` | `codex` binary |
 | **Gemini** | `api_key` | `gemini` binary |
 
 Each agent can run in API mode or CLI mode (`use_cli = true`). Mix and match freely.
@@ -121,7 +121,7 @@ cli_timeout_seconds = 600
 
 # Named agents — you can have multiple agents per provider
 [[agents]]
-name = "Codex"
+name = "OpenAI"
 provider = "openai"
 api_key = ""
 model = "gpt-5.3-codex"
@@ -284,7 +284,7 @@ output_dir/
     prompt.md                    # Original prompt
     session.toml                 # Run metadata
     Claude_iter1.md              # Agent output per iteration
-    Codex_iter2.md
+    OpenAI_iter2.md
     consolidated_Claude.md       # Optional: merged output
     errors.md                    # Optional: diagnostics report
     _errors.log                  # Application-level error log

@@ -417,7 +417,7 @@ mod tests {
     fn base_config() -> AppConfig {
         let agents = vec![
             agent_cfg("Claude", ProviderKind::Anthropic, "k1", false),
-            agent_cfg("Codex", ProviderKind::OpenAI, "k2", false),
+            agent_cfg("OpenAI", ProviderKind::OpenAI, "k2", false),
             agent_cfg("Gemini", ProviderKind::Gemini, "", true),
         ];
 
@@ -458,11 +458,11 @@ mod tests {
     fn effective_agent_config_prefers_session_override() {
         let mut app = app_with_known_cli();
         app.session_overrides.insert(
-            "Codex".to_string(),
-            agent_cfg("Codex", ProviderKind::OpenAI, "override", true),
+            "OpenAI".to_string(),
+            agent_cfg("OpenAI", ProviderKind::OpenAI, "override", true),
         );
         let cfg = app
-            .effective_agent_config("Codex")
+            .effective_agent_config("OpenAI")
             .expect("config");
         assert_eq!(cfg.api_key, "override");
         assert!(cfg.use_cli);
@@ -509,26 +509,26 @@ mod tests {
     #[test]
     fn move_order_up_without_grabbed_only_moves_cursor() {
         let mut app = app_with_known_cli();
-        app.selected_agents = vec!["Claude".into(), "Codex".into(), "Gemini".into()];
+        app.selected_agents = vec!["Claude".into(), "OpenAI".into(), "Gemini".into()];
         app.order_cursor = 2;
         app.move_order_up();
         assert_eq!(app.order_cursor, 1);
         assert_eq!(
             app.selected_agents,
-            vec!["Claude", "Codex", "Gemini"]
+            vec!["Claude", "OpenAI", "Gemini"]
         );
     }
 
     #[test]
     fn move_order_up_with_grabbed_swaps_agents() {
         let mut app = app_with_known_cli();
-        app.selected_agents = vec!["Claude".into(), "Codex".into(), "Gemini".into()];
+        app.selected_agents = vec!["Claude".into(), "OpenAI".into(), "Gemini".into()];
         app.order_cursor = 2;
         app.order_grabbed = Some(2);
         app.move_order_up();
         assert_eq!(
             app.selected_agents,
-            vec!["Claude", "Gemini", "Codex"]
+            vec!["Claude", "Gemini", "OpenAI"]
         );
         assert_eq!(app.order_cursor, 1);
         assert_eq!(app.order_grabbed, Some(1));
@@ -537,26 +537,26 @@ mod tests {
     #[test]
     fn move_order_down_without_grabbed_only_moves_cursor() {
         let mut app = app_with_known_cli();
-        app.selected_agents = vec!["Claude".into(), "Codex".into(), "Gemini".into()];
+        app.selected_agents = vec!["Claude".into(), "OpenAI".into(), "Gemini".into()];
         app.order_cursor = 0;
         app.move_order_down();
         assert_eq!(app.order_cursor, 1);
         assert_eq!(
             app.selected_agents,
-            vec!["Claude", "Codex", "Gemini"]
+            vec!["Claude", "OpenAI", "Gemini"]
         );
     }
 
     #[test]
     fn move_order_down_with_grabbed_swaps_agents() {
         let mut app = app_with_known_cli();
-        app.selected_agents = vec!["Claude".into(), "Codex".into(), "Gemini".into()];
+        app.selected_agents = vec!["Claude".into(), "OpenAI".into(), "Gemini".into()];
         app.order_cursor = 0;
         app.order_grabbed = Some(0);
         app.move_order_down();
         assert_eq!(
             app.selected_agents,
-            vec!["Codex", "Claude", "Gemini"]
+            vec!["OpenAI", "Claude", "Gemini"]
         );
         assert_eq!(app.order_cursor, 1);
         assert_eq!(app.order_grabbed, Some(1));
@@ -578,13 +578,13 @@ mod tests {
     fn available_agents_cli_requires_installed_cli() {
         let mut app = app_with_known_cli();
         app.session_overrides.insert(
-            "Codex".to_string(),
-            agent_cfg("Codex", ProviderKind::OpenAI, "", true),
+            "OpenAI".to_string(),
+            agent_cfg("OpenAI", ProviderKind::OpenAI, "", true),
         );
         app.cli_available.insert(ProviderKind::OpenAI, false);
         let agents = app.available_agents();
-        let codex = agents.iter().find(|(a, _)| a.name == "Codex").unwrap();
-        assert!(!codex.1);
+        let openai = agents.iter().find(|(a, _)| a.name == "OpenAI").unwrap();
+        assert!(!openai.1);
     }
 
     #[test]

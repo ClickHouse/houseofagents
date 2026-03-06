@@ -747,7 +747,7 @@ mod tests {
     fn compute_total_steps_solo_is_agent_count() {
         let mut a = app();
         a.selected_mode = ExecutionMode::Solo;
-        a.selected_agents = vec!["Claude".into(), "Codex".into()];
+        a.selected_agents = vec!["Claude".into(), "OpenAI".into()];
         a.iterations = 9;
         assert_eq!(compute_total_steps(&a), 2);
     }
@@ -756,7 +756,7 @@ mod tests {
     fn compute_total_steps_relay_uses_iterations() {
         let mut a = app();
         a.selected_mode = ExecutionMode::Relay;
-        a.selected_agents = vec!["Claude".into(), "Codex".into()];
+        a.selected_agents = vec!["Claude".into(), "OpenAI".into()];
         a.iterations = 3;
         assert_eq!(compute_total_steps(&a), 6);
     }
@@ -785,7 +785,7 @@ mod tests {
                 iteration: 1,
             },
             ProgressEvent::AgentError {
-                agent: "Codex".into(),
+                agent: "OpenAI".into(),
                 kind: ProviderKind::OpenAI,
                 iteration: 1,
                 error: "x".to_string(),
@@ -824,7 +824,7 @@ mod tests {
                 details: Some("old details".to_string()),
             },
             ProgressEvent::AgentError {
-                agent: "Codex".into(),
+                agent: "OpenAI".into(),
                 kind: ProviderKind::OpenAI,
                 iteration: 2,
                 error: "new".to_string(),
@@ -833,7 +833,7 @@ mod tests {
         ];
         assert_eq!(
             find_last_error(&a),
-            Some(("Codex".to_string(), "new details".to_string()))
+            Some(("OpenAI".to_string(), "new details".to_string()))
         );
     }
 
@@ -841,7 +841,7 @@ mod tests {
     fn find_last_error_ignores_missing_details() {
         let mut a = app();
         a.progress_events.push(ProgressEvent::AgentError {
-            agent: "Codex".into(),
+            agent: "OpenAI".into(),
             kind: ProviderKind::OpenAI,
             iteration: 1,
             error: "x".to_string(),
@@ -885,7 +885,7 @@ mod tests {
     fn current_status_reports_active_agent_names() {
         let mut a = app();
         a.is_running = true;
-        a.selected_agents = vec!["Claude".into(), "Codex".into()];
+        a.selected_agents = vec!["Claude".into(), "OpenAI".into()];
         a.progress_events = vec![
             ProgressEvent::AgentStarted {
                 agent: "Claude".into(),
@@ -893,14 +893,14 @@ mod tests {
                 iteration: 1,
             },
             ProgressEvent::AgentStarted {
-                agent: "Codex".into(),
+                agent: "OpenAI".into(),
                 kind: ProviderKind::OpenAI,
                 iteration: 1,
             },
         ];
         let s = current_status(&a);
         assert!(s.contains("Claude"));
-        assert!(s.contains("Codex"));
+        assert!(s.contains("OpenAI"));
         assert!(s.contains("thinking"));
     }
 
@@ -918,14 +918,14 @@ mod tests {
             },
             ProgressEvent::BlockStarted {
                 block_id: 2,
-                agent_name: "Codex".into(),
-                label: "Block 2 (Codex)".into(),
+                agent_name: "OpenAI".into(),
+                label: "Block 2 (OpenAI)".into(),
                 iteration: 1,
             },
         ];
         let s = current_status(&a);
         assert!(s.contains("Block 1 (Claude)"));
-        assert!(s.contains("Block 2 (Codex)"));
+        assert!(s.contains("Block 2 (OpenAI)"));
         assert!(s.contains("thinking"));
     }
 
@@ -949,14 +949,14 @@ mod tests {
             },
             ProgressEvent::BlockStarted {
                 block_id: 2,
-                agent_name: "Codex".into(),
-                label: "Block 2 (Codex)".into(),
+                agent_name: "OpenAI".into(),
+                label: "Block 2 (OpenAI)".into(),
                 iteration: 1,
             },
         ];
         let s = current_status(&a);
         assert!(!s.contains("Block 1"));
-        assert!(s.contains("Block 2 (Codex)"));
+        assert!(s.contains("Block 2 (OpenAI)"));
     }
 
     #[test]
@@ -995,7 +995,7 @@ mod tests {
                 iteration: 1,
             },
             ProgressEvent::AgentFinished {
-                agent: "Codex".into(),
+                agent: "OpenAI".into(),
                 kind: ProviderKind::OpenAI,
                 iteration: 1,
             },

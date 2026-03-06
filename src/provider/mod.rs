@@ -22,7 +22,7 @@ impl ProviderKind {
     pub fn display_name(&self) -> &'static str {
         match self {
             ProviderKind::Anthropic => "Claude",
-            ProviderKind::OpenAI => "Codex",
+            ProviderKind::OpenAI => "OpenAI",
             ProviderKind::Gemini => "Gemini",
         }
     }
@@ -209,7 +209,7 @@ mod tests {
     #[test]
     fn provider_kind_display_names() {
         assert_eq!(ProviderKind::Anthropic.display_name(), "Claude");
-        assert_eq!(ProviderKind::OpenAI.display_name(), "Codex");
+        assert_eq!(ProviderKind::OpenAI.display_name(), "OpenAI");
         assert_eq!(ProviderKind::Gemini.display_name(), "Gemini");
     }
 
@@ -232,7 +232,7 @@ mod tests {
     #[test]
     fn provider_kind_display_trait() {
         assert_eq!(ProviderKind::Anthropic.to_string(), "Claude");
-        assert_eq!(ProviderKind::OpenAI.to_string(), "Codex");
+        assert_eq!(ProviderKind::OpenAI.to_string(), "OpenAI");
     }
 
     #[test]
@@ -242,7 +242,7 @@ mod tests {
             Some(ProviderKind::Anthropic)
         );
         assert_eq!(
-            ProviderKind::from_selector(" Codex "),
+            ProviderKind::from_selector(" OpenAI "),
             Some(ProviderKind::OpenAI)
         );
     }

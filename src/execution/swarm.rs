@@ -245,10 +245,10 @@ mod tests {
     fn build_swarm_message_includes_all_available_outputs() {
         let mut outputs = HashMap::new();
         outputs.insert("Claude".to_string(), "a".to_string());
-        outputs.insert("Codex".to_string(), "b".to_string());
+        outputs.insert("OpenAI".to_string(), "b".to_string());
         let msg = build_swarm_message(&outputs);
         assert!(msg.contains("Claude"));
-        assert!(msg.contains("Codex"));
+        assert!(msg.contains("OpenAI"));
         assert!(msg.contains("a"));
         assert!(msg.contains("b"));
     }
@@ -275,7 +275,7 @@ mod tests {
                 vec![ok_response("a1")],
                 recv_a,
             ))),
-            named("Codex", ProviderKind::OpenAI, Box::new(MockProvider::with_responses(
+            named("OpenAI", ProviderKind::OpenAI, Box::new(MockProvider::with_responses(
                 ProviderKind::OpenAI,
                 vec![ok_response("o1")],
                 recv_b,
@@ -299,7 +299,7 @@ mod tests {
         .expect("run");
 
         assert!(out.run_dir().join("Claude_iter1.md").exists());
-        assert!(out.run_dir().join("Codex_iter1.md").exists());
+        assert!(out.run_dir().join("OpenAI_iter1.md").exists());
         let events = collect_progress_events(rx);
         assert!(events
             .iter()
@@ -319,7 +319,7 @@ mod tests {
                 vec![ok_response("a1"), ok_response("a2")],
                 recv_a.clone(),
             ))),
-            named("Codex", ProviderKind::OpenAI, Box::new(MockProvider::with_responses(
+            named("OpenAI", ProviderKind::OpenAI, Box::new(MockProvider::with_responses(
                 ProviderKind::OpenAI,
                 vec![ok_response("o1"), ok_response("o2")],
                 recv_b.clone(),
@@ -362,7 +362,7 @@ mod tests {
                 vec![ok_response("a1"), ok_response("a2")],
                 recv_a.clone(),
             ))),
-            named("Codex", ProviderKind::OpenAI, Box::new(MockProvider::with_responses(
+            named("OpenAI", ProviderKind::OpenAI, Box::new(MockProvider::with_responses(
                 ProviderKind::OpenAI,
                 vec![ok_response("o1"), ok_response("o2")],
                 recv_b.clone(),
@@ -372,7 +372,7 @@ mod tests {
         let cancel = Arc::new(AtomicBool::new(false));
         let mut use_cli = HashMap::new();
         use_cli.insert("Claude".to_string(), true);
-        use_cli.insert("Codex".to_string(), true);
+        use_cli.insert("OpenAI".to_string(), true);
 
         run_swarm(
             "prompt",
@@ -400,7 +400,7 @@ mod tests {
         let recv_b = Arc::new(Mutex::new(Vec::new()));
         let agents = vec![
             named("Claude", ProviderKind::Anthropic, Box::new(MockProvider::err(ProviderKind::Anthropic, "bad", recv_a))),
-            named("Codex", ProviderKind::OpenAI, Box::new(MockProvider::with_responses(
+            named("OpenAI", ProviderKind::OpenAI, Box::new(MockProvider::with_responses(
                 ProviderKind::OpenAI,
                 vec![ok_response("ok")],
                 recv_b,

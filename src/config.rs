@@ -283,7 +283,7 @@ cli_timeout_seconds = 600
 
 # Named agents — you can have multiple agents per provider
 [[agents]]
-name = "Codex"
+name = "OpenAI"
 provider = "openai"
 api_key = ""
 model = "gpt-5.3-codex"
@@ -483,7 +483,7 @@ model = "claude"
         assert_eq!(cfg.agents[0].name, "Claude");
         assert_eq!(cfg.agents[0].provider, ProviderKind::Anthropic);
         assert_eq!(cfg.agents[0].api_key, "ak");
-        assert_eq!(cfg.agents[1].name, "Codex");
+        assert_eq!(cfg.agents[1].name, "OpenAI");
         assert_eq!(cfg.agents[1].provider, ProviderKind::OpenAI);
         assert_eq!(cfg.agents[1].api_key, "ok");
     }
@@ -494,7 +494,7 @@ model = "claude"
 output_dir = "/tmp/hoa"
 
 [[agents]]
-name = "Codex"
+name = "OpenAI"
 provider = "openai"
 api_key = ""
 model = "gpt-5"
