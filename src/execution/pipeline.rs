@@ -18,6 +18,8 @@ type ProviderPool = HashMap<(ProviderKind, String), Arc<Mutex<Box<dyn provider::
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PipelineBlock {
     pub id: BlockId,
+    #[serde(default)]
+    pub name: String,
     pub provider: ProviderKind,
     #[serde(default)]
     pub prompt: String,
@@ -395,7 +397,11 @@ pub async fn run_pipeline(
                         None => { completed += 1; continue; }
                     };
                     let kind = block.provider;
-                    let label = format!("Block {} ({})", block_id, kind.display_name());
+                    let label = if block.name.trim().is_empty() {
+                        format!("Block {} ({})", block_id, kind.display_name())
+                    } else {
+                        block.name.clone()
+                    };
 
                     // Check for failed upstream
                     let failed_upstream: Vec<BlockId> = upstream_of(def, block_id)
@@ -663,6 +669,7 @@ mod tests {
     fn block(id: BlockId, col: u16, row: u16) -> PipelineBlock {
         PipelineBlock {
             id,
+            name: format!("Block#{id}"),
             provider: ProviderKind::Anthropic,
             prompt: format!("block {id}"),
             session_id: None,

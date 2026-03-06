@@ -1,5 +1,6 @@
 pub mod home;
 pub mod order;
+pub mod pipeline;
 pub mod prompt;
 pub mod results;
 pub mod running;
@@ -15,6 +16,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::Order => order::draw(f, app),
         Screen::Running => running::draw(f, app),
         Screen::Results => results::draw(f, app),
+        Screen::Pipeline => pipeline::draw(f, app),
     }
 }
 

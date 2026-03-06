@@ -1,3 +1,4 @@
+pub mod pipeline;
 pub mod relay;
 pub mod solo;
 pub mod swarm;
@@ -15,6 +16,7 @@ pub enum ExecutionMode {
     Relay,
     Swarm,
     Solo,
+    Pipeline,
 }
 
 impl ExecutionMode {
@@ -23,6 +25,7 @@ impl ExecutionMode {
             ExecutionMode::Relay => "relay",
             ExecutionMode::Swarm => "swarm",
             ExecutionMode::Solo => "solo",
+            ExecutionMode::Pipeline => "pipeline",
         }
     }
 
@@ -31,6 +34,9 @@ impl ExecutionMode {
             ExecutionMode::Relay => "Sequential cooperative - agents build on each other",
             ExecutionMode::Swarm => "Parallel cooperative - agents share results between rounds",
             ExecutionMode::Solo => "Independent parallel - each agent works alone",
+            ExecutionMode::Pipeline => {
+                "Custom pipeline \u{2014} build arbitrary DAGs of agent blocks"
+            }
         }
     }
 
@@ -39,6 +45,7 @@ impl ExecutionMode {
             ExecutionMode::Relay,
             ExecutionMode::Swarm,
             ExecutionMode::Solo,
+            ExecutionMode::Pipeline,
         ]
     }
 }
@@ -52,6 +59,7 @@ impl fmt::Display for ExecutionMode {
                 ExecutionMode::Relay => "Relay",
                 ExecutionMode::Swarm => "Swarm",
                 ExecutionMode::Solo => "Solo",
+                ExecutionMode::Pipeline => "Pipeline",
             }
         )
     }
@@ -86,6 +94,39 @@ pub enum ProgressEvent {
     },
     IterationComplete {
         iteration: u32,
+    },
+    BlockStarted {
+        block_id: u32,
+        kind: ProviderKind,
+        label: String,
+        iteration: u32,
+    },
+    BlockLog {
+        block_id: u32,
+        kind: ProviderKind,
+        iteration: u32,
+        message: String,
+    },
+    BlockFinished {
+        block_id: u32,
+        kind: ProviderKind,
+        label: String,
+        iteration: u32,
+    },
+    BlockError {
+        block_id: u32,
+        kind: ProviderKind,
+        label: String,
+        iteration: u32,
+        error: String,
+        details: Option<String>,
+    },
+    BlockSkipped {
+        block_id: u32,
+        kind: ProviderKind,
+        label: String,
+        iteration: u32,
+        reason: String,
     },
     AllDone,
 }

@@ -657,6 +657,11 @@ fn insert_prompt_text(app: &mut App, text: &str) {
 fn handle_pipeline_paste(app: &mut App, text: &str) {
     if app.pipeline_show_edit {
         match app.pipeline_edit_field {
+            PipelineEditField::Name => {
+                let clean = text.replace(['\n', '\r'], " ");
+                app.pipeline_edit_name_buf.push_str(&clean);
+                app.pipeline_edit_name_cursor = app.pipeline_edit_name_buf.len();
+            }
             PipelineEditField::Prompt => {
                 insert_text(
                     &mut app.pipeline_edit_prompt_buf,
@@ -665,7 +670,8 @@ fn handle_pipeline_paste(app: &mut App, text: &str) {
                 );
             }
             PipelineEditField::SessionId => {
-                app.pipeline_edit_session_buf.push_str(text);
+                let clean = text.replace(['\n', '\r'], "");
+                app.pipeline_edit_session_buf.push_str(&clean);
                 app.pipeline_edit_session_cursor = app.pipeline_edit_session_buf.len();
             }
             PipelineEditField::Provider => {}
@@ -833,27 +839,43 @@ fn handle_pipeline_builder_key(app: &mut App, key: KeyEvent) {
             app.pipeline_next_id += 1;
             app.pipeline_def.blocks.push(pipeline_mod::PipelineBlock {
                 id,
+                name: format!("Block#{id}"),
                 provider: ProviderKind::Anthropic,
                 prompt: String::new(),
                 session_id: None,
                 position: pos,
             });
             app.pipeline_block_cursor = Some(id);
+            pipeline_ensure_visible(app);
         }
         KeyCode::Char('d') => {
             if let Some(sel) = app.pipeline_block_cursor {
+                let old_index = app
+                    .pipeline_def
+                    .blocks
+                    .iter()
+                    .position(|b| b.id == sel)
+                    .unwrap_or(0);
                 app.pipeline_def.blocks.retain(|b| b.id != sel);
                 app.pipeline_def
                     .connections
                     .retain(|c| c.from != sel && c.to != sel);
-                app.pipeline_block_cursor = app.pipeline_def.blocks.last().map(|b| b.id);
+                if app.pipeline_def.blocks.is_empty() {
+                    app.pipeline_block_cursor = None;
+                } else {
+                    let new_idx = old_index.min(app.pipeline_def.blocks.len() - 1);
+                    app.pipeline_block_cursor = Some(app.pipeline_def.blocks[new_idx].id);
+                    pipeline_ensure_visible(app);
+                }
             }
         }
         KeyCode::Char('e') | KeyCode::Enter => {
             if let Some(sel) = app.pipeline_block_cursor {
                 if let Some(block) = app.pipeline_def.blocks.iter().find(|b| b.id == sel) {
                     app.pipeline_show_edit = true;
-                    app.pipeline_edit_field = PipelineEditField::Provider;
+                    app.pipeline_edit_field = PipelineEditField::Name;
+                    app.pipeline_edit_name_buf = block.name.clone();
+                    app.pipeline_edit_name_cursor = block.name.len();
                     app.pipeline_edit_provider_idx = ProviderKind::all()
                         .iter()
                         .position(|&k| k == block.provider)
@@ -893,6 +915,7 @@ fn handle_pipeline_builder_key(app: &mut App, key: KeyEvent) {
                 app.pipeline_canvas_offset.1 = app.pipeline_canvas_offset.1.saturating_sub(1);
             } else {
                 pipeline_spatial_nav(app, NavAxis::Vertical, true);
+                pipeline_ensure_visible(app);
             }
         }
         KeyCode::Down | KeyCode::Char('j') => {
@@ -900,6 +923,7 @@ fn handle_pipeline_builder_key(app: &mut App, key: KeyEvent) {
                 app.pipeline_canvas_offset.1 += 1;
             } else {
                 pipeline_spatial_nav(app, NavAxis::Vertical, false);
+                pipeline_ensure_visible(app);
             }
         }
         KeyCode::Left | KeyCode::Char('h') => {
@@ -907,6 +931,7 @@ fn handle_pipeline_builder_key(app: &mut App, key: KeyEvent) {
                 app.pipeline_canvas_offset.0 = app.pipeline_canvas_offset.0.saturating_sub(1);
             } else {
                 pipeline_spatial_nav(app, NavAxis::Horizontal, true);
+                pipeline_ensure_visible(app);
             }
         }
         KeyCode::Right | KeyCode::Char('l') => {
@@ -914,6 +939,7 @@ fn handle_pipeline_builder_key(app: &mut App, key: KeyEvent) {
                 app.pipeline_canvas_offset.0 += 1;
             } else {
                 pipeline_spatial_nav(app, NavAxis::Horizontal, false);
+                pipeline_ensure_visible(app);
             }
         }
         _ => {}
@@ -963,6 +989,41 @@ fn pipeline_spatial_nav(app: &mut App, axis: NavAxis, negative: bool) {
     }
 }
 
+fn pipeline_ensure_visible(app: &mut App) {
+    use crate::screen::pipeline::{BLOCK_H, BLOCK_W, CELL_H, CELL_W};
+
+    let Some(sel_id) = app.pipeline_block_cursor else {
+        return;
+    };
+    let Some(block) = app.pipeline_def.blocks.iter().find(|b| b.id == sel_id) else {
+        return;
+    };
+
+    let sx = block.position.0 as i16 * CELL_W as i16;
+    let sy = block.position.1 as i16 * CELL_H as i16;
+
+    // Canvas inner ≈ terminal size minus chrome (title 3 + prompt 6 + help 2 + borders 2)
+    let (term_w, term_h) = crossterm::terminal::size().unwrap_or((80, 24));
+    let visible_w = (term_w.saturating_sub(4)) as i16;   // border + padding
+    let visible_h = (term_h.saturating_sub(13)) as i16;  // title+prompt+help+borders
+
+    let ox = &mut app.pipeline_canvas_offset.0;
+    let oy = &mut app.pipeline_canvas_offset.1;
+
+    if sx < *ox {
+        *ox = sx;
+    }
+    if sx + BLOCK_W as i16 > *ox + visible_w {
+        *ox = sx + BLOCK_W as i16 - visible_w;
+    }
+    if sy < *oy {
+        *oy = sy;
+    }
+    if sy + BLOCK_H as i16 > *oy + visible_h {
+        *oy = sy + BLOCK_H as i16 - visible_h;
+    }
+}
+
 fn handle_pipeline_edit_key(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Esc => {
@@ -970,19 +1031,23 @@ fn handle_pipeline_edit_key(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Tab => {
             app.pipeline_edit_field = match app.pipeline_edit_field {
+                PipelineEditField::Name => PipelineEditField::Provider,
                 PipelineEditField::Provider => PipelineEditField::Prompt,
                 PipelineEditField::Prompt => PipelineEditField::SessionId,
-                PipelineEditField::SessionId => PipelineEditField::Provider,
+                PipelineEditField::SessionId => PipelineEditField::Name,
             };
         }
         KeyCode::Enter => {
             match app.pipeline_edit_field {
-                PipelineEditField::Provider | PipelineEditField::SessionId => {
+                PipelineEditField::Name
+                | PipelineEditField::Provider
+                | PipelineEditField::SessionId => {
                     // Confirm and save
                     if let Some(sel) = app.pipeline_block_cursor {
                         if let Some(block) =
                             app.pipeline_def.blocks.iter_mut().find(|b| b.id == sel)
                         {
+                            block.name = app.pipeline_edit_name_buf.clone();
                             block.provider = ProviderKind::all()
                                 .get(app.pipeline_edit_provider_idx)
                                 .copied()
@@ -1008,6 +1073,17 @@ fn handle_pipeline_edit_key(app: &mut App, key: KeyEvent) {
             }
         }
         _ => match app.pipeline_edit_field {
+            PipelineEditField::Name => match key.code {
+                KeyCode::Char(c) => {
+                    app.pipeline_edit_name_buf.push(c);
+                    app.pipeline_edit_name_cursor = app.pipeline_edit_name_buf.len();
+                }
+                KeyCode::Backspace => {
+                    app.pipeline_edit_name_buf.pop();
+                    app.pipeline_edit_name_cursor = app.pipeline_edit_name_buf.len();
+                }
+                _ => {}
+            },
             PipelineEditField::Provider => match key.code {
                 KeyCode::Left => {
                     let len = ProviderKind::all().len();
@@ -1494,7 +1570,9 @@ fn reset_to_home(app: &mut App) {
     app.pipeline_removing_conn = false;
     app.pipeline_conn_cursor = 0;
     app.pipeline_show_edit = false;
-    app.pipeline_edit_field = PipelineEditField::Provider;
+    app.pipeline_edit_field = PipelineEditField::Name;
+    app.pipeline_edit_name_buf.clear();
+    app.pipeline_edit_name_cursor = 0;
     app.pipeline_edit_provider_idx = 0;
     app.pipeline_edit_prompt_buf.clear();
     app.pipeline_edit_prompt_cursor = 0;
