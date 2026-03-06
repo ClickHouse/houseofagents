@@ -206,7 +206,11 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
 
-    fn named(name: &str, _kind: ProviderKind, provider: Box<dyn crate::provider::Provider>) -> (String, Box<dyn crate::provider::Provider>) {
+    fn named(
+        name: &str,
+        _kind: ProviderKind,
+        provider: Box<dyn crate::provider::Provider>,
+    ) -> (String, Box<dyn crate::provider::Provider>) {
         (name.to_string(), provider)
     }
 
@@ -217,16 +221,24 @@ mod tests {
         let recv_a = Arc::new(Mutex::new(Vec::new()));
         let recv_b = Arc::new(Mutex::new(Vec::new()));
         let agents = vec![
-            named("Claude", ProviderKind::Anthropic, Box::new(MockProvider::with_responses(
+            named(
+                "Claude",
                 ProviderKind::Anthropic,
-                vec![ok_response("first output")],
-                recv_a.clone(),
-            ))),
-            named("OpenAI", ProviderKind::OpenAI, Box::new(MockProvider::with_responses(
+                Box::new(MockProvider::with_responses(
+                    ProviderKind::Anthropic,
+                    vec![ok_response("first output")],
+                    recv_a.clone(),
+                )),
+            ),
+            named(
+                "OpenAI",
                 ProviderKind::OpenAI,
-                vec![ok_response("second output")],
-                recv_b.clone(),
-            ))),
+                Box::new(MockProvider::with_responses(
+                    ProviderKind::OpenAI,
+                    vec![ok_response("second output")],
+                    recv_b.clone(),
+                )),
+            ),
         ];
         let (tx, rx) = mpsc::unbounded_channel();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -266,16 +278,24 @@ mod tests {
         let recv_a = Arc::new(Mutex::new(Vec::new()));
         let recv_b = Arc::new(Mutex::new(Vec::new()));
         let agents = vec![
-            named("Claude", ProviderKind::Anthropic, Box::new(MockProvider::with_responses(
+            named(
+                "Claude",
                 ProviderKind::Anthropic,
-                vec![ok_response("a out")],
-                recv_a,
-            ))),
-            named("OpenAI", ProviderKind::OpenAI, Box::new(MockProvider::with_responses(
+                Box::new(MockProvider::with_responses(
+                    ProviderKind::Anthropic,
+                    vec![ok_response("a out")],
+                    recv_a,
+                )),
+            ),
+            named(
+                "OpenAI",
                 ProviderKind::OpenAI,
-                vec![ok_response("b out")],
-                recv_b.clone(),
-            ))),
+                Box::new(MockProvider::with_responses(
+                    ProviderKind::OpenAI,
+                    vec![ok_response("b out")],
+                    recv_b.clone(),
+                )),
+            ),
         ];
         let (tx, _rx) = mpsc::unbounded_channel();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -296,11 +316,15 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let out = OutputManager::new(dir.path(), None).expect("out");
         let recv = Arc::new(Mutex::new(Vec::new()));
-        let agents = vec![named("Claude", ProviderKind::Anthropic, Box::new(MockProvider::with_responses(
+        let agents = vec![named(
+            "Claude",
             ProviderKind::Anthropic,
-            vec![ok_response("new")],
-            recv.clone(),
-        )))];
+            Box::new(MockProvider::with_responses(
+                ProviderKind::Anthropic,
+                vec![ok_response("new")],
+                recv.clone(),
+            )),
+        )];
         let (tx, _rx) = mpsc::unbounded_channel();
         let cancel = Arc::new(AtomicBool::new(false));
 
@@ -329,11 +353,15 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let out = OutputManager::new(dir.path(), None).expect("out");
         let recv = Arc::new(Mutex::new(Vec::new()));
-        let agents = vec![named("Claude", ProviderKind::Anthropic, Box::new(MockProvider::with_responses(
+        let agents = vec![named(
+            "Claude",
             ProviderKind::Anthropic,
-            vec![ok_response("new")],
-            recv.clone(),
-        )))];
+            Box::new(MockProvider::with_responses(
+                ProviderKind::Anthropic,
+                vec![ok_response("new")],
+                recv.clone(),
+            )),
+        )];
         let (tx, _rx) = mpsc::unbounded_channel();
         let cancel = Arc::new(AtomicBool::new(false));
 
@@ -362,17 +390,28 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let out = OutputManager::new(dir.path(), None).expect("out");
         let recv = Arc::new(Mutex::new(Vec::new()));
-        let agents = vec![named("Claude", ProviderKind::Anthropic, Box::new(MockProvider::err(
+        let agents = vec![named(
+            "Claude",
             ProviderKind::Anthropic,
-            "bad",
-            recv,
-        )))];
+            Box::new(MockProvider::err(ProviderKind::Anthropic, "bad", recv)),
+        )];
         let (tx, rx) = mpsc::unbounded_channel();
         let cancel = Arc::new(AtomicBool::new(false));
 
-        run_relay("p", agents, 2, 1, None, false, HashMap::new(), &out, tx, cancel)
-            .await
-            .expect("run");
+        run_relay(
+            "p",
+            agents,
+            2,
+            1,
+            None,
+            false,
+            HashMap::new(),
+            &out,
+            tx,
+            cancel,
+        )
+        .await
+        .expect("run");
 
         let log = std::fs::read_to_string(out.run_dir().join("_errors.log")).expect("log");
         assert!(log.contains("iter1"));
@@ -388,17 +427,32 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let out = OutputManager::new(dir.path(), None).expect("out");
         let recv = Arc::new(Mutex::new(Vec::new()));
-        let agents = vec![named("Claude", ProviderKind::Anthropic, Box::new(MockProvider::with_responses(
+        let agents = vec![named(
+            "Claude",
             ProviderKind::Anthropic,
-            vec![ok_response("x")],
-            recv.clone(),
-        )))];
+            Box::new(MockProvider::with_responses(
+                ProviderKind::Anthropic,
+                vec![ok_response("x")],
+                recv.clone(),
+            )),
+        )];
         let (tx, rx) = mpsc::unbounded_channel();
         let cancel = Arc::new(AtomicBool::new(true));
 
-        run_relay("p", agents, 1, 1, None, false, HashMap::new(), &out, tx, cancel)
-            .await
-            .expect("run");
+        run_relay(
+            "p",
+            agents,
+            1,
+            1,
+            None,
+            false,
+            HashMap::new(),
+            &out,
+            tx,
+            cancel,
+        )
+        .await
+        .expect("run");
 
         assert!(recv.lock().expect("lock").is_empty());
         let events = collect_progress_events(rx);
@@ -412,17 +466,32 @@ mod tests {
         let out = OutputManager::new(dir.path(), None).expect("out");
         std::fs::create_dir_all(out.run_dir().join("Claude_iter1.md")).expect("mkdir");
         let recv = Arc::new(Mutex::new(Vec::new()));
-        let agents = vec![named("Claude", ProviderKind::Anthropic, Box::new(MockProvider::with_responses(
+        let agents = vec![named(
+            "Claude",
             ProviderKind::Anthropic,
-            vec![ok_response("x")],
-            recv,
-        )))];
+            Box::new(MockProvider::with_responses(
+                ProviderKind::Anthropic,
+                vec![ok_response("x")],
+                recv,
+            )),
+        )];
         let (tx, rx) = mpsc::unbounded_channel();
         let cancel = Arc::new(AtomicBool::new(false));
 
-        run_relay("p", agents, 2, 1, None, false, HashMap::new(), &out, tx, cancel)
-            .await
-            .expect("run");
+        run_relay(
+            "p",
+            agents,
+            2,
+            1,
+            None,
+            false,
+            HashMap::new(),
+            &out,
+            tx,
+            cancel,
+        )
+        .await
+        .expect("run");
 
         let events = collect_progress_events(rx);
         assert!(events.iter().any(|e| {
@@ -442,16 +511,24 @@ mod tests {
         let recv_a = Arc::new(Mutex::new(Vec::new()));
         let recv_b = Arc::new(Mutex::new(Vec::new()));
         let agents = vec![
-            named("Claude", ProviderKind::Anthropic, Box::new(MockProvider::with_responses(
+            named(
+                "Claude",
                 ProviderKind::Anthropic,
-                vec![ok_response("first output")],
-                recv_a.clone(),
-            ))),
-            named("OpenAI", ProviderKind::OpenAI, Box::new(MockProvider::with_responses(
+                Box::new(MockProvider::with_responses(
+                    ProviderKind::Anthropic,
+                    vec![ok_response("first output")],
+                    recv_a.clone(),
+                )),
+            ),
+            named(
+                "OpenAI",
                 ProviderKind::OpenAI,
-                vec![ok_response("second output")],
-                recv_b.clone(),
-            ))),
+                Box::new(MockProvider::with_responses(
+                    ProviderKind::OpenAI,
+                    vec![ok_response("second output")],
+                    recv_b.clone(),
+                )),
+            ),
         ];
         let (tx, _rx) = mpsc::unbounded_channel();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -486,16 +563,24 @@ mod tests {
         let recv_a = Arc::new(Mutex::new(Vec::new()));
         let recv_b = Arc::new(Mutex::new(Vec::new()));
         let agents = vec![
-            named("Claude", ProviderKind::Anthropic, Box::new(MockProvider::with_responses(
+            named(
+                "Claude",
                 ProviderKind::Anthropic,
-                vec![ok_response("first output")],
-                recv_a,
-            ))),
-            named("OpenAI", ProviderKind::OpenAI, Box::new(MockProvider::with_responses(
+                Box::new(MockProvider::with_responses(
+                    ProviderKind::Anthropic,
+                    vec![ok_response("first output")],
+                    recv_a,
+                )),
+            ),
+            named(
+                "OpenAI",
                 ProviderKind::OpenAI,
-                vec![ok_response("second output")],
-                recv_b.clone(),
-            ))),
+                Box::new(MockProvider::with_responses(
+                    ProviderKind::OpenAI,
+                    vec![ok_response("second output")],
+                    recv_b.clone(),
+                )),
+            ),
         ];
         let (tx, _rx) = mpsc::unbounded_channel();
         let cancel = Arc::new(AtomicBool::new(false));

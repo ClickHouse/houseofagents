@@ -96,9 +96,7 @@ pub fn upstream_of(def: &PipelineDefinition, id: BlockId) -> Vec<BlockId> {
 }
 
 /// Kahn's algorithm: returns parallelizable layers or Err on cycle.
-pub fn topological_layers(
-    def: &PipelineDefinition,
-) -> Result<Vec<Vec<BlockId>>, CycleError> {
+pub fn topological_layers(def: &PipelineDefinition) -> Result<Vec<Vec<BlockId>>, CycleError> {
     let block_ids: HashSet<BlockId> = def.blocks.iter().map(|b| b.id).collect();
     let mut in_degree: HashMap<BlockId, usize> = block_ids.iter().map(|&id| (id, 0)).collect();
     let mut downstream: HashMap<BlockId, Vec<BlockId>> = HashMap::new();
@@ -692,7 +690,10 @@ mod tests {
         PipelineConnection { from, to }
     }
 
-    fn def_with(blocks: Vec<PipelineBlock>, connections: Vec<PipelineConnection>) -> PipelineDefinition {
+    fn def_with(
+        blocks: Vec<PipelineBlock>,
+        connections: Vec<PipelineConnection>,
+    ) -> PipelineDefinition {
         PipelineDefinition {
             initial_prompt: "test".into(),
             iterations: 1,
@@ -723,10 +724,7 @@ mod tests {
 
     #[test]
     fn root_and_terminal_isolated_blocks() {
-        let d = def_with(
-            vec![block(1, 0, 0), block(2, 1, 0)],
-            vec![],
-        );
+        let d = def_with(vec![block(1, 0, 0), block(2, 1, 0)], vec![]);
         let roots = root_blocks(&d);
         let terms = terminal_blocks(&d);
         assert!(roots.contains(&1) && roots.contains(&2));
@@ -737,7 +735,12 @@ mod tests {
     fn root_and_terminal_diamond() {
         // 1 → 2, 1 → 3, 2 → 4, 3 → 4
         let d = def_with(
-            vec![block(1, 0, 0), block(2, 1, 0), block(3, 1, 1), block(4, 2, 0)],
+            vec![
+                block(1, 0, 0),
+                block(2, 1, 0),
+                block(3, 1, 1),
+                block(4, 2, 0),
+            ],
             vec![conn(1, 2), conn(1, 3), conn(2, 4), conn(3, 4)],
         );
         assert_eq!(root_blocks(&d), vec![1]);
@@ -749,7 +752,12 @@ mod tests {
     #[test]
     fn upstream_of_returns_direct_predecessors() {
         let d = def_with(
-            vec![block(1, 0, 0), block(2, 1, 0), block(3, 1, 1), block(4, 2, 0)],
+            vec![
+                block(1, 0, 0),
+                block(2, 1, 0),
+                block(3, 1, 1),
+                block(4, 2, 0),
+            ],
             vec![conn(1, 4), conn(2, 4), conn(3, 4)],
         );
         let mut ups = upstream_of(&d, 4);
@@ -772,7 +780,12 @@ mod tests {
     #[test]
     fn topo_layers_diamond() {
         let d = def_with(
-            vec![block(1, 0, 0), block(2, 1, 0), block(3, 1, 1), block(4, 2, 0)],
+            vec![
+                block(1, 0, 0),
+                block(2, 1, 0),
+                block(3, 1, 1),
+                block(4, 2, 0),
+            ],
             vec![conn(1, 2), conn(1, 3), conn(2, 4), conn(3, 4)],
         );
         let layers = topological_layers(&d).unwrap();
@@ -785,7 +798,12 @@ mod tests {
     #[test]
     fn topo_layers_fan_out() {
         let d = def_with(
-            vec![block(1, 0, 0), block(2, 1, 0), block(3, 1, 1), block(4, 1, 2)],
+            vec![
+                block(1, 0, 0),
+                block(2, 1, 0),
+                block(3, 1, 1),
+                block(4, 1, 2),
+            ],
             vec![conn(1, 2), conn(1, 3), conn(1, 4)],
         );
         let layers = topological_layers(&d).unwrap();
@@ -817,10 +835,7 @@ mod tests {
 
     #[test]
     fn topo_layers_rejects_self_edge() {
-        let d = def_with(
-            vec![block(1, 0, 0)],
-            vec![conn(1, 1)],
-        );
+        let d = def_with(vec![block(1, 0, 0)], vec![conn(1, 1)]);
         assert!(topological_layers(&d).is_err());
     }
 
@@ -855,7 +870,12 @@ mod tests {
     #[test]
     fn would_create_cycle_diamond_no_cycle() {
         let d = def_with(
-            vec![block(1, 0, 0), block(2, 1, 0), block(3, 1, 1), block(4, 2, 0)],
+            vec![
+                block(1, 0, 0),
+                block(2, 1, 0),
+                block(3, 1, 1),
+                block(4, 2, 0),
+            ],
             vec![conn(1, 2), conn(1, 3), conn(2, 4)],
         );
         // Adding 3→4 is valid (diamond)
@@ -872,10 +892,7 @@ mod tests {
 
     #[test]
     fn next_free_position_fills_gaps() {
-        let d = def_with(
-            vec![block(1, 0, 0), block(2, 2, 0)],
-            vec![],
-        );
+        let d = def_with(vec![block(1, 0, 0), block(2, 2, 0)], vec![]);
         // (1, 0) is the first gap
         assert_eq!(next_free_position(&d), (1, 0));
     }
@@ -883,10 +900,7 @@ mod tests {
     #[test]
     fn next_free_position_wraps_to_next_row() {
         // Fill entire row 0 cols 0..100? That's too many. Let's check a smaller scenario.
-        let d = def_with(
-            vec![block(1, 0, 0), block(2, 1, 0)],
-            vec![],
-        );
+        let d = def_with(vec![block(1, 0, 0), block(2, 1, 0)], vec![]);
         assert_eq!(next_free_position(&d), (2, 0));
     }
 
@@ -896,10 +910,7 @@ mod tests {
     fn save_load_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.toml");
-        let def = def_with(
-            vec![block(1, 0, 0), block(2, 1, 0)],
-            vec![conn(1, 2)],
-        );
+        let def = def_with(vec![block(1, 0, 0), block(2, 1, 0)], vec![conn(1, 2)]);
         save_pipeline(&def, &path).unwrap();
         let loaded = load_pipeline(&path).unwrap();
         assert_eq!(loaded.blocks.len(), 2);

@@ -76,7 +76,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         .constraints([
             Constraint::Length(3), // title
             Constraint::Length(6), // prompt + session/iterations
-            Constraint::Min(0),   // builder canvas
+            Constraint::Min(0),    // builder canvas
             Constraint::Length(2), // help + status
         ])
         .split(area);
@@ -103,7 +103,11 @@ fn draw_title(f: &mut Frame, area: Rect) {
         .title(" Custom Pipeline ")
         .title_alignment(ratatui::layout::Alignment::Center)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+        .border_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        );
     f.render_widget(block, area);
 }
 
@@ -160,10 +164,8 @@ fn draw_prompt_area(f: &mut Frame, app: &App, area: Rect) {
         app.pipeline_show_edit || app.pipeline_file_dialog.is_some() || app.error_modal.is_some();
     if prompt_focus && !has_overlay && inner.width > 0 && inner.height > 0 {
         let visible_row = cursor_row.saturating_sub(scroll_y as usize);
-        let x =
-            inner.x + (cursor_col.min(inner.width.saturating_sub(1) as usize) as u16);
-        let y = inner.y
-            + (visible_row.min(inner.height.saturating_sub(1) as usize) as u16);
+        let x = inner.x + (cursor_col.min(inner.width.saturating_sub(1) as usize) as u16);
+        let y = inner.y + (visible_row.min(inner.height.saturating_sub(1) as usize) as u16);
         f.set_cursor_position((x, y));
     }
 
@@ -181,7 +183,11 @@ fn draw_prompt_area(f: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(Color::DarkGray)
     };
     let name_display = if app.pipeline_session_name.is_empty() {
-        if name_focus { "_".to_string() } else { "(optional)".to_string() }
+        if name_focus {
+            "_".to_string()
+        } else {
+            "(optional)".to_string()
+        }
     } else if name_focus {
         format!("{}_", app.pipeline_session_name)
     } else {
@@ -332,10 +338,7 @@ fn draw_canvas(f: &mut Frame, app: &App, area: Rect) {
                     format!("sess: {sess_display}"),
                     Style::default().fg(Color::DarkGray),
                 ));
-                f.render_widget(
-                    sess_p,
-                    Rect::new(inner.x, inner.y + 2, inner.width, 1),
-                );
+                f.render_widget(sess_p, Rect::new(inner.x, inner.y + 2, inner.width, 1));
             }
         }
     }
@@ -364,10 +367,11 @@ fn draw_canvas(f: &mut Frame, app: &App, area: Rect) {
     for (ci, conn) in app.pipeline_def.connections.iter().enumerate() {
         let fb = app.pipeline_def.blocks.iter().find(|b| b.id == conn.from);
         let tb = app.pipeline_def.blocks.iter().find(|b| b.id == conn.to);
-        let (Some(fb), Some(tb)) = (fb, tb) else { continue };
+        let (Some(fb), Some(tb)) = (fb, tb) else {
+            continue;
+        };
 
-        let removing = app.pipeline_removing_conn
-            && is_conn_for_selected(app, conn.from, conn.to);
+        let removing = app.pipeline_removing_conn && is_conn_for_selected(app, conn.from, conn.to);
         let highlighted = highlighted_global_idx == Some(ci);
         let color = if highlighted {
             Color::Red
@@ -398,7 +402,12 @@ fn draw_canvas(f: &mut Frame, app: &App, area: Rect) {
             } else {
                 conn_map.insert(
                     (last.x2, last.y2),
-                    WireCell { dirs: 0, color, is_arrow: true, arrow_char: arrow_ch },
+                    WireCell {
+                        dirs: 0,
+                        color,
+                        is_arrow: true,
+                        arrow_char: arrow_ch,
+                    },
                 );
             }
         }
@@ -414,7 +423,11 @@ fn draw_canvas(f: &mut Frame, app: &App, area: Rect) {
             if pixel_hits_block(wx, wy, &app.pipeline_def.blocks) {
                 continue;
             }
-            let ch = if cell.is_arrow { cell.arrow_char } else { dirs_to_char(cell.dirs) };
+            let ch = if cell.is_arrow {
+                cell.arrow_char
+            } else {
+                dirs_to_char(cell.dirs)
+            };
             put_char(
                 f,
                 canvas_inner,
@@ -431,19 +444,12 @@ fn draw_canvas(f: &mut Frame, app: &App, area: Rect) {
         let status = Paragraph::new("Select target block (Enter=connect, Esc=cancel)")
             .style(Style::default().fg(Color::Yellow));
         let sy = canvas_inner.y + canvas_inner.height.saturating_sub(1);
-        f.render_widget(
-            status,
-            Rect::new(canvas_inner.x, sy, canvas_inner.width, 1),
-        );
+        f.render_widget(status, Rect::new(canvas_inner.x, sy, canvas_inner.width, 1));
     } else if app.pipeline_removing_conn {
-        let status =
-            Paragraph::new("\u{2191}\u{2193} cycle connections, Enter=remove, Esc=cancel")
-                .style(Style::default().fg(Color::Yellow));
+        let status = Paragraph::new("\u{2191}\u{2193} cycle connections, Enter=remove, Esc=cancel")
+            .style(Style::default().fg(Color::Yellow));
         let sy = canvas_inner.y + canvas_inner.height.saturating_sub(1);
-        f.render_widget(
-            status,
-            Rect::new(canvas_inner.x, sy, canvas_inner.width, 1),
-        );
+        f.render_widget(status, Rect::new(canvas_inner.x, sy, canvas_inner.width, 1));
     }
 }
 
@@ -486,8 +492,7 @@ fn assign_lanes(
         let ta = bmap.get(&ca.to).copied().unwrap_or((0, 0));
         let fb = bmap.get(&cb.from).copied().unwrap_or((0, 0));
         let tb = bmap.get(&cb.to).copied().unwrap_or((0, 0));
-        (fa.0, ta.0, fa.1, ta.1, ca.from, ca.to)
-            .cmp(&(fb.0, tb.0, fb.1, tb.1, cb.from, cb.to))
+        (fa.0, ta.0, fa.1, ta.1, ca.from, ca.to).cmp(&(fb.0, tb.0, fb.1, tb.1, cb.from, cb.to))
     });
 
     let mut lanes = vec![0usize; conns.len()];
@@ -502,8 +507,7 @@ fn assign_ports(
     conns: &[crate::execution::pipeline::PipelineConnection],
     blocks: &[crate::execution::pipeline::PipelineBlock],
 ) -> Vec<(i16, i16)> {
-    let bmap: HashMap<BlockId, (u16, u16)> =
-        blocks.iter().map(|b| (b.id, b.position)).collect();
+    let bmap: HashMap<BlockId, (u16, u16)> = blocks.iter().map(|b| (b.id, b.position)).collect();
 
     let mut outgoing: HashMap<BlockId, Vec<usize>> = HashMap::new();
     let mut incoming: HashMap<BlockId, Vec<usize>> = HashMap::new();
@@ -579,13 +583,33 @@ fn route_wire(
         let corridor_clear = (fc + 1..tc).all(|c| !grid_occ.contains(&(c, fr)));
         if corridor_clear {
             if ey == ny {
-                return vec![WireSeg { x1: ex, y1: ey, x2: nx, y2: ny }];
+                return vec![WireSeg {
+                    x1: ex,
+                    y1: ey,
+                    x2: nx,
+                    y2: ny,
+                }];
             }
             let mid_x = (ex + nx) / 2;
             return vec![
-                WireSeg { x1: ex, y1: ey, x2: mid_x, y2: ey },
-                WireSeg { x1: mid_x, y1: ey, x2: mid_x, y2: ny },
-                WireSeg { x1: mid_x, y1: ny, x2: nx, y2: ny },
+                WireSeg {
+                    x1: ex,
+                    y1: ey,
+                    x2: mid_x,
+                    y2: ey,
+                },
+                WireSeg {
+                    x1: mid_x,
+                    y1: ey,
+                    x2: mid_x,
+                    y2: ny,
+                },
+                WireSeg {
+                    x1: mid_x,
+                    y1: ny,
+                    x2: nx,
+                    y2: ny,
+                },
             ];
         }
     }
@@ -599,19 +623,41 @@ fn route_wire(
     let tier = lane as i16;
     // Keep the horizontal corridor in row gaps (between block rows) for all tiers.
     // Advancing by CELL_H preserves the same in-gap offset and avoids cutting through blocks.
-    let hy = fr.max(tr) as i16 * CELL_H as i16
-        + BLOCK_H as i16
-        + 1
-        + tier * CELL_H as i16;
+    let hy = fr.max(tr) as i16 * CELL_H as i16 + BLOCK_H as i16 + 1 + tier * CELL_H as i16;
     let v1 = ex + side_lane.min(side_clamp);
     let v2 = nx - side_lane.min(side_clamp);
 
     vec![
-        WireSeg { x1: ex, y1: ey, x2: v1, y2: ey },
-        WireSeg { x1: v1, y1: ey, x2: v1, y2: hy },
-        WireSeg { x1: v1, y1: hy, x2: v2, y2: hy },
-        WireSeg { x1: v2, y1: hy, x2: v2, y2: ny },
-        WireSeg { x1: v2, y1: ny, x2: nx, y2: ny },
+        WireSeg {
+            x1: ex,
+            y1: ey,
+            x2: v1,
+            y2: ey,
+        },
+        WireSeg {
+            x1: v1,
+            y1: ey,
+            x2: v1,
+            y2: hy,
+        },
+        WireSeg {
+            x1: v1,
+            y1: hy,
+            x2: v2,
+            y2: hy,
+        },
+        WireSeg {
+            x1: v2,
+            y1: hy,
+            x2: v2,
+            y2: ny,
+        },
+        WireSeg {
+            x1: v2,
+            y1: ny,
+            x2: nx,
+            y2: ny,
+        },
     ]
 }
 
@@ -626,25 +672,51 @@ fn color_rank(c: Color) -> u8 {
 fn rasterize_seg(seg: &WireSeg, color: Color, map: &mut HashMap<(i16, i16), WireCell>) {
     if seg.y1 == seg.y2 {
         let y = seg.y1;
-        let (lo, hi) = if seg.x1 <= seg.x2 { (seg.x1, seg.x2) } else { (seg.x2, seg.x1) };
+        let (lo, hi) = if seg.x1 <= seg.x2 {
+            (seg.x1, seg.x2)
+        } else {
+            (seg.x2, seg.x1)
+        };
         for x in lo..=hi {
-            let c = map
-                .entry((x, y))
-                .or_insert(WireCell { dirs: 0, color, is_arrow: false, arrow_char: ' ' });
-            if x > lo { c.dirs |= DIR_W; }
-            if x < hi { c.dirs |= DIR_E; }
-            if color_rank(color) > color_rank(c.color) { c.color = color; }
+            let c = map.entry((x, y)).or_insert(WireCell {
+                dirs: 0,
+                color,
+                is_arrow: false,
+                arrow_char: ' ',
+            });
+            if x > lo {
+                c.dirs |= DIR_W;
+            }
+            if x < hi {
+                c.dirs |= DIR_E;
+            }
+            if color_rank(color) > color_rank(c.color) {
+                c.color = color;
+            }
         }
     } else {
         let x = seg.x1;
-        let (lo, hi) = if seg.y1 <= seg.y2 { (seg.y1, seg.y2) } else { (seg.y2, seg.y1) };
+        let (lo, hi) = if seg.y1 <= seg.y2 {
+            (seg.y1, seg.y2)
+        } else {
+            (seg.y2, seg.y1)
+        };
         for y in lo..=hi {
-            let c = map
-                .entry((x, y))
-                .or_insert(WireCell { dirs: 0, color, is_arrow: false, arrow_char: ' ' });
-            if y > lo { c.dirs |= DIR_N; }
-            if y < hi { c.dirs |= DIR_S; }
-            if color_rank(color) > color_rank(c.color) { c.color = color; }
+            let c = map.entry((x, y)).or_insert(WireCell {
+                dirs: 0,
+                color,
+                is_arrow: false,
+                arrow_char: ' ',
+            });
+            if y > lo {
+                c.dirs |= DIR_N;
+            }
+            if y < hi {
+                c.dirs |= DIR_S;
+            }
+            if color_rank(color) > color_rank(c.color) {
+                c.color = color;
+            }
         }
     }
 }
@@ -717,7 +789,7 @@ fn draw_edit_popup(f: &mut Frame, app: &App, area: Rect) {
             Constraint::Length(1), // spacer
             Constraint::Length(2), // Provider
             Constraint::Length(1), // spacer
-            Constraint::Min(6),   // Prompt
+            Constraint::Min(6),    // Prompt
             Constraint::Length(1), // spacer
             Constraint::Length(2), // Session ID
             Constraint::Length(1), // spacer
@@ -742,12 +814,17 @@ fn draw_edit_popup(f: &mut Frame, app: &App, area: Rect) {
 
     // Agent selector
     let agent_focus = app.pipeline_edit_field == PipelineEditField::Agent;
-    let agent_name = app.config.agents
+    let agent_name = app
+        .config
+        .agents
         .get(app.pipeline_edit_agent_idx)
         .map(|a| a.name.as_str())
         .unwrap_or("(none)");
-    let avail_agents: std::collections::HashMap<&str, bool> =
-        app.available_agents().into_iter().map(|(a, avail)| (a.name.as_str(), avail)).collect();
+    let avail_agents: std::collections::HashMap<&str, bool> = app
+        .available_agents()
+        .into_iter()
+        .map(|(a, avail)| (a.name.as_str(), avail))
+        .collect();
     let is_avail = avail_agents.get(agent_name).copied().unwrap_or(false);
     let agent_color = if is_avail { Color::Green } else { Color::Red };
     let arrow_style = Style::default().fg(if agent_focus {
@@ -760,7 +837,9 @@ fn draw_edit_popup(f: &mut Frame, app: &App, area: Rect) {
         Span::styled("\u{25c4} ", arrow_style),
         Span::styled(
             agent_name,
-            Style::default().fg(agent_color).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(agent_color)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(" \u{25ba}", arrow_style),
     ]);
@@ -931,7 +1010,11 @@ mod routing_tests {
         for seg in segs {
             if seg.y1 == seg.y2 {
                 let y = seg.y1;
-                let (lo, hi) = if seg.x1 <= seg.x2 { (seg.x1, seg.x2) } else { (seg.x2, seg.x1) };
+                let (lo, hi) = if seg.x1 <= seg.x2 {
+                    (seg.x1, seg.x2)
+                } else {
+                    (seg.x2, seg.x1)
+                };
                 for x in lo..=hi {
                     assert!(
                         !pixel_hits_block(x, y, blocks),
@@ -940,7 +1023,11 @@ mod routing_tests {
                 }
             } else {
                 let x = seg.x1;
-                let (lo, hi) = if seg.y1 <= seg.y2 { (seg.y1, seg.y2) } else { (seg.y2, seg.y1) };
+                let (lo, hi) = if seg.y1 <= seg.y2 {
+                    (seg.y1, seg.y2)
+                } else {
+                    (seg.y2, seg.y1)
+                };
                 for y in lo..=hi {
                     assert!(
                         !pixel_hits_block(x, y, blocks),
@@ -965,7 +1052,11 @@ mod routing_tests {
         let blocks = vec![block_at(1, 0, 0), block_at(2, 1, 0)];
         let occ = grid_occupancy(&blocks);
         let segs = route_wire((0, 0), (1, 0), &occ, 0, -1, 1);
-        assert_eq!(segs.len(), 3, "same-row clear with different port offsets = 3 segments");
+        assert_eq!(
+            segs.len(),
+            3,
+            "same-row clear with different port offsets = 3 segments"
+        );
         no_seg_hits_block(&segs, &blocks);
     }
 
@@ -1001,7 +1092,11 @@ mod routing_tests {
         let blocks = vec![block_at(1, 1, 0), block_at(2, 1, 2)];
         let occ = grid_occupancy(&blocks);
         let segs = route_wire((1, 0), (1, 2), &occ, 0, 0, 0);
-        assert_eq!(segs.len(), 5, "same column different row = backward U-route = 5 segments");
+        assert_eq!(
+            segs.len(),
+            5,
+            "same column different row = backward U-route = 5 segments"
+        );
         no_seg_hits_block(&segs, &blocks);
     }
 
@@ -1029,13 +1124,23 @@ mod routing_tests {
         let mut map: HashMap<(i16, i16), WireCell> = HashMap::new();
         // Horizontal segment through (5,5)
         rasterize_seg(
-            &WireSeg { x1: 3, y1: 5, x2: 7, y2: 5 },
+            &WireSeg {
+                x1: 3,
+                y1: 5,
+                x2: 7,
+                y2: 5,
+            },
             Color::DarkGray,
             &mut map,
         );
         // Vertical segment through (5,5)
         rasterize_seg(
-            &WireSeg { x1: 5, y1: 3, x2: 5, y2: 7 },
+            &WireSeg {
+                x1: 5,
+                y1: 3,
+                x2: 5,
+                y2: 7,
+            },
             Color::DarkGray,
             &mut map,
         );
@@ -1048,13 +1153,23 @@ mod routing_tests {
         let mut map: HashMap<(i16, i16), WireCell> = HashMap::new();
         // Horizontal ending at (5,5) from the left
         rasterize_seg(
-            &WireSeg { x1: 3, y1: 5, x2: 5, y2: 5 },
+            &WireSeg {
+                x1: 3,
+                y1: 5,
+                x2: 5,
+                y2: 5,
+            },
             Color::DarkGray,
             &mut map,
         );
         // Vertical starting at (5,5) going down
         rasterize_seg(
-            &WireSeg { x1: 5, y1: 5, x2: 5, y2: 8 },
+            &WireSeg {
+                x1: 5,
+                y1: 5,
+                x2: 5,
+                y2: 8,
+            },
             Color::DarkGray,
             &mut map,
         );
@@ -1066,17 +1181,32 @@ mod routing_tests {
     fn color_priority_order() {
         let mut map: HashMap<(i16, i16), WireCell> = HashMap::new();
         rasterize_seg(
-            &WireSeg { x1: 0, y1: 0, x2: 2, y2: 0 },
+            &WireSeg {
+                x1: 0,
+                y1: 0,
+                x2: 2,
+                y2: 0,
+            },
             Color::DarkGray,
             &mut map,
         );
         rasterize_seg(
-            &WireSeg { x1: 0, y1: 0, x2: 2, y2: 0 },
+            &WireSeg {
+                x1: 0,
+                y1: 0,
+                x2: 2,
+                y2: 0,
+            },
             Color::Yellow,
             &mut map,
         );
         rasterize_seg(
-            &WireSeg { x1: 0, y1: 0, x2: 2, y2: 0 },
+            &WireSeg {
+                x1: 0,
+                y1: 0,
+                x2: 2,
+                y2: 0,
+            },
             Color::Red,
             &mut map,
         );
@@ -1093,7 +1223,12 @@ mod routing_tests {
 
         // Simulate a Red connection ending at (10, 5)
         rasterize_seg(
-            &WireSeg { x1: 5, y1: 5, x2: 10, y2: 5 },
+            &WireSeg {
+                x1: 5,
+                y1: 5,
+                x2: 10,
+                y2: 5,
+            },
             Color::Red,
             &mut wire_map,
         );
@@ -1101,12 +1236,22 @@ mod routing_tests {
 
         // Simulate a DarkGray connection also ending at (10, 5)
         rasterize_seg(
-            &WireSeg { x1: 5, y1: 3, x2: 10, y2: 3 },
+            &WireSeg {
+                x1: 5,
+                y1: 3,
+                x2: 10,
+                y2: 3,
+            },
             Color::DarkGray,
             &mut wire_map,
         );
         rasterize_seg(
-            &WireSeg { x1: 10, y1: 3, x2: 10, y2: 5 },
+            &WireSeg {
+                x1: 10,
+                y1: 3,
+                x2: 10,
+                y2: 5,
+            },
             Color::DarkGray,
             &mut wire_map,
         );
@@ -1124,18 +1269,18 @@ mod routing_tests {
 
         let cell = wire_map.get(&(10, 5)).unwrap();
         assert!(cell.is_arrow);
-        assert_eq!(cell.color, Color::Red, "DarkGray arrow must not downgrade Red");
+        assert_eq!(
+            cell.color,
+            Color::Red,
+            "DarkGray arrow must not downgrade Red"
+        );
     }
 
     #[test]
     fn highlight_mapping_uses_filtered_index() {
         // pipeline_conn_cursor indexes a filtered subset; the drawing code must
         // map it to the correct global connection index.
-        let blocks = vec![
-            block_at(1, 0, 0),
-            block_at(2, 1, 0),
-            block_at(3, 2, 0),
-        ];
+        let blocks = vec![block_at(1, 0, 0), block_at(2, 1, 0), block_at(3, 2, 0)];
         let conns = vec![
             PipelineConnection { from: 1, to: 2 }, // global 0
             PipelineConnection { from: 2, to: 3 }, // global 1
@@ -1196,11 +1341,51 @@ mod routing_tests {
 
     #[test]
     fn arrow_direction_matches_segment() {
-        assert_eq!(arrow_for_seg(&WireSeg { x1: 0, y1: 0, x2: 5, y2: 0 }), '▶');
-        assert_eq!(arrow_for_seg(&WireSeg { x1: 5, y1: 0, x2: 0, y2: 0 }), '◀');
-        assert_eq!(arrow_for_seg(&WireSeg { x1: 0, y1: 0, x2: 0, y2: 5 }), '▼');
-        assert_eq!(arrow_for_seg(&WireSeg { x1: 0, y1: 5, x2: 0, y2: 0 }), '▲');
-        assert_eq!(arrow_for_seg(&WireSeg { x1: 0, y1: 0, x2: 0, y2: 0 }), '▶');
+        assert_eq!(
+            arrow_for_seg(&WireSeg {
+                x1: 0,
+                y1: 0,
+                x2: 5,
+                y2: 0
+            }),
+            '▶'
+        );
+        assert_eq!(
+            arrow_for_seg(&WireSeg {
+                x1: 5,
+                y1: 0,
+                x2: 0,
+                y2: 0
+            }),
+            '◀'
+        );
+        assert_eq!(
+            arrow_for_seg(&WireSeg {
+                x1: 0,
+                y1: 0,
+                x2: 0,
+                y2: 5
+            }),
+            '▼'
+        );
+        assert_eq!(
+            arrow_for_seg(&WireSeg {
+                x1: 0,
+                y1: 5,
+                x2: 0,
+                y2: 0
+            }),
+            '▲'
+        );
+        assert_eq!(
+            arrow_for_seg(&WireSeg {
+                x1: 0,
+                y1: 0,
+                x2: 0,
+                y2: 0
+            }),
+            '▶'
+        );
     }
 
     #[test]
@@ -1222,7 +1407,11 @@ mod routing_tests {
         let mut unique_exits: Vec<i16> = exit_offsets.clone();
         unique_exits.sort();
         unique_exits.dedup();
-        assert_eq!(unique_exits.len(), exit_offsets.len(), "exit offsets must be distinct");
+        assert_eq!(
+            unique_exits.len(),
+            exit_offsets.len(),
+            "exit offsets must be distinct"
+        );
 
         // Fan-in: 3 blocks into one
         let conns_in = vec![
@@ -1235,7 +1424,11 @@ mod routing_tests {
         let mut unique_entries: Vec<i16> = entry_offsets.clone();
         unique_entries.sort();
         unique_entries.dedup();
-        assert_eq!(unique_entries.len(), entry_offsets.len(), "entry offsets must be distinct");
+        assert_eq!(
+            unique_entries.len(),
+            entry_offsets.len(),
+            "entry offsets must be distinct"
+        );
     }
 
     #[test]
@@ -1268,12 +1461,24 @@ mod routing_tests {
             for seg in &segs {
                 if seg.y1 == seg.y2 {
                     let y = seg.y1;
-                    let (lo, hi) = if seg.x1 <= seg.x2 { (seg.x1, seg.x2) } else { (seg.x2, seg.x1) };
-                    for x in lo..=hi { pixels.insert((x, y)); }
+                    let (lo, hi) = if seg.x1 <= seg.x2 {
+                        (seg.x1, seg.x2)
+                    } else {
+                        (seg.x2, seg.x1)
+                    };
+                    for x in lo..=hi {
+                        pixels.insert((x, y));
+                    }
                 } else {
                     let x = seg.x1;
-                    let (lo, hi) = if seg.y1 <= seg.y2 { (seg.y1, seg.y2) } else { (seg.y2, seg.y1) };
-                    for y in lo..=hi { pixels.insert((x, y)); }
+                    let (lo, hi) = if seg.y1 <= seg.y2 {
+                        (seg.y1, seg.y2)
+                    } else {
+                        (seg.y2, seg.y1)
+                    };
+                    for y in lo..=hi {
+                        pixels.insert((x, y));
+                    }
                 }
             }
             all_pixels.push(pixels);
@@ -1283,9 +1488,7 @@ mod routing_tests {
         for i in 0..all_pixels.len() {
             let unique_count = all_pixels[i]
                 .iter()
-                .filter(|p| {
-                    (0..all_pixels.len()).all(|j| j == i || !all_pixels[j].contains(p))
-                })
+                .filter(|p| (0..all_pixels.len()).all(|j| j == i || !all_pixels[j].contains(p)))
                 .count();
             assert!(
                 unique_count > all_pixels[i].len() / 2,

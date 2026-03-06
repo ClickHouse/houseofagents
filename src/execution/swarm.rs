@@ -38,11 +38,7 @@ pub async fn run_swarm(
                 if iteration == 1 {
                     prompt.to_string()
                 } else if use_cli_by_agent.get(name).copied().unwrap_or(false) {
-                    build_swarm_file_message(
-                        &last_round_outputs,
-                        output.run_dir(),
-                        iteration - 1,
-                    )
+                    build_swarm_file_message(&last_round_outputs, output.run_dir(), iteration - 1)
                 } else {
                     build_swarm_message(&last_round_outputs)
                 }
@@ -200,10 +196,7 @@ fn build_swarm_message(outputs: &HashMap<String, String>) -> String {
     keys.sort();
     for name in keys {
         if let Some(output) = outputs.get(name) {
-            msg.push_str(&format!(
-                "=== {}'s output ===\n{}\n\n",
-                name, output
-            ));
+            msg.push_str(&format!("=== {}'s output ===\n{}\n\n", name, output));
         }
     }
     msg.push_str("Review all perspectives and provide your updated analysis.");
@@ -237,7 +230,11 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
 
-    fn named(name: &str, _kind: ProviderKind, provider: Box<dyn crate::provider::Provider>) -> (String, Box<dyn crate::provider::Provider>) {
+    fn named(
+        name: &str,
+        _kind: ProviderKind,
+        provider: Box<dyn crate::provider::Provider>,
+    ) -> (String, Box<dyn crate::provider::Provider>) {
         (name.to_string(), provider)
     }
 
@@ -270,16 +267,24 @@ mod tests {
         let recv_a = Arc::new(Mutex::new(Vec::new()));
         let recv_b = Arc::new(Mutex::new(Vec::new()));
         let agents = vec![
-            named("Claude", ProviderKind::Anthropic, Box::new(MockProvider::with_responses(
+            named(
+                "Claude",
                 ProviderKind::Anthropic,
-                vec![ok_response("a1")],
-                recv_a,
-            ))),
-            named("OpenAI", ProviderKind::OpenAI, Box::new(MockProvider::with_responses(
+                Box::new(MockProvider::with_responses(
+                    ProviderKind::Anthropic,
+                    vec![ok_response("a1")],
+                    recv_a,
+                )),
+            ),
+            named(
+                "OpenAI",
                 ProviderKind::OpenAI,
-                vec![ok_response("o1")],
-                recv_b,
-            ))),
+                Box::new(MockProvider::with_responses(
+                    ProviderKind::OpenAI,
+                    vec![ok_response("o1")],
+                    recv_b,
+                )),
+            ),
         ];
         let (tx, rx) = mpsc::unbounded_channel();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -314,16 +319,24 @@ mod tests {
         let recv_a = Arc::new(Mutex::new(Vec::new()));
         let recv_b = Arc::new(Mutex::new(Vec::new()));
         let agents = vec![
-            named("Claude", ProviderKind::Anthropic, Box::new(MockProvider::with_responses(
+            named(
+                "Claude",
                 ProviderKind::Anthropic,
-                vec![ok_response("a1"), ok_response("a2")],
-                recv_a.clone(),
-            ))),
-            named("OpenAI", ProviderKind::OpenAI, Box::new(MockProvider::with_responses(
+                Box::new(MockProvider::with_responses(
+                    ProviderKind::Anthropic,
+                    vec![ok_response("a1"), ok_response("a2")],
+                    recv_a.clone(),
+                )),
+            ),
+            named(
+                "OpenAI",
                 ProviderKind::OpenAI,
-                vec![ok_response("o1"), ok_response("o2")],
-                recv_b.clone(),
-            ))),
+                Box::new(MockProvider::with_responses(
+                    ProviderKind::OpenAI,
+                    vec![ok_response("o1"), ok_response("o2")],
+                    recv_b.clone(),
+                )),
+            ),
         ];
         let (tx, _rx) = mpsc::unbounded_channel();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -357,16 +370,24 @@ mod tests {
         let recv_a = Arc::new(Mutex::new(Vec::new()));
         let recv_b = Arc::new(Mutex::new(Vec::new()));
         let agents = vec![
-            named("Claude", ProviderKind::Anthropic, Box::new(MockProvider::with_responses(
+            named(
+                "Claude",
                 ProviderKind::Anthropic,
-                vec![ok_response("a1"), ok_response("a2")],
-                recv_a.clone(),
-            ))),
-            named("OpenAI", ProviderKind::OpenAI, Box::new(MockProvider::with_responses(
+                Box::new(MockProvider::with_responses(
+                    ProviderKind::Anthropic,
+                    vec![ok_response("a1"), ok_response("a2")],
+                    recv_a.clone(),
+                )),
+            ),
+            named(
+                "OpenAI",
                 ProviderKind::OpenAI,
-                vec![ok_response("o1"), ok_response("o2")],
-                recv_b.clone(),
-            ))),
+                Box::new(MockProvider::with_responses(
+                    ProviderKind::OpenAI,
+                    vec![ok_response("o1"), ok_response("o2")],
+                    recv_b.clone(),
+                )),
+            ),
         ];
         let (tx, _rx) = mpsc::unbounded_channel();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -399,12 +420,20 @@ mod tests {
         let recv_a = Arc::new(Mutex::new(Vec::new()));
         let recv_b = Arc::new(Mutex::new(Vec::new()));
         let agents = vec![
-            named("Claude", ProviderKind::Anthropic, Box::new(MockProvider::err(ProviderKind::Anthropic, "bad", recv_a))),
-            named("OpenAI", ProviderKind::OpenAI, Box::new(MockProvider::with_responses(
+            named(
+                "Claude",
+                ProviderKind::Anthropic,
+                Box::new(MockProvider::err(ProviderKind::Anthropic, "bad", recv_a)),
+            ),
+            named(
+                "OpenAI",
                 ProviderKind::OpenAI,
-                vec![ok_response("ok")],
-                recv_b,
-            ))),
+                Box::new(MockProvider::with_responses(
+                    ProviderKind::OpenAI,
+                    vec![ok_response("ok")],
+                    recv_b,
+                )),
+            ),
         ];
         let (tx, rx) = mpsc::unbounded_channel();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -435,11 +464,15 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let out = OutputManager::new(dir.path(), None).expect("out");
         let recv = Arc::new(Mutex::new(Vec::new()));
-        let agents = vec![named("Claude", ProviderKind::Anthropic, Box::new(MockProvider::with_responses(
+        let agents = vec![named(
+            "Claude",
             ProviderKind::Anthropic,
-            vec![ok_response("x")],
-            recv.clone(),
-        )))];
+            Box::new(MockProvider::with_responses(
+                ProviderKind::Anthropic,
+                vec![ok_response("x")],
+                recv.clone(),
+            )),
+        )];
         let (tx, rx) = mpsc::unbounded_channel();
         let cancel = Arc::new(AtomicBool::new(true));
 
@@ -469,11 +502,15 @@ mod tests {
         let out = OutputManager::new(dir.path(), None).expect("out");
         std::fs::create_dir_all(out.run_dir().join("Claude_iter1.md")).expect("mkdir");
         let recv = Arc::new(Mutex::new(Vec::new()));
-        let agents = vec![named("Claude", ProviderKind::Anthropic, Box::new(MockProvider::with_responses(
+        let agents = vec![named(
+            "Claude",
             ProviderKind::Anthropic,
-            vec![ok_response("x")],
-            recv,
-        )))];
+            Box::new(MockProvider::with_responses(
+                ProviderKind::Anthropic,
+                vec![ok_response("x")],
+                recv,
+            )),
+        )];
         let (tx, rx) = mpsc::unbounded_channel();
         let cancel = Arc::new(AtomicBool::new(false));
 

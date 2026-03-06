@@ -15,21 +15,17 @@ pub fn draw(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),                // Title
-            Constraint::Min(0),                   // Prompt text area
-            Constraint::Length(3),                // Session name
+            Constraint::Length(3),                 // Title
+            Constraint::Min(0),                    // Prompt text area
+            Constraint::Length(3),                 // Session name
             Constraint::Length(iterations_height), // Iterations
             Constraint::Length(options_height),    // Options row (Resume / Forward Prompt)
-            Constraint::Length(3),                // Help bar
+            Constraint::Length(3),                 // Help bar
         ])
         .split(f.area());
 
     // Title
-    let agents_str: Vec<&str> = app
-        .selected_agents
-        .iter()
-        .map(|a| a.as_str())
-        .collect();
+    let agents_str: Vec<&str> = app.selected_agents.iter().map(|a| a.as_str()).collect();
     let title = Paragraph::new(format!(
         "Prompt — {} mode with {}",
         app.selected_mode,

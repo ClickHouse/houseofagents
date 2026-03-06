@@ -321,11 +321,7 @@ mod tests {
         let agents = vec![named(
             "Claude",
             ProviderKind::Anthropic,
-            Box::new(MockProvider::ok(
-                ProviderKind::Anthropic,
-                "ok",
-                received,
-            )),
+            Box::new(MockProvider::ok(ProviderKind::Anthropic, "ok", received)),
         )];
         let (tx, rx) = mpsc::unbounded_channel();
         let cancel = Arc::new(AtomicBool::new(false));

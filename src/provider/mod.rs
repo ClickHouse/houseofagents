@@ -371,11 +371,20 @@ mod tests {
         struct W {
             kind: ProviderKind,
         }
-        let s = toml::to_string(&W { kind: ProviderKind::Anthropic }).expect("serialize");
+        let s = toml::to_string(&W {
+            kind: ProviderKind::Anthropic,
+        })
+        .expect("serialize");
         assert!(s.contains("anthropic"));
-        let s = toml::to_string(&W { kind: ProviderKind::OpenAI }).expect("serialize");
+        let s = toml::to_string(&W {
+            kind: ProviderKind::OpenAI,
+        })
+        .expect("serialize");
         assert!(s.contains("openai"));
-        let s = toml::to_string(&W { kind: ProviderKind::Gemini }).expect("serialize");
+        let s = toml::to_string(&W {
+            kind: ProviderKind::Gemini,
+        })
+        .expect("serialize");
         assert!(s.contains("gemini"));
     }
 

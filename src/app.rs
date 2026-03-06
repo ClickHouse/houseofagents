@@ -332,7 +332,11 @@ impl App {
                 let config = self.effective_agent_config(&agent.name).unwrap_or(agent);
                 let has_key = !config.api_key.is_empty();
                 let using_cli = config.use_cli;
-                let cli_ok = self.cli_available.get(&config.provider).copied().unwrap_or(false);
+                let cli_ok = self
+                    .cli_available
+                    .get(&config.provider)
+                    .copied()
+                    .unwrap_or(false);
                 let available = if using_cli { cli_ok } else { has_key };
                 (agent, available)
             })
@@ -461,9 +465,7 @@ mod tests {
             "OpenAI".to_string(),
             agent_cfg("OpenAI", ProviderKind::OpenAI, "override", true),
         );
-        let cfg = app
-            .effective_agent_config("OpenAI")
-            .expect("config");
+        let cfg = app.effective_agent_config("OpenAI").expect("config");
         assert_eq!(cfg.api_key, "override");
         assert!(cfg.use_cli);
     }
@@ -471,9 +473,7 @@ mod tests {
     #[test]
     fn effective_agent_config_falls_back_to_global() {
         let app = app_with_known_cli();
-        let cfg = app
-            .effective_agent_config("Claude")
-            .expect("config");
+        let cfg = app.effective_agent_config("Claude").expect("config");
         assert_eq!(cfg.api_key, "k1");
         assert!(!cfg.use_cli);
     }
@@ -513,10 +513,7 @@ mod tests {
         app.order_cursor = 2;
         app.move_order_up();
         assert_eq!(app.order_cursor, 1);
-        assert_eq!(
-            app.selected_agents,
-            vec!["Claude", "OpenAI", "Gemini"]
-        );
+        assert_eq!(app.selected_agents, vec!["Claude", "OpenAI", "Gemini"]);
     }
 
     #[test]
@@ -526,10 +523,7 @@ mod tests {
         app.order_cursor = 2;
         app.order_grabbed = Some(2);
         app.move_order_up();
-        assert_eq!(
-            app.selected_agents,
-            vec!["Claude", "Gemini", "OpenAI"]
-        );
+        assert_eq!(app.selected_agents, vec!["Claude", "Gemini", "OpenAI"]);
         assert_eq!(app.order_cursor, 1);
         assert_eq!(app.order_grabbed, Some(1));
     }
@@ -541,10 +535,7 @@ mod tests {
         app.order_cursor = 0;
         app.move_order_down();
         assert_eq!(app.order_cursor, 1);
-        assert_eq!(
-            app.selected_agents,
-            vec!["Claude", "OpenAI", "Gemini"]
-        );
+        assert_eq!(app.selected_agents, vec!["Claude", "OpenAI", "Gemini"]);
     }
 
     #[test]
@@ -554,10 +545,7 @@ mod tests {
         app.order_cursor = 0;
         app.order_grabbed = Some(0);
         app.move_order_down();
-        assert_eq!(
-            app.selected_agents,
-            vec!["OpenAI", "Claude", "Gemini"]
-        );
+        assert_eq!(app.selected_agents, vec!["OpenAI", "Claude", "Gemini"]);
         assert_eq!(app.order_cursor, 1);
         assert_eq!(app.order_grabbed, Some(1));
     }

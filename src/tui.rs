@@ -319,14 +319,10 @@ fn handle_prompt_key(app: &mut App, key: KeyEvent) {
                 (PromptFocus::ForwardPrompt, _) => PromptFocus::Resume,
             };
         }
-        KeyCode::Char(' ')
-            if app.prompt_focus == PromptFocus::Resume =>
-        {
+        KeyCode::Char(' ') if app.prompt_focus == PromptFocus::Resume => {
             app.resume_previous = !app.resume_previous;
         }
-        KeyCode::Char(' ')
-            if app.prompt_focus == PromptFocus::ForwardPrompt =>
-        {
+        KeyCode::Char(' ') if app.prompt_focus == PromptFocus::ForwardPrompt => {
             app.forward_prompt = !app.forward_prompt;
         }
         KeyCode::F(5) | KeyCode::Enter
@@ -698,7 +694,11 @@ fn handle_pipeline_paste(app: &mut App, text: &str) {
                     }
                 }
                 if !app.pipeline_iterations_buf.is_empty() {
-                    let v: u32 = app.pipeline_iterations_buf.parse().unwrap_or(1).clamp(1, 99);
+                    let v: u32 = app
+                        .pipeline_iterations_buf
+                        .parse()
+                        .unwrap_or(1)
+                        .clamp(1, 99);
                     app.pipeline_iterations_buf = v.to_string();
                 }
             }
@@ -746,17 +746,23 @@ fn handle_pipeline_key(app: &mut App, key: KeyEvent) {
                     } else if pipeline_mod::would_create_cycle(&app.pipeline_def, from, to) {
                         app.error_modal = Some("Would create a cycle".into());
                     } else {
-                        app.pipeline_def.connections.push(
-                            pipeline_mod::PipelineConnection { from, to },
-                        );
+                        app.pipeline_def
+                            .connections
+                            .push(pipeline_mod::PipelineConnection { from, to });
                         app.pipeline_connecting_from = None;
                     }
                 }
             }
             KeyCode::Up | KeyCode::Char('k') => pipeline_spatial_nav(app, NavAxis::Vertical, true),
-            KeyCode::Down | KeyCode::Char('j') => pipeline_spatial_nav(app, NavAxis::Vertical, false),
-            KeyCode::Left | KeyCode::Char('h') => pipeline_spatial_nav(app, NavAxis::Horizontal, true),
-            KeyCode::Right | KeyCode::Char('l') => pipeline_spatial_nav(app, NavAxis::Horizontal, false),
+            KeyCode::Down | KeyCode::Char('j') => {
+                pipeline_spatial_nav(app, NavAxis::Vertical, false)
+            }
+            KeyCode::Left | KeyCode::Char('h') => {
+                pipeline_spatial_nav(app, NavAxis::Horizontal, true)
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                pipeline_spatial_nav(app, NavAxis::Horizontal, false)
+            }
             _ => {}
         }
         return;
@@ -804,7 +810,11 @@ fn handle_pipeline_key(app: &mut App, key: KeyEvent) {
             app.pipeline_file_list = pipeline_mod::list_pipeline_files()
                 .unwrap_or_default()
                 .iter()
-                .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(|s| s.to_string()))
+                .filter_map(|p| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|s| s.to_string())
+                })
                 .collect();
             app.pipeline_file_cursor = 0;
         }
@@ -822,13 +832,19 @@ fn handle_pipeline_key(app: &mut App, key: KeyEvent) {
             }
             PipelineFocus::SessionName => match key.code {
                 KeyCode::Char(c) => app.pipeline_session_name.push(c),
-                KeyCode::Backspace => { app.pipeline_session_name.pop(); }
+                KeyCode::Backspace => {
+                    app.pipeline_session_name.pop();
+                }
                 _ => {}
             },
             PipelineFocus::Iterations => match key.code {
                 KeyCode::Char(c) if c.is_ascii_digit() => {
                     app.pipeline_iterations_buf.push(c);
-                    let v: u32 = app.pipeline_iterations_buf.parse().unwrap_or(1).clamp(1, 99);
+                    let v: u32 = app
+                        .pipeline_iterations_buf
+                        .parse()
+                        .unwrap_or(1)
+                        .clamp(1, 99);
                     app.pipeline_iterations_buf = v.to_string();
                 }
                 KeyCode::Backspace => {
@@ -857,7 +873,10 @@ fn handle_pipeline_builder_key(app: &mut App, key: KeyEvent) {
             let pos = pipeline_mod::next_free_position(&app.pipeline_def);
             let id = app.pipeline_next_id;
             app.pipeline_next_id += 1;
-            let default_agent = app.config.agents.first()
+            let default_agent = app
+                .config
+                .agents
+                .first()
                 .map(|a| a.name.clone())
                 .unwrap_or_else(|| "Claude".to_string());
             app.pipeline_def.blocks.push(pipeline_mod::PipelineBlock {
@@ -899,14 +918,15 @@ fn handle_pipeline_builder_key(app: &mut App, key: KeyEvent) {
                     app.pipeline_edit_field = PipelineEditField::Name;
                     app.pipeline_edit_name_buf = block.name.clone();
                     app.pipeline_edit_name_cursor = block.name.len();
-                    app.pipeline_edit_agent_idx = app.config.agents
+                    app.pipeline_edit_agent_idx = app
+                        .config
+                        .agents
                         .iter()
                         .position(|a| a.name == block.agent)
                         .unwrap_or(0);
                     app.pipeline_edit_prompt_buf = block.prompt.clone();
                     app.pipeline_edit_prompt_cursor = block.prompt.len();
-                    app.pipeline_edit_session_buf =
-                        block.session_id.clone().unwrap_or_default();
+                    app.pipeline_edit_session_buf = block.session_id.clone().unwrap_or_default();
                     app.pipeline_edit_session_cursor = app.pipeline_edit_session_buf.len();
                 }
             }
@@ -1099,8 +1119,8 @@ fn pipeline_ensure_visible(app: &mut App) {
 
     // Canvas inner ≈ terminal size minus chrome (title 3 + prompt 6 + help 2 + borders 2)
     let (term_w, term_h) = crossterm::terminal::size().unwrap_or((80, 24));
-    let visible_w = (term_w.saturating_sub(4)) as i16;   // border + padding
-    let visible_h = (term_h.saturating_sub(13)) as i16;  // title+prompt+help+borders
+    let visible_w = (term_w.saturating_sub(4)) as i16; // border + padding
+    let visible_h = (term_h.saturating_sub(13)) as i16; // title+prompt+help+borders
 
     let ox = &mut app.pipeline_canvas_offset.0;
     let oy = &mut app.pipeline_canvas_offset.1;
@@ -1143,7 +1163,9 @@ fn handle_pipeline_edit_key(app: &mut App, key: KeyEvent) {
                             app.pipeline_def.blocks.iter_mut().find(|b| b.id == sel)
                         {
                             block.name = app.pipeline_edit_name_buf.clone();
-                            block.agent = app.config.agents
+                            block.agent = app
+                                .config
+                                .agents
                                 .get(app.pipeline_edit_agent_idx)
                                 .map(|a| a.name.clone())
                                 .unwrap_or_else(|| "Claude".to_string());
@@ -1182,13 +1204,11 @@ fn handle_pipeline_edit_key(app: &mut App, key: KeyEvent) {
             PipelineEditField::Agent => match key.code {
                 KeyCode::Left | KeyCode::Char('k') => {
                     let len = app.config.agents.len().max(1);
-                    app.pipeline_edit_agent_idx =
-                        (app.pipeline_edit_agent_idx + len - 1) % len;
+                    app.pipeline_edit_agent_idx = (app.pipeline_edit_agent_idx + len - 1) % len;
                 }
                 KeyCode::Right | KeyCode::Char('j') => {
                     let len = app.config.agents.len().max(1);
-                    app.pipeline_edit_agent_idx =
-                        (app.pipeline_edit_agent_idx + 1) % len;
+                    app.pipeline_edit_agent_idx = (app.pipeline_edit_agent_idx + 1) % len;
                 }
                 _ => {}
             },
@@ -1225,8 +1245,7 @@ fn handle_pipeline_dialog_key(app: &mut App, key: KeyEvent) {
                     let dir = pipeline_mod::ensure_pipelines_dir();
                     match dir {
                         Ok(dir) => {
-                            let filename =
-                                format!("{}.toml", app.pipeline_file_input.trim());
+                            let filename = format!("{}.toml", app.pipeline_file_input.trim());
                             let path = dir.join(&filename);
                             match pipeline_mod::save_pipeline(&app.pipeline_def, &path) {
                                 Ok(()) => {
@@ -1239,8 +1258,7 @@ fn handle_pipeline_dialog_key(app: &mut App, key: KeyEvent) {
                             }
                         }
                         Err(e) => {
-                            app.error_modal =
-                                Some(format!("Cannot create pipelines dir: {e}"));
+                            app.error_modal = Some(format!("Cannot create pipelines dir: {e}"));
                         }
                     }
                 }
@@ -1333,10 +1351,7 @@ fn start_pipeline_execution(app: &mut App) {
         app.error_modal = Some("Enter an initial prompt".into());
         return;
     }
-    let iterations: u32 = app
-        .pipeline_iterations_buf
-        .parse()
-        .unwrap_or(0);
+    let iterations: u32 = app.pipeline_iterations_buf.parse().unwrap_or(0);
     if iterations < 1 {
         app.error_modal = Some("Iterations must be at least 1".into());
         return;
@@ -1349,17 +1364,26 @@ fn start_pipeline_execution(app: &mut App) {
     }
 
     // Check agent availability per block
-    let avail_agents: std::collections::HashMap<String, bool> =
-        app.available_agents().into_iter().map(|(a, avail)| (a.name.clone(), avail)).collect();
+    let avail_agents: std::collections::HashMap<String, bool> = app
+        .available_agents()
+        .into_iter()
+        .map(|(a, avail)| (a.name.clone(), avail))
+        .collect();
     for block in &app.pipeline_def.blocks {
         match avail_agents.get(&block.agent) {
             Some(true) => {}
             Some(false) => {
-                app.error_modal = Some(format!("{} is not available (block {})", block.agent, block.id));
+                app.error_modal = Some(format!(
+                    "{} is not available (block {})",
+                    block.agent, block.id
+                ));
                 return;
             }
             None => {
-                app.error_modal = Some(format!("Agent '{}' not found (block {})", block.agent, block.id));
+                app.error_modal = Some(format!(
+                    "Agent '{}' not found (block {})",
+                    block.agent, block.id
+                ));
                 return;
             }
         }
@@ -1387,10 +1411,16 @@ fn start_pipeline_execution(app: &mut App) {
             continue;
         }
         if let Some(agent_cfg) = app.config.agents.iter().find(|a| a.name == block.agent) {
-            let agent_cfg = app.effective_agent_config(&agent_cfg.name).unwrap_or(agent_cfg);
+            let agent_cfg = app
+                .effective_agent_config(&agent_cfg.name)
+                .unwrap_or(agent_cfg);
             agent_configs.insert(
                 block.agent.clone(),
-                (agent_cfg.provider, agent_cfg.to_provider_config(), agent_cfg.use_cli),
+                (
+                    agent_cfg.provider,
+                    agent_cfg.to_provider_config(),
+                    agent_cfg.use_cli,
+                ),
             );
         }
     }
@@ -1417,10 +1447,7 @@ fn start_pipeline_execution(app: &mut App) {
         Some(app.pipeline_session_name.trim())
     };
     let base_path = app.config.resolved_output_dir();
-    let output = match OutputManager::new(
-        &base_path,
-        session_name,
-    ) {
+    let output = match OutputManager::new(&base_path, session_name) {
         Ok(o) => o,
         Err(e) => {
             app.error_modal = Some(format!("Cannot create output dir: {e}"));
@@ -1853,8 +1880,8 @@ fn handle_edit_popup_key(app: &mut App, key: KeyEvent) {
                     return;
                 }
             } else {
-                let mut config = effective_section_config(app)
-                    .unwrap_or_else(empty_provider_config);
+                let mut config =
+                    effective_section_config(app).unwrap_or_else(empty_provider_config);
                 match app.edit_popup_field {
                     EditField::ApiKey => config.api_key = app.edit_buffer.clone(),
                     EditField::Model => config.model = app.edit_buffer.clone(),
@@ -1910,8 +1937,8 @@ fn handle_model_picker_key(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Enter => {
             if let Some(model) = app.model_picker_list.get(app.model_picker_cursor).cloned() {
-                let mut config = effective_section_config(app)
-                    .unwrap_or_else(empty_provider_config);
+                let mut config =
+                    effective_section_config(app).unwrap_or_else(empty_provider_config);
                 config.model = model;
                 set_section_config_override(app, config);
             }
@@ -2084,8 +2111,7 @@ fn cycle_reasoning(app: &mut App) {
         Some(k) => k,
         None => return,
     };
-    let mut config = effective_section_config(app)
-        .unwrap_or_else(empty_provider_config);
+    let mut config = effective_section_config(app).unwrap_or_else(empty_provider_config);
 
     match kind {
         ProviderKind::OpenAI => {
@@ -2126,8 +2152,7 @@ fn toggle_cli_mode(app: &mut App) {
         None => return,
     };
     let cli_installed = app.cli_available.get(&kind).copied().unwrap_or(false);
-    let mut config = effective_section_config(app)
-        .unwrap_or_else(empty_provider_config);
+    let mut config = effective_section_config(app).unwrap_or_else(empty_provider_config);
 
     if !config.use_cli && !cli_installed {
         app.error_modal = Some(format!("{} CLI not installed", kind.display_name()));
@@ -2199,7 +2224,9 @@ fn remove_agent(app: &mut App) {
     if app.config.diagnostic_provider.as_deref() == Some(removed_name.as_str()) {
         app.config.diagnostic_provider = None;
     }
-    app.edit_popup_cursor = app.edit_popup_cursor.min(app.config.agents.len().saturating_sub(1));
+    app.edit_popup_cursor = app
+        .edit_popup_cursor
+        .min(app.config.agents.len().saturating_sub(1));
 }
 
 fn cycle_agent_provider(app: &mut App) {
@@ -2249,9 +2276,7 @@ fn commit_agent_rename(app: &mut App) {
     // Check sanitized collision
     let sanitized = OutputManager::sanitize_session_name(&new_name).to_lowercase();
     for (i, a) in app.config.agents.iter().enumerate() {
-        if i != idx
-            && OutputManager::sanitize_session_name(&a.name).to_lowercase() == sanitized
-        {
+        if i != idx && OutputManager::sanitize_session_name(&a.name).to_lowercase() == sanitized {
             app.error_modal = Some(format!(
                 "Agent name '{}' would collide with '{}' after sanitization",
                 new_name, a.name
@@ -2317,13 +2342,21 @@ fn set_timeout_override_from_buffer(app: &mut App) -> Result<(), String> {
 }
 
 fn selected_kind_for_edit(app: &App) -> Option<ProviderKind> {
-    app.config.agents.get(app.edit_popup_cursor).map(|a| a.provider)
+    app.config
+        .agents
+        .get(app.edit_popup_cursor)
+        .map(|a| a.provider)
 }
 
 /// Returns a ProviderConfig view for the current edit selection (Providers section).
 fn effective_section_config(app: &App) -> Option<ProviderConfig> {
-    let name = app.config.agents.get(app.edit_popup_cursor).map(|a| a.name.as_str())?;
-    app.effective_agent_config(name).map(|a| a.to_provider_config())
+    let name = app
+        .config
+        .agents
+        .get(app.edit_popup_cursor)
+        .map(|a| a.name.as_str())?;
+    app.effective_agent_config(name)
+        .map(|a| a.to_provider_config())
 }
 
 fn set_section_config_override(app: &mut App, config: ProviderConfig) {
@@ -2530,16 +2563,15 @@ fn start_execution(app: &mut App) {
             }
         };
 
-        let last_iteration =
-            match find_last_complete_iteration_for_agents(&run_dir, &agent_names) {
-                Some(i) if i >= 1 => i,
-                _ => {
-                    app.error_modal = Some("No previous iteration files found to resume".into());
-                    app.screen = Screen::Prompt;
-                    app.is_running = false;
-                    return;
-                }
-            };
+        let last_iteration = match find_last_complete_iteration_for_agents(&run_dir, &agent_names) {
+            Some(i) if i >= 1 => i,
+            _ => {
+                app.error_modal = Some("No previous iteration files found to resume".into());
+                app.screen = Screen::Prompt;
+                app.is_running = false;
+                return;
+            }
+        };
         start_iteration = last_iteration + 1;
 
         match mode {
@@ -2554,8 +2586,7 @@ fn start_execution(app: &mut App) {
                     }
                 };
                 let file_key = App::agent_file_key(last_agent);
-                let prev_path =
-                    run_dir.join(format!("{}_iter{}.md", file_key, last_iteration));
+                let prev_path = run_dir.join(format!("{}_iter{}.md", file_key, last_iteration));
                 relay_initial_last_output = match std::fs::read_to_string(&prev_path) {
                     Ok(content) => Some(content),
                     Err(e) => {
@@ -2572,8 +2603,7 @@ fn start_execution(app: &mut App) {
             ExecutionMode::Swarm => {
                 for agent_name in &agent_names {
                     let file_key = App::agent_file_key(agent_name);
-                    let prev_path =
-                        run_dir.join(format!("{}_iter{}.md", file_key, last_iteration));
+                    let prev_path = run_dir.join(format!("{}_iter{}.md", file_key, last_iteration));
                     if let Ok(content) = std::fs::read_to_string(&prev_path) {
                         swarm_initial_outputs.insert(agent_name.clone(), content);
                     }
@@ -2732,7 +2762,11 @@ fn should_offer_consolidation(app: &App) -> bool {
     let Some(run_dir) = app.run_dir.as_ref() else {
         return false;
     };
-    let agent_keys: Vec<String> = app.selected_agents.iter().map(|n| App::agent_file_key(n)).collect();
+    let agent_keys: Vec<String> = app
+        .selected_agents
+        .iter()
+        .map(|n| App::agent_file_key(n))
+        .collect();
     find_last_iteration(run_dir, &agent_keys).is_some()
 }
 
@@ -2776,10 +2810,7 @@ fn find_last_complete_iteration_for_agents(
         let name = name.to_string_lossy();
         for key in &agent_keys {
             if let Some(iter) = parse_agent_iteration_filename(&name, key) {
-                iter_to_agents
-                    .entry(iter)
-                    .or_default()
-                    .insert(key.clone());
+                iter_to_agents.entry(iter).or_default().insert(key.clone());
             }
         }
     }
@@ -2930,7 +2961,11 @@ fn start_consolidation(app: &mut App) {
         }
     };
 
-    let agent_keys: Vec<String> = app.selected_agents.iter().map(|n| App::agent_file_key(n)).collect();
+    let agent_keys: Vec<String> = app
+        .selected_agents
+        .iter()
+        .map(|n| App::agent_file_key(n))
+        .collect();
     let last_iteration = match find_last_iteration(&run_dir, &agent_keys) {
         Some(i) => i,
         None => {
@@ -3101,7 +3136,11 @@ fn handle_consolidation_result(app: &mut App, result: Result<String, String>) {
         .effective_agent_config(&agent_name)
         .map(|a| a.provider)
         .unwrap_or(ProviderKind::Anthropic);
-    let agent_keys: Vec<String> = app.selected_agents.iter().map(|n| App::agent_file_key(n)).collect();
+    let agent_keys: Vec<String> = app
+        .selected_agents
+        .iter()
+        .map(|n| App::agent_file_key(n))
+        .collect();
     let iteration = app
         .run_dir
         .as_deref()
@@ -3343,7 +3382,9 @@ fn build_diagnostic_prompt(
     let mut prompt = String::from(
         "Analyze all reports for OPERATIONAL errors only and produce a markdown report.\n",
     );
-    prompt.push_str("Focus exclusively on errors that prevented an agent from completing its task:\n");
+    prompt.push_str(
+        "Focus exclusively on errors that prevented an agent from completing its task:\n",
+    );
     prompt.push_str("- API failures, timeouts, authentication errors\n");
     prompt.push_str("- CLI tool crashes, missing binaries, permission errors\n");
     prompt.push_str("- Agent permission denials (e.g. tool use blocked, sandbox restrictions, file access denied)\n");
@@ -3587,10 +3628,7 @@ mod tests {
 
     #[test]
     fn parse_block_iteration_no_block_id_marker() {
-        assert_eq!(
-            parse_pipeline_iteration_filename("Claude_iter2.md"),
-            None
-        );
+        assert_eq!(parse_pipeline_iteration_filename("Claude_iter2.md"), None);
     }
 
     #[test]
@@ -4311,13 +4349,25 @@ mod tests {
         // Unmodified arrow navigates to the nearest block (does not move block 1)
         handle_pipeline_builder_key(&mut app, KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
         let after_nav = app.pipeline_def.blocks.iter().find(|b| b.id == 1).unwrap();
-        assert_eq!(after_nav.position, (2, 2), "unmodified arrow should not move the block");
-        assert_eq!(app.pipeline_block_cursor, Some(2), "cursor should navigate to block 2");
+        assert_eq!(
+            after_nav.position,
+            (2, 2),
+            "unmodified arrow should not move the block"
+        );
+        assert_eq!(
+            app.pipeline_block_cursor,
+            Some(2),
+            "cursor should navigate to block 2"
+        );
 
         // Shift+arrow moves the selected block
         handle_pipeline_builder_key(&mut app, KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
         let moved = app.pipeline_def.blocks.iter().find(|b| b.id == 2).unwrap();
         assert_eq!(moved.position, (4, 2), "Shift+arrow should move the block");
-        assert_eq!(app.pipeline_block_cursor, Some(2), "cursor stays on the moved block");
+        assert_eq!(
+            app.pipeline_block_cursor,
+            Some(2),
+            "cursor stays on the moved block"
+        );
     }
 }

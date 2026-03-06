@@ -156,14 +156,19 @@ impl AppConfig {
         // Also normalize case to match the actual agent name.
         if let Some(ref dp) = config.diagnostic_provider {
             if ProviderKind::from_selector(dp).is_some()
-                && !config.agents.iter().any(|a| a.name.eq_ignore_ascii_case(dp))
+                && !config
+                    .agents
+                    .iter()
+                    .any(|a| a.name.eq_ignore_ascii_case(dp))
             {
                 let kind = ProviderKind::from_selector(dp).unwrap();
                 if let Some(agent) = config.agents.iter().find(|a| a.provider == kind) {
                     config.diagnostic_provider = Some(agent.name.clone());
                 }
-            } else if let Some(agent) =
-                config.agents.iter().find(|a| a.name.eq_ignore_ascii_case(dp))
+            } else if let Some(agent) = config
+                .agents
+                .iter()
+                .find(|a| a.name.eq_ignore_ascii_case(dp))
             {
                 // Normalize case to match the actual agent name
                 if agent.name != *dp {
@@ -179,7 +184,11 @@ impl AppConfig {
     /// Migrate legacy `[providers.*]` HashMap into `[[agents]]` Vec.
     fn migrate_providers_to_agents(&mut self) {
         // Use a fixed order for deterministic migration
-        let order = [ProviderKind::Anthropic, ProviderKind::OpenAI, ProviderKind::Gemini];
+        let order = [
+            ProviderKind::Anthropic,
+            ProviderKind::OpenAI,
+            ProviderKind::Gemini,
+        ];
         for kind in &order {
             let key = kind.config_key();
             if let Some(pc) = self.providers.get(key) {
@@ -211,7 +220,8 @@ impl AppConfig {
                 )));
             }
 
-            let sanitized = crate::output::OutputManager::sanitize_session_name(&agent.name).to_lowercase();
+            let sanitized =
+                crate::output::OutputManager::sanitize_session_name(&agent.name).to_lowercase();
             if !seen_sanitized.insert(sanitized.clone()) {
                 return Err(AppError::Config(format!(
                     "Agents '{}' would produce duplicate filenames after sanitization",
@@ -384,7 +394,8 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
         let mut cfg = sample_config();
-        cfg.agents.push(sample_agent("Claude", ProviderKind::Anthropic));
+        cfg.agents
+            .push(sample_agent("Claude", ProviderKind::Anthropic));
         cfg.save_with_override(path.to_str()).expect("save");
         let loaded = AppConfig::load_with_override(path.to_str()).expect("load");
         assert_eq!(loaded.output_dir, cfg.output_dir);
@@ -514,8 +525,10 @@ model = "gpt-5"
     #[test]
     fn validate_agents_rejects_duplicate_names() {
         let mut cfg = sample_config();
-        cfg.agents.push(sample_agent("Claude", ProviderKind::Anthropic));
-        cfg.agents.push(sample_agent("claude", ProviderKind::Anthropic));
+        cfg.agents
+            .push(sample_agent("Claude", ProviderKind::Anthropic));
+        cfg.agents
+            .push(sample_agent("claude", ProviderKind::Anthropic));
         let err = cfg.validate_agents().expect_err("should reject");
         assert!(err.to_string().contains("Duplicate agent name"));
     }
@@ -531,8 +544,10 @@ model = "gpt-5"
     #[test]
     fn validate_agents_rejects_sanitized_collisions() {
         let mut cfg = sample_config();
-        cfg.agents.push(sample_agent("Claude/1", ProviderKind::Anthropic));
-        cfg.agents.push(sample_agent("Claude 1", ProviderKind::Anthropic));
+        cfg.agents
+            .push(sample_agent("Claude/1", ProviderKind::Anthropic));
+        cfg.agents
+            .push(sample_agent("Claude 1", ProviderKind::Anthropic));
         let err = cfg.validate_agents().expect_err("should reject");
         assert!(err.to_string().contains("duplicate filenames"));
     }

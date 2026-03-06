@@ -224,7 +224,12 @@ fn help_lines() -> &'static [Line<'static>] {
             Line::from("  Best for: comparing models head-to-head, getting"),
             Line::from("  diverse independent answers to the same question."),
             Line::from(""),
-            Line::from(Span::styled("Pipeline", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+            Line::from(Span::styled(
+                "Pipeline",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )),
             Line::from(""),
             Line::from("  Build a custom DAG of agent blocks with explicit connections."),
             Line::from("  Each block has its own provider, prompt, and optional session ID."),
@@ -420,10 +425,7 @@ fn draw_edit_popup(f: &mut Frame, app: &App) {
                     style,
                 )];
                 if is_diag {
-                    name_spans.push(Span::styled(
-                        " [diag]",
-                        Style::default().fg(Color::Green),
-                    ));
+                    name_spans.push(Span::styled(" [diag]", Style::default().fg(Color::Green)));
                 }
                 body_lines.push(Line::from(name_spans));
                 let cli_print_mode = config.map(|c| c.cli_print_mode).unwrap_or(true);
@@ -843,5 +845,4 @@ mod tests {
     fn mask_key_long_values_unicode_safe() {
         assert_eq!(mask_key("ééééabcdéééé"), "éééé...éééé");
     }
-
 }

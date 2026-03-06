@@ -166,7 +166,10 @@ impl OutputManager {
         let mut root = toml::map::Map::new();
         root.insert("mode".into(), Value::String("pipeline".to_string()));
         root.insert("blocks".into(), Value::Integer(block_count as i64));
-        root.insert("connections".into(), Value::Integer(connection_count as i64));
+        root.insert(
+            "connections".into(),
+            Value::Integer(connection_count as i64),
+        );
         root.insert("iterations".into(), Value::Integer(iterations as i64));
         if let Some(src) = pipeline_source {
             root.insert("pipeline_source".into(), Value::String(src.to_string()));

@@ -1,13 +1,13 @@
 use super::centered_rect;
 use crate::app::{App, ConsolidationPhase};
 use crate::execution::{ExecutionMode, ProgressEvent};
-use std::collections::HashSet;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Gauge, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn draw(f: &mut Frame, app: &App) {
@@ -106,10 +106,7 @@ pub fn draw(f: &mut Frame, app: &App) {
                 .iter()
                 .map(|(agent, msg)| {
                     ListItem::new(Line::from(vec![
-                        Span::styled(
-                            format!("{agent}: "),
-                            Style::default().fg(Color::Cyan),
-                        ),
+                        Span::styled(format!("{agent}: "), Style::default().fg(Color::Cyan)),
                         Span::raw(msg.as_str()),
                     ]))
                 })
@@ -277,7 +274,9 @@ fn build_event_items(app: &App) -> Vec<ListItem<'_>> {
 
     for evt in &app.progress_events {
         match evt {
-            ProgressEvent::AgentStarted { agent, iteration, .. } => {
+            ProgressEvent::AgentStarted {
+                agent, iteration, ..
+            } => {
                 let key = (agent.clone(), *iteration);
                 if let Some(idx) = agent_row_idx.get(&key).copied() {
                     if let Row::Agent { status, .. } = &mut rows[idx] {
@@ -292,7 +291,9 @@ fn build_event_items(app: &App) -> Vec<ListItem<'_>> {
                     });
                 }
             }
-            ProgressEvent::AgentFinished { agent, iteration, .. } => {
+            ProgressEvent::AgentFinished {
+                agent, iteration, ..
+            } => {
                 let key = (agent.clone(), *iteration);
                 if let Some(idx) = agent_row_idx.get(&key).copied() {
                     if let Row::Agent { status, .. } = &mut rows[idx] {
@@ -427,7 +428,11 @@ fn build_event_items(app: &App) -> Vec<ListItem<'_>> {
                     });
                 }
             }
-            ProgressEvent::BlockLog { agent_name, message, .. } => {
+            ProgressEvent::BlockLog {
+                agent_name,
+                message,
+                ..
+            } => {
                 if message.contains("consolidating reports")
                     || message.contains("analyzing reports for errors")
                     || message.contains("Diagnostic report saved to")
@@ -491,10 +496,7 @@ fn build_event_items(app: &App) -> Vec<ListItem<'_>> {
                 )])))
             }
             Row::Log { name, message } => items.push(ListItem::new(Line::from(vec![
-                Span::styled(
-                    format!("{name} "),
-                    Style::default().fg(Color::Yellow),
-                ),
+                Span::styled(format!("{name} "), Style::default().fg(Color::Yellow)),
                 Span::styled(message, Style::default().fg(Color::Yellow)),
             ]))),
             Row::Block {
@@ -1004,8 +1006,14 @@ mod tests {
         let texts: Vec<String> = items.iter().map(|i| format!("{:?}", i)).collect();
         let joined = texts.join("\n");
         // Thinking agent should be cancelled, finished agent stays finished
-        assert!(joined.contains("cancelled"), "expected cancelled in: {joined}");
-        assert!(joined.contains("finished"), "expected finished in: {joined}");
+        assert!(
+            joined.contains("cancelled"),
+            "expected cancelled in: {joined}"
+        );
+        assert!(
+            joined.contains("finished"),
+            "expected finished in: {joined}"
+        );
         assert!(
             !joined.contains("thinking"),
             "expected no thinking in: {joined}"
@@ -1043,7 +1051,10 @@ mod tests {
         }];
         let items = build_event_items(&a);
         let joined: String = items.iter().map(|i| format!("{:?}", i)).collect();
-        assert!(joined.contains("cancelled"), "expected cancelled in: {joined}");
+        assert!(
+            joined.contains("cancelled"),
+            "expected cancelled in: {joined}"
+        );
         assert!(
             !joined.contains("thinking"),
             "expected no thinking in: {joined}"
