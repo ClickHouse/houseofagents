@@ -20,6 +20,7 @@ Run Claude, Codex, and Gemini in collaborative execution modes and save all arti
 | **Relay** | Sequential handoff — each agent builds on the previous agent's output |
 | **Swarm** | Parallel rounds with cross-agent context injected between rounds |
 | **Solo** | Independent one-shot runs per selected agent (forced to 1 iteration) |
+| **Pipeline** | Custom DAG builder — wire arbitrary blocks of agents into a dependency graph |
 
 ## Supported Providers
 
@@ -35,6 +36,7 @@ Each agent can run in API mode or CLI mode (`use_cli = true`). Mix and match fre
 
 - **Terminal UI** — select agents, mode, prompt, and iteration count from an interactive TUI
 - **Named agents** — define multiple agents per provider with independent configs
+- **Pipeline builder** — visual DAG editor for wiring arbitrary agent blocks with dependency-driven execution and independent per-connection routing
 - **Resume runs** — pick up where you left off in relay or swarm sessions
 - **Forward Prompt** — relay mode option to include the original prompt in every handoff
 - **Consolidation** — merge multi-agent output into a single final markdown file (any configured agent can consolidate)
@@ -220,6 +222,27 @@ extra_cli_args = ""
 
 Fields vary by mode: Solo shows only Prompt and Session Name; Swarm adds Iterations and Resume; Relay adds Forward Prompt alongside Resume.
 
+### Pipeline Builder Screen
+
+| Key | Action |
+|-----|--------|
+| `Tab` / `Shift+Tab` | Cycle focus: Initial Prompt → Session Name → Iterations → Builder |
+| `a` | Add a new block |
+| `d` | Delete selected block |
+| `e` | Edit selected block (name, agent, prompt, session ID) |
+| `c` | Enter connect mode — select a second block to create a connection |
+| `x` | Enter remove-connection mode — pick a connection to delete |
+| `Arrow keys` / `h j k l` | Navigate/select blocks spatially without moving |
+| `Shift+Arrow keys` / `Shift+H J K L` | Move selected block (swap with occupied target cell, otherwise move) |
+| `Ctrl+Arrow keys` | Scroll the builder canvas |
+| `↑`/`+` `↓`/`-` | Increment / decrement iterations (when Iterations focused) |
+| `Ctrl+S` | Save pipeline (always prompts for filename, prefills current name) |
+| `Ctrl+L` | Load pipeline from file |
+| `F5` | Validate and run the pipeline |
+| `Esc` | Cancel current action / back to home |
+
+Inside the **edit popup**: `Tab` cycles between Name, Agent (use `Left`/`Right`), Prompt (text area), and Session ID fields. `Esc` closes the popup.
+
 ### Order Screen (relay with 2+ agents)
 
 | Key | Action |
@@ -259,6 +282,19 @@ output_dir/
     consolidated_Claude.md       # Optional: merged output
     errors.md                    # Optional: diagnostics report
     _errors.log                  # Application-level error log
+```
+
+Pipeline runs produce per-block output files named using the block's name (sanitized) and a unique block id suffix:
+
+```
+output_dir/
+  20260305_143022_234_my_session/
+    session.toml                         # mode = "pipeline", block/connection counts
+    prompt.md                            # Pipeline-level prompt (shared across blocks)
+    pipeline.toml                        # Pipeline definition snapshot
+    Analyzer_b1_Claude_iter1.md          # Block "Analyzer" (id 1), agent Claude, iteration 1
+    Reviewer_b2_Gemini_iter1.md          # Block "Reviewer" (id 2), agent Gemini, iteration 1
+    _errors.log
 ```
 
 Directory names follow the pattern `YYYYMMDD_HHMMSS_<rand>` (with optional `_<session_name>` suffix).

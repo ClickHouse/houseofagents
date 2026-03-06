@@ -1,4 +1,5 @@
 use crate::config::{AgentConfig, AppConfig};
+use crate::execution::pipeline::{BlockId, PipelineDefinition};
 use crate::execution::{ExecutionMode, ProgressEvent};
 use crate::output::OutputManager;
 use crate::provider::ProviderKind;
@@ -15,6 +16,7 @@ pub enum Screen {
     Order,
     Running,
     Results,
+    Pipeline,
 }
 
 pub struct App {
@@ -102,6 +104,45 @@ pub struct App {
     pub progress_rx: Option<mpsc::UnboundedReceiver<ProgressEvent>>,
     pub cancel_flag: Arc<AtomicBool>,
     pub run_dir: Option<PathBuf>,
+
+    // Pipeline builder — core
+    pub pipeline_def: PipelineDefinition,
+    pub pipeline_next_id: BlockId,
+    pub pipeline_block_cursor: Option<BlockId>,
+    pub pipeline_focus: PipelineFocus,
+    pub pipeline_canvas_offset: (i16, i16),
+
+    // Pipeline prompt/session/iterations
+    pub pipeline_prompt_cursor: usize,
+    pub pipeline_session_name: String,
+    pub pipeline_iterations_buf: String,
+
+    // Pipeline connect mode
+    pub pipeline_connecting_from: Option<BlockId>,
+
+    // Pipeline remove-connection mode
+    pub pipeline_removing_conn: bool,
+    pub pipeline_conn_cursor: usize,
+
+    // Pipeline block edit popup
+    pub pipeline_show_edit: bool,
+    pub pipeline_edit_field: PipelineEditField,
+    pub pipeline_edit_name_buf: String,
+    pub pipeline_edit_name_cursor: usize,
+    pub pipeline_edit_agent_idx: usize,
+    pub pipeline_edit_prompt_buf: String,
+    pub pipeline_edit_prompt_cursor: usize,
+    pub pipeline_edit_session_buf: String,
+    pub pipeline_edit_session_cursor: usize,
+
+    // Pipeline file dialog
+    pub pipeline_file_dialog: Option<PipelineDialogMode>,
+    pub pipeline_file_input: String,
+    pub pipeline_file_list: Vec<String>,
+    pub pipeline_file_cursor: usize,
+
+    // Pipeline save state
+    pub pipeline_save_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,6 +182,28 @@ pub enum ConsolidationPhase {
     Confirm,
     Provider,
     Prompt,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PipelineFocus {
+    InitialPrompt,
+    SessionName,
+    Iterations,
+    Builder,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PipelineEditField {
+    Name,
+    Agent,
+    Prompt,
+    SessionId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PipelineDialogMode {
+    Save,
+    Load,
 }
 
 fn detect_cli(name: &str) -> bool {
@@ -232,6 +295,31 @@ impl App {
             progress_rx: None,
             cancel_flag: Arc::new(AtomicBool::new(false)),
             run_dir: None,
+            pipeline_def: PipelineDefinition::default(),
+            pipeline_next_id: 1,
+            pipeline_block_cursor: None,
+            pipeline_focus: PipelineFocus::InitialPrompt,
+            pipeline_canvas_offset: (0, 0),
+            pipeline_prompt_cursor: 0,
+            pipeline_session_name: String::new(),
+            pipeline_iterations_buf: "1".into(),
+            pipeline_connecting_from: None,
+            pipeline_removing_conn: false,
+            pipeline_conn_cursor: 0,
+            pipeline_show_edit: false,
+            pipeline_edit_field: PipelineEditField::Name,
+            pipeline_edit_name_buf: String::new(),
+            pipeline_edit_name_cursor: 0,
+            pipeline_edit_agent_idx: 0,
+            pipeline_edit_prompt_buf: String::new(),
+            pipeline_edit_prompt_cursor: 0,
+            pipeline_edit_session_buf: String::new(),
+            pipeline_edit_session_cursor: 0,
+            pipeline_file_dialog: None,
+            pipeline_file_input: String::new(),
+            pipeline_file_list: Vec::new(),
+            pipeline_file_cursor: 0,
+            pipeline_save_path: None,
         }
     }
 

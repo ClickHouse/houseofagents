@@ -1,6 +1,7 @@
 use super::centered_rect;
 use crate::app::{App, ConsolidationPhase};
-use crate::execution::ProgressEvent;
+use crate::execution::{ExecutionMode, ProgressEvent};
+use std::collections::HashSet;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -248,11 +249,17 @@ fn build_event_items(app: &App) -> Vec<ListItem<'_>> {
         Thinking,
         Finished,
         Error(String),
+        Cancelled,
     }
 
     enum Row {
         Agent {
             name: String,
+            iteration: u32,
+            status: AgentStatus,
+        },
+        Block {
+            label: String,
             iteration: u32,
             status: AgentStatus,
         },
@@ -266,6 +273,7 @@ fn build_event_items(app: &App) -> Vec<ListItem<'_>> {
 
     let mut rows: Vec<Row> = Vec::new();
     let mut agent_row_idx: HashMap<(String, u32), usize> = HashMap::new();
+    let mut block_row_idx: HashMap<(u32, u32), usize> = HashMap::new();
 
     for evt in &app.progress_events {
         match evt {
@@ -335,6 +343,115 @@ fn build_event_items(app: &App) -> Vec<ListItem<'_>> {
                     });
                 }
             }
+            ProgressEvent::BlockStarted {
+                block_id,
+                label,
+                iteration,
+                ..
+            } => {
+                let key = (*block_id, *iteration);
+                if let Some(idx) = block_row_idx.get(&key).copied() {
+                    if let Row::Block { status, .. } = &mut rows[idx] {
+                        *status = AgentStatus::Thinking;
+                    }
+                } else {
+                    block_row_idx.insert(key, rows.len());
+                    rows.push(Row::Block {
+                        label: label.clone(),
+                        iteration: *iteration,
+                        status: AgentStatus::Thinking,
+                    });
+                }
+            }
+            ProgressEvent::BlockFinished {
+                block_id,
+                label,
+                iteration,
+                ..
+            } => {
+                let key = (*block_id, *iteration);
+                if let Some(idx) = block_row_idx.get(&key).copied() {
+                    if let Row::Block { status, .. } = &mut rows[idx] {
+                        *status = AgentStatus::Finished;
+                    }
+                } else {
+                    block_row_idx.insert(key, rows.len());
+                    rows.push(Row::Block {
+                        label: label.clone(),
+                        iteration: *iteration,
+                        status: AgentStatus::Finished,
+                    });
+                }
+            }
+            ProgressEvent::BlockError {
+                block_id,
+                label,
+                iteration,
+                error,
+                ..
+            } => {
+                let key = (*block_id, *iteration);
+                let err = truncate_line(error, 100);
+                if let Some(idx) = block_row_idx.get(&key).copied() {
+                    if let Row::Block { status, .. } = &mut rows[idx] {
+                        *status = AgentStatus::Error(err);
+                    }
+                } else {
+                    block_row_idx.insert(key, rows.len());
+                    rows.push(Row::Block {
+                        label: label.clone(),
+                        iteration: *iteration,
+                        status: AgentStatus::Error(err),
+                    });
+                }
+            }
+            ProgressEvent::BlockSkipped {
+                block_id,
+                label,
+                iteration,
+                reason,
+                ..
+            } => {
+                let key = (*block_id, *iteration);
+                let err = format!("SKIPPED: {reason}");
+                if let Some(idx) = block_row_idx.get(&key).copied() {
+                    if let Row::Block { status, .. } = &mut rows[idx] {
+                        *status = AgentStatus::Error(err);
+                    }
+                } else {
+                    block_row_idx.insert(key, rows.len());
+                    rows.push(Row::Block {
+                        label: label.clone(),
+                        iteration: *iteration,
+                        status: AgentStatus::Error(err),
+                    });
+                }
+            }
+            ProgressEvent::BlockLog { agent_name, message, .. } => {
+                if message.contains("consolidating reports")
+                    || message.contains("analyzing reports for errors")
+                    || message.contains("Diagnostic report saved to")
+                {
+                    rows.push(Row::Log {
+                        name: agent_name.clone(),
+                        message: message.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    // If run finished due to cancellation, mark still-thinking items as cancelled
+    if !app.is_running && app.cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
+        for row in &mut rows {
+            match row {
+                Row::Agent { status, .. } | Row::Block { status, .. } => {
+                    if matches!(status, AgentStatus::Thinking) {
+                        *status = AgentStatus::Cancelled;
+                    }
+                }
+                _ => {}
+            }
         }
     }
 
@@ -357,6 +474,13 @@ fn build_event_items(app: &App) -> Vec<ListItem<'_>> {
                     Span::styled("✗ ", Style::default().fg(Color::Red)),
                     Span::raw(format!("{name} FAILED (iter {iteration}): {err}")),
                 ]))),
+                AgentStatus::Cancelled => items.push(ListItem::new(Line::from(vec![
+                    Span::styled("✗ ", Style::default().fg(Color::Yellow)),
+                    Span::styled(
+                        format!("{name} cancelled (iter {iteration})"),
+                        Style::default().fg(Color::Yellow),
+                    ),
+                ]))),
             },
             Row::IterationComplete(iteration) => {
                 items.push(ListItem::new(Line::from(vec![Span::styled(
@@ -373,6 +497,31 @@ fn build_event_items(app: &App) -> Vec<ListItem<'_>> {
                 ),
                 Span::styled(message, Style::default().fg(Color::Yellow)),
             ]))),
+            Row::Block {
+                label,
+                iteration,
+                status,
+            } => match status {
+                AgentStatus::Thinking => items.push(ListItem::new(Line::from(vec![
+                    Span::styled(format!("{spinner} "), Style::default().fg(Color::Yellow)),
+                    Span::raw(format!("{label} thinking (iter {iteration})")),
+                ]))),
+                AgentStatus::Finished => items.push(ListItem::new(Line::from(vec![
+                    Span::styled("\u{2713} ", Style::default().fg(Color::Green)),
+                    Span::raw(format!("{label} finished (iter {iteration})")),
+                ]))),
+                AgentStatus::Error(err) => items.push(ListItem::new(Line::from(vec![
+                    Span::styled("\u{2717} ", Style::default().fg(Color::Red)),
+                    Span::raw(format!("{label} (iter {iteration}): {err}")),
+                ]))),
+                AgentStatus::Cancelled => items.push(ListItem::new(Line::from(vec![
+                    Span::styled("\u{2717} ", Style::default().fg(Color::Yellow)),
+                    Span::styled(
+                        format!("{label} cancelled (iter {iteration})"),
+                        Style::default().fg(Color::Yellow),
+                    ),
+                ]))),
+            },
             Row::AllDone => items.push(ListItem::new(Line::from(vec![Span::styled(
                 "All done!",
                 Style::default()
@@ -402,7 +551,7 @@ fn render_activity_list(f: &mut Frame, app: &App, area: Rect) {
     f.render_stateful_widget(list, area, &mut state);
 }
 
-/// Collect the last 10 AgentLog events for currently active agents
+/// Collect the last 10 AgentLog/BlockLog events for currently active agents
 fn collect_active_agent_logs(app: &App) -> Vec<(String, String)> {
     app.progress_events
         .iter()
@@ -414,6 +563,12 @@ fn collect_active_agent_logs(app: &App) -> Vec<(String, String)> {
                 message,
                 ..
             } => Some((agent.clone(), format!("[iter {iteration}] {message}"))),
+            ProgressEvent::BlockLog {
+                agent_name,
+                iteration,
+                message,
+                ..
+            } => Some((agent_name.clone(), format!("[iter {iteration}] {message}"))),
             _ => None,
         })
         .take(10)
@@ -431,6 +586,11 @@ fn find_last_error(app: &App) -> Option<(String, String)> {
             details: Some(details),
             ..
         } => Some((agent.clone(), details.clone())),
+        ProgressEvent::BlockError {
+            label,
+            details: Some(details),
+            ..
+        } => Some((label.clone(), details.clone())),
         _ => None,
     })
 }
@@ -460,6 +620,9 @@ fn compute_total_steps(app: &App) -> usize {
         crate::execution::ExecutionMode::Solo => agents,
         crate::execution::ExecutionMode::Relay => agents * app.iterations as usize,
         crate::execution::ExecutionMode::Swarm => agents * app.iterations as usize,
+        crate::execution::ExecutionMode::Pipeline => {
+            app.pipeline_def.blocks.len() * app.pipeline_def.iterations as usize
+        }
     }
 }
 
@@ -469,7 +632,11 @@ fn count_completed_steps(app: &App) -> usize {
         .filter(|e| {
             matches!(
                 e,
-                ProgressEvent::AgentFinished { .. } | ProgressEvent::AgentError { .. }
+                ProgressEvent::AgentFinished { .. }
+                    | ProgressEvent::AgentError { .. }
+                    | ProgressEvent::BlockFinished { .. }
+                    | ProgressEvent::BlockError { .. }
+                    | ProgressEvent::BlockSkipped { .. }
             )
         })
         .count()
@@ -483,8 +650,41 @@ fn current_status(app: &App) -> String {
         return "Consolidating reports...".into();
     }
     if !app.is_running {
+        if app.cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            return "Cancelled".into();
+        }
         return "Done".into();
     }
+
+    if app.selected_mode == ExecutionMode::Pipeline {
+        // Collect block labels whose most recent event is BlockStarted (still running)
+        let mut active_blocks: Vec<String> = Vec::new();
+        let mut seen_block_ids = HashSet::new();
+        for event in app.progress_events.iter().rev() {
+            match event {
+                ProgressEvent::BlockStarted {
+                    block_id, label, ..
+                } => {
+                    if seen_block_ids.insert(*block_id) {
+                        active_blocks.push(label.clone());
+                    }
+                }
+                ProgressEvent::BlockFinished { block_id, .. }
+                | ProgressEvent::BlockError { block_id, .. }
+                | ProgressEvent::BlockSkipped { block_id, .. } => {
+                    seen_block_ids.insert(*block_id);
+                }
+                _ => {}
+            }
+        }
+        return if active_blocks.is_empty() {
+            "Waiting...".into()
+        } else {
+            active_blocks.reverse();
+            format!("{} thinking...", active_blocks.join(", "))
+        };
+    }
+
     let mut active_agents: Vec<&str> = Vec::new();
     for name in &app.selected_agents {
         let last = app.progress_events.iter().rev().find(|e| match e {
@@ -702,5 +902,151 @@ mod tests {
         assert!(s.contains("Claude"));
         assert!(s.contains("Codex"));
         assert!(s.contains("thinking"));
+    }
+
+    #[test]
+    fn current_status_pipeline_shows_active_blocks() {
+        let mut a = app();
+        a.is_running = true;
+        a.selected_mode = ExecutionMode::Pipeline;
+        a.progress_events = vec![
+            ProgressEvent::BlockStarted {
+                block_id: 1,
+                agent_name: "Claude".into(),
+                label: "Block 1 (Claude)".into(),
+                iteration: 1,
+            },
+            ProgressEvent::BlockStarted {
+                block_id: 2,
+                agent_name: "Codex".into(),
+                label: "Block 2 (Codex)".into(),
+                iteration: 1,
+            },
+        ];
+        let s = current_status(&a);
+        assert!(s.contains("Block 1 (Claude)"));
+        assert!(s.contains("Block 2 (Codex)"));
+        assert!(s.contains("thinking"));
+    }
+
+    #[test]
+    fn current_status_pipeline_excludes_finished_blocks() {
+        let mut a = app();
+        a.is_running = true;
+        a.selected_mode = ExecutionMode::Pipeline;
+        a.progress_events = vec![
+            ProgressEvent::BlockStarted {
+                block_id: 1,
+                agent_name: "Claude".into(),
+                label: "Block 1 (Claude)".into(),
+                iteration: 1,
+            },
+            ProgressEvent::BlockFinished {
+                block_id: 1,
+                agent_name: "Claude".into(),
+                label: "Block 1 (Claude)".into(),
+                iteration: 1,
+            },
+            ProgressEvent::BlockStarted {
+                block_id: 2,
+                agent_name: "Codex".into(),
+                label: "Block 2 (Codex)".into(),
+                iteration: 1,
+            },
+        ];
+        let s = current_status(&a);
+        assert!(!s.contains("Block 1"));
+        assert!(s.contains("Block 2 (Codex)"));
+    }
+
+    #[test]
+    fn current_status_pipeline_waiting_when_no_active_blocks() {
+        let mut a = app();
+        a.is_running = true;
+        a.selected_mode = ExecutionMode::Pipeline;
+        a.progress_events = vec![ProgressEvent::BlockFinished {
+            block_id: 1,
+            agent_name: "Claude".into(),
+            label: "Block 1 (Claude)".into(),
+            iteration: 1,
+        }];
+        assert_eq!(current_status(&a), "Waiting...");
+    }
+
+    #[test]
+    fn current_status_shows_cancelled_when_flag_set() {
+        let mut a = app();
+        a.is_running = false;
+        a.cancel_flag
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(current_status(&a), "Cancelled");
+    }
+
+    #[test]
+    fn build_event_items_marks_thinking_as_cancelled() {
+        let mut a = app();
+        a.is_running = false;
+        a.cancel_flag
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        a.progress_events = vec![
+            ProgressEvent::AgentStarted {
+                agent: "Claude".into(),
+                kind: ProviderKind::Anthropic,
+                iteration: 1,
+            },
+            ProgressEvent::AgentFinished {
+                agent: "Codex".into(),
+                kind: ProviderKind::OpenAI,
+                iteration: 1,
+            },
+        ];
+        let items = build_event_items(&a);
+        let texts: Vec<String> = items.iter().map(|i| format!("{:?}", i)).collect();
+        let joined = texts.join("\n");
+        // Thinking agent should be cancelled, finished agent stays finished
+        assert!(joined.contains("cancelled"), "expected cancelled in: {joined}");
+        assert!(joined.contains("finished"), "expected finished in: {joined}");
+        assert!(
+            !joined.contains("thinking"),
+            "expected no thinking in: {joined}"
+        );
+    }
+
+    #[test]
+    fn build_event_items_keeps_thinking_when_not_cancelled() {
+        let mut a = app();
+        a.is_running = true;
+        a.progress_events = vec![ProgressEvent::AgentStarted {
+            agent: "Claude".into(),
+            kind: ProviderKind::Anthropic,
+            iteration: 1,
+        }];
+        let items = build_event_items(&a);
+        let joined: String = items.iter().map(|i| format!("{:?}", i)).collect();
+        assert!(
+            joined.contains("thinking"),
+            "expected thinking in: {joined}"
+        );
+    }
+
+    #[test]
+    fn build_event_items_marks_thinking_blocks_as_cancelled() {
+        let mut a = app();
+        a.is_running = false;
+        a.cancel_flag
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        a.progress_events = vec![ProgressEvent::BlockStarted {
+            block_id: 1,
+            agent_name: "Claude".into(),
+            label: "Block 1 (Claude)".into(),
+            iteration: 1,
+        }];
+        let items = build_event_items(&a);
+        let joined: String = items.iter().map(|i| format!("{:?}", i)).collect();
+        assert!(joined.contains("cancelled"), "expected cancelled in: {joined}");
+        assert!(
+            !joined.contains("thinking"),
+            "expected no thinking in: {joined}"
+        );
     }
 }

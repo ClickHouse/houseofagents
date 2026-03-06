@@ -533,6 +533,7 @@ impl Provider for CliProvider {
                     Self::short_session(&session_id)
                 ));
                 self.session_id = Some(session_id);
+                self.session_started = true;
             }
         } else if self.kind == ProviderKind::Anthropic {
             self.session_started = true;
@@ -658,5 +659,33 @@ not json
     fn short_session_formats_long_id() {
         let short = CliProvider::short_session("1234567890abcdef");
         assert_eq!(short, "123456...cdef");
+    }
+
+    #[test]
+    fn push_command_debug_openai_marks_resuming_after_session_started() {
+        let mut provider = CliProvider::new(
+            ProviderKind::OpenAI,
+            String::new(),
+            None,
+            None,
+            String::new(),
+            false,
+            Vec::new(),
+            30,
+            50,
+        );
+        provider.session_id = Some("123e4567-e89b-12d3-a456-426614174000".to_string());
+        provider.session_started = true;
+
+        let mut logs = Vec::new();
+        provider.push_command_debug(
+            &mut logs,
+            "codex",
+            &["exec".to_string(), "resume".to_string()],
+        );
+
+        assert!(logs.iter().any(|line| line.contains("session:")));
+        assert!(logs.iter().any(|line| line.contains("(resuming)")));
+        assert!(!logs.iter().any(|line| line.contains("(initial)")));
     }
 }

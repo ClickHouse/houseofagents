@@ -224,6 +224,17 @@ fn help_lines() -> &'static [Line<'static>] {
             Line::from("  Best for: comparing models head-to-head, getting"),
             Line::from("  diverse independent answers to the same question."),
             Line::from(""),
+            Line::from(Span::styled("Pipeline", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+            Line::from(""),
+            Line::from("  Build a custom DAG of agent blocks with explicit connections."),
+            Line::from("  Each block has its own provider, prompt, and optional session ID."),
+            Line::from("  Blocks execute as soon as their dependencies are satisfied,"),
+            Line::from("  maximizing parallelism. Root blocks receive the initial prompt;"),
+            Line::from("  on subsequent iterations they receive terminal block outputs."),
+            Line::from(""),
+            Line::from("  Best for: complex multi-step pipelines, hierarchical analysis,"),
+            Line::from("  workflows requiring specific agent ordering and data flow."),
+            Line::from(""),
         ]
     });
     &LINES
@@ -803,6 +814,7 @@ mod tests {
         assert!(joined.contains("Relay"));
         assert!(joined.contains("Swarm"));
         assert!(joined.contains("Solo"));
+        assert!(joined.contains("Pipeline"));
     }
 
     #[test]

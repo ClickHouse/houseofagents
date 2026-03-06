@@ -135,6 +135,49 @@ impl OutputManager {
         Ok(path)
     }
 
+    #[allow(dead_code)]
+    pub fn write_block_output(
+        &self,
+        block_id: u32,
+        block_name: &str,
+        agent_name: &str,
+        iteration: u32,
+        content: &str,
+    ) -> Result<PathBuf, AppError> {
+        let name_key = if block_name.trim().is_empty() {
+            format!("block{}", block_id)
+        } else {
+            format!("{}_b{}", Self::sanitize_session_name(block_name), block_id)
+        };
+        let sanitized = Self::sanitize_session_name(agent_name);
+        let filename = format!("{}_{}_iter{}.md", name_key, sanitized, iteration);
+        let path = self.run_dir.join(&filename);
+        std::fs::write(&path, content)?;
+        Ok(path)
+    }
+
+    pub fn write_pipeline_session_info(
+        &self,
+        block_count: usize,
+        connection_count: usize,
+        iterations: u32,
+        pipeline_source: Option<&str>,
+    ) -> Result<(), AppError> {
+        let mut root = toml::map::Map::new();
+        root.insert("mode".into(), Value::String("pipeline".to_string()));
+        root.insert("blocks".into(), Value::Integer(block_count as i64));
+        root.insert("connections".into(), Value::Integer(connection_count as i64));
+        root.insert("iterations".into(), Value::Integer(iterations as i64));
+        if let Some(src) = pipeline_source {
+            root.insert("pipeline_source".into(), Value::String(src.to_string()));
+        }
+        let content = toml::to_string_pretty(&Value::Table(root))
+            .map_err(|e| AppError::Config(format!("Failed to serialize session info: {e}")))?;
+        let path = self.run_dir.join("session.toml");
+        std::fs::write(path, content)?;
+        Ok(())
+    }
+
     pub fn append_error(&self, error: &str) -> Result<(), AppError> {
         use std::io::Write;
         let path = self.run_dir.join("_errors.log");
