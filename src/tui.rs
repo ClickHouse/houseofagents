@@ -2119,10 +2119,20 @@ fn cycle_reasoning(app: &mut App) {
                 None => Some("low".into()),
                 Some("low") => Some("medium".into()),
                 Some("medium") => Some("high".into()),
+                Some("high") => Some("xhigh".into()),
                 _ => None,
             };
         }
-        ProviderKind::Anthropic | ProviderKind::Gemini => {
+        ProviderKind::Anthropic => {
+            config.thinking_effort = match config.thinking_effort.as_deref() {
+                None => Some("low".into()),
+                Some("low") => Some("medium".into()),
+                Some("medium") => Some("high".into()),
+                Some("high") => Some("max".into()),
+                _ => None,
+            };
+        }
+        ProviderKind::Gemini => {
             config.thinking_effort = match config.thinking_effort.as_deref() {
                 None => Some("low".into()),
                 Some("low") => Some("medium".into()),
@@ -2469,24 +2479,8 @@ fn start_execution(app: &mut App) {
             }
         };
 
-        if agent_config.use_cli
-            && !app
-                .cli_available
-                .get(&agent_config.provider)
-                .copied()
-                .unwrap_or(false)
-        {
-            app.error_modal = Some(format!(
-                "{} CLI is not installed",
-                agent_config.provider.display_name()
-            ));
-            app.screen = Screen::Prompt;
-            app.is_running = false;
-            return;
-        }
-
-        if !agent_config.use_cli && agent_config.api_key.trim().is_empty() {
-            app.error_modal = Some(format!("{name} API key is missing"));
+        if let Err(message) = validate_agent_runtime(app, name, &agent_config) {
+            app.error_modal = Some(message);
             app.screen = Screen::Prompt;
             app.is_running = false;
             return;
@@ -2724,6 +2718,37 @@ fn start_execution(app: &mut App) {
             let _ = tx.send(ProgressEvent::AllDone);
         }
     });
+}
+
+fn validate_agent_runtime(
+    app: &App,
+    agent_label: &str,
+    agent_config: &AgentConfig,
+) -> Result<(), String> {
+    if agent_config.use_cli
+        && !app
+            .cli_available
+            .get(&agent_config.provider)
+            .copied()
+            .unwrap_or(false)
+    {
+        return Err(format!(
+            "{agent_label}: {} CLI is not installed",
+            agent_config.provider.display_name()
+        ));
+    }
+
+    if !agent_config.use_cli && agent_config.api_key.trim().is_empty() {
+        return Err(format!("{agent_label} API key is missing"));
+    }
+
+    provider::validate_effort_config(
+        agent_config.provider,
+        agent_config.use_cli,
+        agent_config.reasoning_effort.as_deref(),
+        agent_config.thinking_effort.as_deref(),
+    )
+    .map_err(|message| format!("{agent_label}: {message}"))
 }
 
 fn handle_progress(app: &mut App, event: ProgressEvent) {
@@ -2995,21 +3020,8 @@ fn start_consolidation(app: &mut App) {
         }
     };
 
-    if agent_config.use_cli
-        && !app
-            .cli_available
-            .get(&agent_config.provider)
-            .copied()
-            .unwrap_or(false)
-    {
-        app.error_modal = Some(format!(
-            "{} CLI is not installed",
-            agent_config.provider.display_name()
-        ));
-        return;
-    }
-    if !agent_config.use_cli && agent_config.api_key.trim().is_empty() {
-        app.error_modal = Some(format!("{agent_name} API key is missing"));
+    if let Err(message) = validate_agent_runtime(app, &agent_name, &agent_config) {
+        app.error_modal = Some(message);
         return;
     }
 
@@ -3206,28 +3218,15 @@ fn maybe_start_diagnostics(app: &mut App) {
         }
     };
     let diagnostic_kind = agent_config.provider;
+    if let Err(message) = validate_agent_runtime(
+        app,
+        &format!("Diagnostic agent '{}'", diag_agent_name),
+        &agent_config,
+    ) {
+        app.error_modal = Some(message);
+        return;
+    }
     let pconfig = agent_config.to_provider_config();
-
-    if pconfig.use_cli
-        && !app
-            .cli_available
-            .get(&diagnostic_kind)
-            .copied()
-            .unwrap_or(false)
-    {
-        app.error_modal = Some(format!(
-            "Diagnostic agent '{}' CLI is not installed",
-            diag_agent_name
-        ));
-        return;
-    }
-    if !pconfig.use_cli && pconfig.api_key.trim().is_empty() {
-        app.error_modal = Some(format!(
-            "Diagnostic agent '{}' API key is missing",
-            diag_agent_name
-        ));
-        return;
-    }
 
     let report_files = collect_report_files(&run_dir);
     let app_errors = collect_application_errors(app, &run_dir);
@@ -3535,6 +3534,30 @@ mod tests {
         .unwrap();
     }
 
+    fn test_agent(
+        name: &str,
+        provider: ProviderKind,
+        model: &str,
+        use_cli: bool,
+        thinking_effort: Option<&str>,
+    ) -> AgentConfig {
+        AgentConfig {
+            name: name.to_string(),
+            provider,
+            api_key: if use_cli {
+                String::new()
+            } else {
+                "k".to_string()
+            },
+            model: model.to_string(),
+            reasoning_effort: None,
+            thinking_effort: thinking_effort.map(str::to_string),
+            use_cli,
+            cli_print_mode: true,
+            extra_cli_args: String::new(),
+        }
+    }
+
     #[test]
     fn parse_agent_iteration_valid() {
         assert_eq!(
@@ -3565,6 +3588,37 @@ mod tests {
             parse_agent_iteration_filename("anthropic_iter.md", "anthropic"),
             None
         );
+    }
+
+    #[test]
+    fn validate_agent_runtime_rejects_anthropic_max_in_api_mode() {
+        let app = test_app();
+        let agent = test_agent(
+            "Claude",
+            ProviderKind::Anthropic,
+            "claude-opus-4-6",
+            false,
+            Some("max"),
+        );
+
+        let err = validate_agent_runtime(&app, &agent.name, &agent).expect_err("should reject");
+        assert!(err.contains("\"max\" thinking effort requires CLI mode"));
+    }
+
+    #[test]
+    fn validate_agent_runtime_allows_anthropic_max_in_cli_mode() {
+        let mut app = test_app();
+        app.cli_available.insert(ProviderKind::Anthropic, true);
+        let agent = test_agent(
+            "Claude",
+            ProviderKind::Anthropic,
+            "claude-sonnet-4-5",
+            true,
+            Some("max"),
+        );
+
+        validate_agent_runtime(&app, &agent.name, &agent)
+            .expect("cli mode should be allowed through to the provider");
     }
 
     #[test]

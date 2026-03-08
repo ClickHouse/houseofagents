@@ -32,10 +32,10 @@ pub struct AgentConfig {
     pub provider: ProviderKind,
     pub api_key: String,
     pub model: String,
-    /// OpenAI reasoning effort: "low", "medium", "high" (for o-series models)
+    /// OpenAI reasoning effort: "low", "medium", "high", "xhigh" (for o-series / gpt-5 models)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
-    /// Thinking effort: "low", "medium", "high" (for Claude / Gemini models)
+    /// Thinking effort: "low", "medium", "high", "max" (max for Claude Opus 4.6 only)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking_effort: Option<String>,
     /// Use CLI tool instead of API for this provider
@@ -83,10 +83,10 @@ impl AgentConfig {
 pub struct ProviderConfig {
     pub api_key: String,
     pub model: String,
-    /// OpenAI reasoning effort: "low", "medium", "high" (for o-series models)
+    /// OpenAI reasoning effort: "low", "medium", "high", "xhigh" (for o-series / gpt-5 models)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
-    /// Thinking effort: "low", "medium", "high" (for Claude / Gemini models)
+    /// Thinking effort: "low", "medium", "high", "max" (max for Claude Opus 4.6 only)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking_effort: Option<String>,
     /// Use CLI tool instead of API for this provider

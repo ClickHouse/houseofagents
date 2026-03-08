@@ -163,11 +163,32 @@ pub fn create_provider_from_agent(
     )
 }
 
-pub fn effort_to_budget(effort: &str) -> u32 {
+pub fn validate_effort_config(
+    kind: ProviderKind,
+    use_cli: bool,
+    reasoning_effort: Option<&str>,
+    thinking_effort: Option<&str>,
+) -> Result<(), String> {
+    let _ = reasoning_effort;
+    match kind {
+        ProviderKind::Anthropic => {
+            if thinking_effort == Some("max") && !use_cli {
+                return Err("\"max\" thinking effort requires CLI mode for Anthropic".into());
+            }
+        }
+        ProviderKind::OpenAI | ProviderKind::Gemini => {}
+    }
+    Ok(())
+}
+
+pub fn effort_to_budget(effort: &str) -> Result<u32, String> {
     match effort {
-        "low" => 4096,
-        "medium" => 8192,
-        _ => 16384,
+        "low" => Ok(4096),
+        "medium" => Ok(8192),
+        "high" => Ok(16384),
+        other => Err(format!(
+            "unsupported thinking effort \"{other}\" for API mode"
+        )),
     }
 }
 
@@ -254,14 +275,38 @@ mod tests {
 
     #[test]
     fn effort_to_budget_low_medium_high() {
-        assert_eq!(effort_to_budget("low"), 4096);
-        assert_eq!(effort_to_budget("medium"), 8192);
-        assert_eq!(effort_to_budget("high"), 16384);
+        assert_eq!(effort_to_budget("low").unwrap(), 4096);
+        assert_eq!(effort_to_budget("medium").unwrap(), 8192);
+        assert_eq!(effort_to_budget("high").unwrap(), 16384);
     }
 
     #[test]
-    fn effort_to_budget_unknown_defaults_to_high_budget() {
-        assert_eq!(effort_to_budget("unexpected"), 16384);
+    fn effort_to_budget_rejects_unknown_values() {
+        assert!(effort_to_budget("max").is_err());
+        assert!(effort_to_budget("unexpected").is_err());
+    }
+
+    #[test]
+    fn validate_effort_config_rejects_anthropic_max_in_api_mode() {
+        let err = validate_effort_config(
+            ProviderKind::Anthropic,
+            false,
+            None,
+            Some("max"),
+        )
+        .expect_err("should reject api mode");
+        assert!(err.contains("requires CLI mode"));
+    }
+
+    #[test]
+    fn validate_effort_config_allows_anthropic_max_in_cli_mode() {
+        validate_effort_config(
+            ProviderKind::Anthropic,
+            true,
+            None,
+            Some("max"),
+        )
+        .expect("cli mode should be allowed through to the provider");
     }
 
     #[test]

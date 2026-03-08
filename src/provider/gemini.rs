@@ -100,7 +100,10 @@ impl Provider for GeminiProvider {
             "maxOutputTokens": self.max_tokens,
         });
         if let Some(ref effort) = self.thinking_effort {
-            let budget = effort_to_budget(effort);
+            let budget = effort_to_budget(effort).map_err(|e| AppError::Provider {
+                provider: "Gemini".into(),
+                message: e,
+            })?;
             gen_config["thinkingConfig"] = serde_json::json!({
                 "thinkingBudget": budget,
             });

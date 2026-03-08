@@ -1,5 +1,6 @@
 use super::{
-    effort_to_budget, prune_history, CompletionResponse, Message, Provider, ProviderKind, Role,
+    effort_to_budget, prune_history, validate_effort_config, CompletionResponse, Message, Provider,
+    ProviderKind, Role,
 };
 use crate::error::AppError;
 use async_trait::async_trait;
@@ -85,6 +86,18 @@ impl Provider for AnthropicProvider {
     }
 
     async fn send(&mut self, message: &str) -> Result<CompletionResponse, AppError> {
+        if let Err(message) = validate_effort_config(
+            ProviderKind::Anthropic,
+            false,
+            None,
+            self.thinking_effort.as_deref(),
+        ) {
+            return Err(AppError::Provider {
+                provider: "Anthropic".into(),
+                message,
+            });
+        }
+
         self.history.push(Message {
             role: Role::User,
             content: message.to_string(),
@@ -110,7 +123,10 @@ impl Provider for AnthropicProvider {
         });
 
         if let Some(ref effort) = self.thinking_effort {
-            let budget = effort_to_budget(effort);
+            let budget = effort_to_budget(effort).map_err(|e| AppError::Provider {
+                provider: "Anthropic".into(),
+                message: e,
+            })?;
             body["thinking"] = serde_json::json!({
                 "type": "enabled",
                 "budget_tokens": budget,

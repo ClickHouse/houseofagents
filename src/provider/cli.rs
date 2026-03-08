@@ -1,5 +1,8 @@
 use crate::error::AppError;
-use crate::provider::{prune_history, CompletionResponse, Message, Provider, ProviderKind, Role};
+use crate::provider::{
+    prune_history, validate_effort_config, CompletionResponse, Message, Provider, ProviderKind,
+    Role,
+};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::path::PathBuf;
@@ -256,6 +259,14 @@ impl CliProvider {
             let _ = tx.send(message);
         }
     }
+
+    fn provider_name(&self) -> &'static str {
+        match self.kind {
+            ProviderKind::Anthropic => "Anthropic",
+            ProviderKind::OpenAI => "OpenAI",
+            ProviderKind::Gemini => "Gemini",
+        }
+    }
 }
 
 #[async_trait]
@@ -269,6 +280,18 @@ impl Provider for CliProvider {
     }
 
     async fn send(&mut self, message: &str) -> Result<CompletionResponse, AppError> {
+        if let Err(message) = validate_effort_config(
+            self.kind,
+            true,
+            self.reasoning_effort.as_deref(),
+            self.thinking_effort.as_deref(),
+        ) {
+            return Err(AppError::Provider {
+                provider: self.provider_name().into(),
+                message,
+            });
+        }
+
         let started_at = Instant::now();
         let mut debug_logs: Vec<String> = Vec::new();
         self.history.push(Message {
