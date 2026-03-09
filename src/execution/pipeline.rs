@@ -1,6 +1,8 @@
 use crate::config::AppConfig;
 use crate::error::AppError;
-use crate::execution::{wait_for_cancel, ProgressEvent, PromptRuntimeContext};
+use crate::execution::{
+    finish_live_log_forwarder, wait_for_cancel, ProgressEvent, PromptRuntimeContext,
+};
 use crate::output::OutputManager;
 use crate::provider::{self, ProviderKind};
 use serde::{Deserialize, Serialize};
@@ -579,13 +581,29 @@ where
                         });
 
                         let result = tokio::select! {
-                            res = guard.send(&message) => Some(res),
+                            res = crate::execution::send_with_streaming(
+                                &mut **guard,
+                                &message,
+                                &ptx,
+                                {
+                                    let agent_name = agent_name.clone();
+                                    let bid = block_id;
+                                    let it = iteration;
+                                    move |chunk| ProgressEvent::BlockStreamChunk {
+                                        block_id: bid,
+                                        agent_name: agent_name.clone(),
+                                        iteration: it,
+                                        chunk,
+                                    }
+                                },
+                            ) => Some(res),
                             _ = wait_for_cancel(&cancel_clone) => None
                         };
 
                         guard.set_live_log_sender(None);
+                        let cancelled = result.is_none();
                         drop(guard);
-                        let _ = live_forward.await;
+                        finish_live_log_forwarder(live_forward, cancelled).await;
 
                         match result {
                             None => {

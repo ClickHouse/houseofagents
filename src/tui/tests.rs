@@ -198,6 +198,20 @@ fn handle_execution_task_result_uses_selected_provider_kind() {
 }
 
 #[test]
+fn handle_key_esc_cancels_active_run() {
+    let mut app = test_app();
+    app.screen = Screen::Running;
+    app.running.is_running = true;
+
+    handle_key(&mut app, key(KeyCode::Esc));
+
+    assert!(app
+        .running
+        .cancel_flag
+        .load(std::sync::atomic::Ordering::Relaxed));
+}
+
+#[test]
 fn parse_iteration_from_filename_valid() {
     assert_eq!(parse_iteration_from_filename("openai_iter5.md"), Some(5));
 }

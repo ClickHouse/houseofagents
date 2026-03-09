@@ -1274,8 +1274,74 @@ pub(super) fn handle_running_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('q') if !app.running.is_running => {
             app.should_quit = true;
         }
+        KeyCode::Char('l') if app.running.multi_run_total <= 1 => {
+            app.running.show_activity_log = !app.running.show_activity_log;
+        }
+        KeyCode::Char('p') if app.running.multi_run_total <= 1 => {
+            if app.running.preview_target.is_some() {
+                app.running.preview_target = None;
+            } else {
+                app.running.preview_target = running_stream_targets(app).into_iter().next();
+            }
+        }
+        KeyCode::Tab
+            if app.running.multi_run_total <= 1 && app.running.preview_target.is_some() =>
+        {
+            let targets = running_stream_targets(app);
+            if !targets.is_empty() {
+                let current_idx = app
+                    .running
+                    .preview_target
+                    .as_ref()
+                    .and_then(|current| targets.iter().position(|t| t == current))
+                    .unwrap_or(0);
+                let next = (current_idx + 1) % targets.len();
+                app.running.preview_target = Some(targets[next].clone());
+            }
+        }
+        KeyCode::BackTab
+            if app.running.multi_run_total <= 1 && app.running.preview_target.is_some() =>
+        {
+            let targets = running_stream_targets(app);
+            if !targets.is_empty() {
+                let current_idx = app
+                    .running
+                    .preview_target
+                    .as_ref()
+                    .and_then(|current| targets.iter().position(|t| t == current))
+                    .unwrap_or(0);
+                let prev = if current_idx == 0 {
+                    targets.len() - 1
+                } else {
+                    current_idx - 1
+                };
+                app.running.preview_target = Some(targets[prev].clone());
+            }
+        }
         _ => {}
     }
+}
+
+fn running_stream_targets(app: &App) -> Vec<crate::app::StreamTarget> {
+    let candidates: Vec<crate::app::StreamTarget> =
+        if app.selected_mode == crate::execution::ExecutionMode::Pipeline {
+            app.block_rows()
+                .iter()
+                .map(|row| crate::app::StreamTarget::Block(row.block_id))
+                .collect()
+        } else {
+            app.agent_rows()
+                .iter()
+                .map(|row| crate::app::StreamTarget::Agent(row.name.clone()))
+                .collect()
+        };
+    candidates
+        .into_iter()
+        .filter(|t| {
+            app.stream_buffer(t)
+                .is_some_and(|b| !b.text().is_empty())
+        })
+        .collect()
 }
 
 pub(super) fn handle_consolidation_key(app: &mut App, key: KeyEvent) {

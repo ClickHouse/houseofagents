@@ -817,6 +817,173 @@ fn put_char(f: &mut Frame, canvas: Rect, x: i16, y: i16, ch: char, style: Style)
     }
 }
 
+/// Read-only DAG renderer for the running screen.
+/// Renders pipeline blocks and wires with status-based coloring and auto-centered viewport.
+pub(crate) fn render_dag_readonly(
+    f: &mut Frame,
+    area: Rect,
+    blocks: &[crate::execution::pipeline::PipelineBlock],
+    connections: &[crate::execution::pipeline::PipelineConnection],
+    block_style_fn: &dyn Fn(crate::execution::pipeline::BlockId) -> (Color, BorderType),
+) {
+    if area.width == 0 || area.height == 0 || blocks.is_empty() {
+        return;
+    }
+
+    // Auto-center viewport based on bounding box of all blocks
+    let (min_col, max_col, min_row, max_row) = blocks.iter().fold(
+        (u16::MAX, 0u16, u16::MAX, 0u16),
+        |(mnc, mxc, mnr, mxr), b| {
+            (
+                mnc.min(b.position.0),
+                mxc.max(b.position.0),
+                mnr.min(b.position.1),
+                mxr.max(b.position.1),
+            )
+        },
+    );
+
+    let world_left = min_col as i16 * CELL_W as i16;
+    let world_right = max_col as i16 * CELL_W as i16 + BLOCK_W as i16;
+    let world_top = min_row as i16 * CELL_H as i16;
+    let world_bottom = max_row as i16 * CELL_H as i16 + BLOCK_H as i16;
+    let world_w = world_right - world_left;
+    let world_h = world_bottom - world_top;
+
+    let ox = world_left - (area.width as i16 - world_w) / 2;
+    let oy = world_top - (area.height as i16 - world_h) / 2;
+
+    // Draw blocks
+    for block in blocks {
+        let sx = block.position.0 as i16 * CELL_W as i16 - ox;
+        let sy = block.position.1 as i16 * CELL_H as i16 - oy;
+
+        if sx + BLOCK_W as i16 <= 0 || sy + BLOCK_H as i16 <= 0 {
+            continue;
+        }
+        let rx = area.x as i16 + sx;
+        let ry = area.y as i16 + sy;
+        if rx < area.x as i16
+            || ry < area.y as i16
+            || rx as u16 + BLOCK_W > area.x + area.width
+            || ry as u16 + BLOCK_H > area.y + area.height
+        {
+            continue;
+        }
+        let block_area = Rect::new(rx as u16, ry as u16, BLOCK_W, BLOCK_H);
+
+        let (border_color, border_type) = block_style_fn(block.id);
+        let title = if block.name.is_empty() {
+            format!(" {} ", block.agent)
+        } else {
+            format!(" {} ", block.name)
+        };
+        let block_widget = Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_type(border_type)
+            .border_style(Style::default().fg(border_color));
+        let inner = block_widget.inner(block_area);
+        f.render_widget(block_widget, block_area);
+
+        if inner.height > 0 && inner.width > 0 {
+            let agent_display = truncate_chars(&block.agent, inner.width as usize);
+            let agent_p = Paragraph::new(Span::styled(
+                agent_display,
+                Style::default().fg(Color::White),
+            ));
+            f.render_widget(agent_p, Rect::new(inner.x, inner.y, inner.width, 1));
+        }
+
+        if inner.height > 1 && inner.width > 0 {
+            let prompt_label = if block.prompt.is_empty() {
+                "no prompt"
+            } else {
+                "has prompt"
+            };
+            let prompt_p = Paragraph::new(Span::styled(
+                prompt_label,
+                Style::default().fg(Color::DarkGray),
+            ));
+            f.render_widget(
+                prompt_p,
+                Rect::new(inner.x, inner.y + 1, inner.width, 1),
+            );
+        }
+    }
+
+    // Wire routing and painting
+    let grid_occ = grid_occupancy(blocks);
+    let lanes = assign_lanes(connections, blocks);
+    let ports = assign_ports(connections, blocks);
+
+    let mut rendered_connections: Vec<(u8, ConnectionRaster)> = Vec::new();
+
+    for (ci, conn) in connections.iter().enumerate() {
+        let fb = blocks.iter().find(|b| b.id == conn.from);
+        let tb = blocks.iter().find(|b| b.id == conn.to);
+        let (Some(fb), Some(tb)) = (fb, tb) else {
+            continue;
+        };
+
+        let color = WIRE_PALETTE[ci % WIRE_PALETTE.len()];
+        let (exit_y_off, entry_y_off) = ports[ci];
+        let segs = route_wire(
+            fb.position,
+            tb.position,
+            &grid_occ,
+            lanes[ci],
+            exit_y_off,
+            entry_y_off,
+        );
+        let mut conn_map: ConnectionRaster = HashMap::new();
+        for seg in &segs {
+            rasterize_seg(seg, color, &mut conn_map);
+        }
+        if let Some(last) = segs.last() {
+            let arrow_ch = arrow_for_seg(last);
+            if let Some(cell) = conn_map.get_mut(&(last.x2, last.y2)) {
+                cell.is_arrow = true;
+                cell.arrow_char = arrow_ch;
+            } else {
+                conn_map.insert(
+                    (last.x2, last.y2),
+                    WireCell {
+                        dirs: 0,
+                        color,
+                        is_arrow: true,
+                        arrow_char: arrow_ch,
+                    },
+                );
+            }
+        }
+        rendered_connections.push((color_rank(color), conn_map));
+    }
+
+    rendered_connections.sort_by_key(|(rank, _)| *rank);
+
+    for (_, conn_map) in rendered_connections {
+        for (&(wx, wy), cell) in &conn_map {
+            if pixel_hits_block(wx, wy, blocks) {
+                continue;
+            }
+            let ch = if cell.is_arrow {
+                cell.arrow_char
+            } else {
+                dirs_to_char(cell.dirs)
+            };
+            put_char(
+                f,
+                area,
+                wx - ox,
+                wy - oy,
+                ch,
+                Style::default().fg(cell.color),
+            );
+        }
+    }
+}
+
 fn draw_help_bar(f: &mut Frame, app: &App, area: Rect) {
     let help = if app.pipeline.pipeline_connecting_from.is_some() {
         "Arrows: navigate | Enter: connect | Esc: cancel"

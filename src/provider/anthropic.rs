@@ -2,6 +2,8 @@ use super::{
     effort_to_budget, validate_effort_config, HttpProviderBase, Provider, ProviderKind, SendFuture,
 };
 use crate::error::AppError;
+use futures_util::StreamExt;
+use tokio::sync::mpsc;
 
 pub struct AnthropicProvider {
     base: HttpProviderBase,
@@ -11,6 +13,14 @@ impl AnthropicProvider {
     pub fn new(base: HttpProviderBase) -> Self {
         Self { base }
     }
+}
+
+fn extract_stream_text_delta(event_data: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(event_data).ok()?;
+    if value["type"].as_str()? != "content_block_delta" {
+        return None;
+    }
+    value["delta"]["text"].as_str().map(str::to_string)
 }
 
 fn extract_text_content(resp_body: &serde_json::Value) -> Result<String, AppError> {
@@ -39,10 +49,13 @@ fn extract_text_content(resp_body: &serde_json::Value) -> Result<String, AppErro
     }
 
     // Legacy fallback where `type` is omitted but `text` still exists.
-    if let Some(text) = content
-        .iter()
-        .find_map(|block| block.get("text").and_then(serde_json::Value::as_str))
-    {
+    if let Some(text) = content.iter().find_map(|block| {
+        if block.get("type").is_none() {
+            block.get("text").and_then(serde_json::Value::as_str)
+        } else {
+            None
+        }
+    }) {
         return Ok(text.to_string());
     }
 
@@ -111,6 +124,85 @@ impl Provider for AnthropicProvider {
             Ok(self.base.finish_send(content))
         })
     }
+
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
+    fn send_streaming(
+        &mut self,
+        message: &str,
+        chunk_tx: mpsc::Sender<String>,
+    ) -> SendFuture<'_> {
+        let message = message.to_string();
+        Box::pin(async move {
+            if let Err(message) = validate_effort_config(
+                ProviderKind::Anthropic,
+                false,
+                None,
+                self.base.effort.as_deref(),
+            ) {
+                return Err(AppError::Provider {
+                    provider: "Anthropic".into(),
+                    message,
+                });
+            }
+
+            self.base.prepare_send(&message);
+            let messages = self.base.format_messages_standard();
+
+            let mut body = serde_json::json!({
+                "model": self.base.model,
+                "max_tokens": self.base.max_tokens,
+                "messages": messages,
+                "stream": true,
+            });
+
+            if let Some(ref effort) = self.base.effort {
+                let budget = effort_to_budget(effort).map_err(|e| AppError::Provider {
+                    provider: "Anthropic".into(),
+                    message: e,
+                })?;
+                body["thinking"] = serde_json::json!({
+                    "type": "enabled",
+                    "budget_tokens": budget,
+                });
+            }
+
+            let request = self
+                .base
+                .client
+                .post("https://api.anthropic.com/v1/messages")
+                .header("x-api-key", &self.base.api_key)
+                .header("anthropic-version", "2023-06-01")
+                .header("content-type", "application/json")
+                .json(&body)
+                .build()?;
+
+            let mut stream = self
+                .base
+                .execute_streaming_request(request, "Anthropic")
+                .await?;
+            let mut parser = crate::provider::sse::SseParser::new();
+            let mut full_content = String::new();
+
+            while let Some(chunk_result) = stream.next().await {
+                let bytes = chunk_result.map_err(|e| AppError::Provider {
+                    provider: "Anthropic".into(),
+                    message: format!("Stream error: {e}"),
+                })?;
+                parser.feed(&bytes);
+                while let Some(event) = parser.next_event() {
+                    if let Some(text) = extract_stream_text_delta(&event.data) {
+                        full_content.push_str(&text);
+                        let _ = chunk_tx.send(text).await;
+                    }
+                }
+            }
+
+            Ok(self.base.finish_send(full_content))
+        })
+    }
 }
 
 pub async fn list_models(api_key: &str, client: &reqwest::Client) -> Result<Vec<String>, String> {
@@ -146,7 +238,7 @@ pub async fn list_models(api_key: &str, client: &reqwest::Client) -> Result<Vec<
 
 #[cfg(test)]
 mod tests {
-    use super::extract_text_content;
+    use super::{extract_stream_text_delta, extract_text_content};
     use serde_json::json;
 
     #[test]
@@ -185,6 +277,19 @@ mod tests {
     }
 
     #[test]
+    fn extract_text_content_ignores_typed_non_text_blocks_with_text_fields() {
+        let body = json!({
+            "content": [
+                { "type": "thinking", "text": "internal" }
+            ]
+        });
+        let err = extract_text_content(&body).expect_err("should fail");
+        assert!(err
+            .to_string()
+            .contains("No text content found in response"));
+    }
+
+    #[test]
     fn extract_text_content_errors_when_no_text_exists() {
         let body = json!({
             "content": [
@@ -195,5 +300,17 @@ mod tests {
         assert!(err
             .to_string()
             .contains("No text content found in response"));
+    }
+
+    #[test]
+    fn extract_stream_text_delta_reads_text_chunk() {
+        let data = r#"{"type":"content_block_delta","delta":{"text":"hello"}}"#;
+        assert_eq!(extract_stream_text_delta(data).as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn extract_stream_text_delta_ignores_non_text_delta() {
+        let data = r#"{"type":"content_block_delta","delta":{"thinking":"internal"}}"#;
+        assert_eq!(extract_stream_text_delta(data), None);
     }
 }

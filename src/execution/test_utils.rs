@@ -72,10 +72,7 @@ impl Provider for MockProvider {
     fn send(&mut self, message: &str) -> SendFuture<'_> {
         let message = message.to_string();
         Box::pin(async move {
-            self.received
-                .lock()
-                .expect("lock")
-                .push(message);
+            self.received.lock().expect("lock").push(message);
             if let Some(tx) = self.live_tx.as_ref() {
                 let _ = tx.send("live".to_string());
             }

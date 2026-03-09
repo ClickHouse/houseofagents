@@ -1,5 +1,7 @@
 use crate::error::AppError;
-use crate::execution::{truncate_chars, wait_for_cancel, ProgressEvent, PromptRuntimeContext};
+use crate::execution::{
+    finish_live_log_forwarder, truncate_chars, wait_for_cancel, ProgressEvent, PromptRuntimeContext,
+};
 use crate::output::OutputManager;
 use crate::provider::Provider;
 use std::collections::HashMap;
@@ -93,7 +95,20 @@ async fn solo_agent(
     });
 
     let result = tokio::select! {
-        res = provider.send(prompt) => Some(res),
+        res = crate::execution::send_with_streaming(
+            provider.as_mut(),
+            prompt,
+            &tx,
+            {
+                let name = name.clone();
+                move |chunk| ProgressEvent::AgentStreamChunk {
+                    agent: name.clone(),
+                    kind,
+                    iteration: 1,
+                    chunk,
+                }
+            },
+        ) => Some(res),
         _ = wait_for_cancel(&cancel) => {
             let _ = tx.send(ProgressEvent::AgentLog {
                 agent: name.clone(), kind, iteration: 1, message: "Cancelled".into(),
@@ -102,7 +117,8 @@ async fn solo_agent(
         }
     };
     provider.set_live_log_sender(None);
-    let _ = live_forward.await;
+    let cancelled = result.is_none();
+    finish_live_log_forwarder(live_forward, cancelled).await;
 
     let Some(result) = result else {
         return;

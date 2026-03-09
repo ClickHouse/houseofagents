@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 const DIAGNOSTIC_SUFFIX: &str =
     "Write any encountered issues (for example permission, tool, or environment issues) to an explicit \"Errors\" section of your report.";
@@ -191,6 +193,18 @@ pub enum ProgressEvent {
         iteration: u32,
         reason: String,
     },
+    AgentStreamChunk {
+        agent: String,
+        kind: ProviderKind,
+        iteration: u32,
+        chunk: String,
+    },
+    BlockStreamChunk {
+        block_id: u32,
+        agent_name: String,
+        iteration: u32,
+        chunk: String,
+    },
     AllDone,
 }
 
@@ -230,6 +244,34 @@ pub async fn wait_for_cancel(cancel: &Arc<AtomicBool>) {
     }
 }
 
+pub(crate) async fn send_with_streaming(
+    provider: &mut dyn crate::provider::Provider,
+    message: &str,
+    progress_tx: &mpsc::UnboundedSender<ProgressEvent>,
+    make_chunk_event: impl Fn(String) -> ProgressEvent + Send + 'static,
+) -> Result<crate::provider::CompletionResponse, crate::error::AppError> {
+    if !provider.supports_streaming() {
+        return provider.send(message).await;
+    }
+    let (chunk_tx, mut chunk_rx) = mpsc::channel::<String>(64);
+    let ptx = progress_tx.clone();
+    let fwd = tokio::spawn(async move {
+        while let Some(chunk) = chunk_rx.recv().await {
+            let _ = ptx.send(make_chunk_event(chunk));
+        }
+    });
+    let result = provider.send_streaming(message, chunk_tx).await;
+    let _ = fwd.await;
+    result
+}
+
+pub(crate) async fn finish_live_log_forwarder(task: JoinHandle<()>, cancelled: bool) {
+    if cancelled {
+        task.abort();
+    }
+    let _ = task.await;
+}
+
 pub fn truncate_chars(s: &str, max_chars: usize) -> String {
     let mut iter = s.chars();
     let mut out = String::new();
@@ -243,6 +285,16 @@ pub fn truncate_chars(s: &str, max_chars: usize) -> String {
         format!("{out}...")
     } else {
         out
+    }
+}
+
+impl ProgressEvent {
+    #[allow(dead_code)]
+    pub fn is_stream_chunk(&self) -> bool {
+        matches!(
+            self,
+            ProgressEvent::AgentStreamChunk { .. } | ProgressEvent::BlockStreamChunk { .. }
+        )
     }
 }
 
@@ -333,5 +385,25 @@ mod tests {
         )
         .await
         .expect("wait_for_cancel should complete");
+    }
+
+    #[tokio::test]
+    async fn finish_live_log_forwarder_aborts_on_cancel() {
+        let task = tokio::spawn(async {
+            std::future::pending::<()>().await;
+        });
+
+        tokio::time::timeout(
+            tokio::time::Duration::from_millis(100),
+            finish_live_log_forwarder(task, true),
+        )
+        .await
+        .expect("cancelled forwarder should not hang");
+    }
+
+    #[tokio::test]
+    async fn finish_live_log_forwarder_drains_completed_task() {
+        let task = tokio::spawn(async {});
+        finish_live_log_forwarder(task, false).await;
     }
 }

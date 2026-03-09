@@ -1,5 +1,5 @@
 use super::centered_rect;
-use crate::app::{App, ConsolidationPhase, RunStatus, RunStepStatus};
+use crate::app::{AgentRowStatus, App, ConsolidationPhase, RunStatus, RunStepStatus};
 use crate::execution::{ExecutionMode, ProgressEvent};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -7,7 +7,30 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Gauge, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+fn format_duration(d: Duration) -> String {
+    let total_secs = d.as_secs();
+    let hours = total_secs / 3600;
+    let mins = (total_secs % 3600) / 60;
+    let secs = total_secs % 60;
+    if hours > 0 {
+        format!("{hours}:{mins:02}:{secs:02}")
+    } else {
+        format!("{mins}:{secs:02}")
+    }
+}
+
+fn preview_paragraph<'a>(preview_text: &'a str, target_label: &str) -> Paragraph<'a> {
+    Paragraph::new(preview_text)
+        .wrap(Wrap { trim: false })
+        .block(
+            Block::default()
+                .title(format!(" {target_label} — Preview "))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan)),
+        )
+}
 
 pub fn draw(f: &mut Frame, app: &App) {
     if app.running.multi_run_total > 1 {
@@ -17,18 +40,98 @@ pub fn draw(f: &mut Frame, app: &App) {
         }
         return;
     }
+    match app.selected_mode {
+        ExecutionMode::Relay => draw_relay(f, app),
+        ExecutionMode::Swarm => draw_swarm(f, app),
+        ExecutionMode::Solo => draw_solo(f, app),
+        ExecutionMode::Pipeline => draw_pipeline_running(f, app),
+    }
+    if app.running.consolidation_active {
+        draw_consolidation_modal(f, app);
+    }
+}
 
+// ── Mode-specific layouts ──
+
+fn draw_relay(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Title + current status
-            Constraint::Length(3), // Progress gauge
-            Constraint::Min(0),    // Event log + detail panel
-            Constraint::Length(3), // Help bar
+            Constraint::Length(3), // Title
+            Constraint::Length(3), // Gauge
+            Constraint::Length(3), // Chain
+            Constraint::Min(0),   // Main panel
+            Constraint::Length(3), // Help
         ])
         .split(f.area());
 
-    // Title with current status and output dir
+    draw_title_bar(f, app, chunks[0]);
+    draw_progress_gauge(f, app, chunks[1]);
+    draw_relay_chain(f, app, chunks[2]);
+    draw_main_panel(f, app, chunks[3]);
+    draw_running_help_bar(f, app, chunks[4]);
+}
+
+fn draw_swarm(f: &mut Frame, app: &App) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Title
+            Constraint::Length(3), // Gauge
+            Constraint::Length(5), // Round + cards
+            Constraint::Min(0),   // Main panel
+            Constraint::Length(3), // Help
+        ])
+        .split(f.area());
+
+    draw_title_bar(f, app, chunks[0]);
+    draw_progress_gauge(f, app, chunks[1]);
+    draw_swarm_round(f, app, chunks[2]);
+    draw_main_panel(f, app, chunks[3]);
+    draw_running_help_bar(f, app, chunks[4]);
+}
+
+fn draw_solo(f: &mut Frame, app: &App) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Title
+            Constraint::Length(3), // Gauge
+            Constraint::Length(5), // Agent cards
+            Constraint::Min(0),   // Main panel
+            Constraint::Length(3), // Help
+        ])
+        .split(f.area());
+
+    draw_title_bar(f, app, chunks[0]);
+    draw_progress_gauge(f, app, chunks[1]);
+    draw_agent_cards(f, app, chunks[2]);
+    draw_main_panel(f, app, chunks[3]);
+    draw_running_help_bar(f, app, chunks[4]);
+}
+
+fn draw_pipeline_running(f: &mut Frame, app: &App) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),  // Title
+            Constraint::Length(3),  // Gauge
+            Constraint::Length(12), // Mini DAG
+            Constraint::Min(0),    // Main panel
+            Constraint::Length(3),  // Help
+        ])
+        .split(f.area());
+
+    draw_title_bar(f, app, chunks[0]);
+    draw_progress_gauge(f, app, chunks[1]);
+    draw_pipeline_dag(f, app, chunks[2]);
+    draw_main_panel(f, app, chunks[3]);
+    draw_running_help_bar(f, app, chunks[4]);
+}
+
+// ── Shared helpers ──
+
+fn draw_title_bar(f: &mut Frame, app: &App, area: Rect) {
     let status_text = current_status(app);
     let out_dir = app
         .running
@@ -36,6 +139,16 @@ pub fn draw(f: &mut Frame, app: &App) {
         .as_ref()
         .map(|p| p.display().to_string())
         .unwrap_or_default();
+    let elapsed = format_duration(app.run_elapsed());
+    let iter_display = if app.final_iteration() > 0 {
+        format!(
+            "  iter {}/{}",
+            app.current_iteration(),
+            app.final_iteration()
+        )
+    } else {
+        String::new()
+    };
     let title = Paragraph::new(vec![
         Line::from(vec![
             Span::styled(
@@ -44,6 +157,11 @@ pub fn draw(f: &mut Frame, app: &App) {
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
+            Span::styled(
+                format!("  [{elapsed}]"),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(iter_display, Style::default().fg(Color::Magenta)),
             Span::raw("  "),
             Span::styled(status_text, Style::default().fg(Color::Yellow)),
         ]),
@@ -53,9 +171,10 @@ pub fn draw(f: &mut Frame, app: &App) {
         ]),
     ])
     .block(Block::default().borders(Borders::BOTTOM));
-    f.render_widget(title, chunks[0]);
+    f.render_widget(title, area);
+}
 
-    // Progress gauge
+fn draw_progress_gauge(f: &mut Frame, app: &App, area: Rect) {
     let total_steps = compute_total_steps(app);
     let completed = count_completed_steps(app);
     let ratio = if total_steps > 0 {
@@ -63,27 +182,25 @@ pub fn draw(f: &mut Frame, app: &App) {
     } else {
         0.0
     };
-
     let gauge = Gauge::default()
         .block(Block::default().title(" Progress ").borders(Borders::ALL))
         .gauge_style(Style::default().fg(Color::Cyan))
         .ratio(ratio)
         .label(format!("{completed}/{total_steps}"));
-    f.render_widget(gauge, chunks[1]);
+    f.render_widget(gauge, area);
+}
 
-    // Check if there's an error to show details for
+fn draw_main_panel(f: &mut Frame, app: &App, area: Rect) {
     let failed_error = find_last_error(app);
 
     if let Some((agent_name, error_text)) = &failed_error {
-        // Split: event list on top, error detail on bottom
         let log_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(6), Constraint::Percentage(50)])
-            .split(chunks[2]);
+            .split(area);
 
         render_activity_list(f, app, log_chunks[0]);
 
-        // Error detail panel
         let error_title = format!(" {agent_name} — Error Details ");
         let error_para = Paragraph::new(error_text.as_str())
             .wrap(Wrap { trim: false })
@@ -95,21 +212,39 @@ pub fn draw(f: &mut Frame, app: &App) {
             )
             .style(Style::default().fg(Color::Red));
         f.render_widget(error_para, log_chunks[1]);
+    } else if let Some(target) = app.preview_target() {
+        let preview_text = app.stream_buffer(target).map(|b| b.text()).unwrap_or("");
+        let target_label = match target {
+            crate::app::StreamTarget::Agent(name) => name.clone(),
+            crate::app::StreamTarget::Block(id) => format!("Block {id}"),
+        };
+
+        if app.show_activity_log() {
+            let log_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(6), Constraint::Percentage(50)])
+                .split(area);
+
+            render_activity_list(f, app, log_chunks[0]);
+            let preview = preview_paragraph(preview_text, &target_label);
+            f.render_widget(preview, log_chunks[1]);
+        } else {
+            let preview = preview_paragraph(preview_text, &target_label);
+            f.render_widget(preview, area);
+        }
     } else {
-        // Split: event list on top, agent detail on bottom (if agent is active)
         let active_logs = collect_active_agent_logs(app);
 
-        if active_logs.is_empty() {
-            render_activity_list(f, app, chunks[2]);
+        if active_logs.is_empty() || !app.show_activity_log() {
+            render_activity_list(f, app, area);
         } else {
             let log_chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Min(6), Constraint::Length(12)])
-                .split(chunks[2]);
+                .split(area);
 
             render_activity_list(f, app, log_chunks[0]);
 
-            // Active agent detail panel — last 10 logs
             let detail_items: Vec<ListItem> = active_logs
                 .iter()
                 .map(|(agent, msg)| {
@@ -129,8 +264,9 @@ pub fn draw(f: &mut Frame, app: &App) {
             f.render_widget(detail_list, log_chunks[1]);
         }
     }
+}
 
-    // Help bar
+fn draw_running_help_bar(f: &mut Frame, app: &App, area: Rect) {
     let help_text = if app.running.diagnostic_running {
         "Analyzing reports for errors..."
     } else if app.running.consolidation_running {
@@ -154,12 +290,194 @@ pub fn draw(f: &mut Frame, app: &App) {
     } else {
         "Enter: view results  q: quit"
     };
-    let help = Paragraph::new(help_text).block(Block::default().borders(Borders::TOP));
-    f.render_widget(help, chunks[3]);
+    let toggle_hint = if app.running.multi_run_total <= 1 {
+        if app.running.is_running {
+            "  [l] Log  [p] Preview  [Tab] Cycle"
+        } else if app.preview_target().is_some() {
+            "  [l] Log  [p] Close preview  [Tab] Cycle"
+        } else {
+            "  [l] Log  [p] Preview"
+        }
+    } else {
+        ""
+    };
+    let help = Paragraph::new(format!("{help_text}{toggle_hint}"))
+        .block(Block::default().borders(Borders::TOP));
+    f.render_widget(help, area);
+}
 
-    if app.running.consolidation_active {
-        draw_consolidation_modal(f, app);
+// ── Mode visualizations ──
+
+fn agent_status_icon(app: &App, name: &str) -> (char, Color) {
+    let row = app.agent_rows().iter().find(|r| r.name == name);
+    match row.map(|r| &r.status) {
+        Some(AgentRowStatus::Running) => (spinner_frame(), Color::Yellow),
+        Some(AgentRowStatus::Finished) => ('\u{2713}', Color::Green),
+        Some(AgentRowStatus::Error(_)) => ('\u{2717}', Color::Red),
+        Some(AgentRowStatus::Skipped(_)) => ('\u{25cb}', Color::Gray),
+        _ => ('\u{00b7}', Color::DarkGray),
     }
+}
+
+fn draw_relay_chain(f: &mut Frame, app: &App, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let agents = &app.selected_agents;
+    if agents.is_empty() {
+        return;
+    }
+
+    // Check if there's enough width for horizontal layout (~14 per card, ~4 per arrow)
+    let min_width = agents.len() * 14 + agents.len().saturating_sub(1) * 4;
+
+    if (area.width as usize) < min_width {
+        // Vertical fallback
+        let lines: Vec<Line> = agents
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                let (icon, color) = agent_status_icon(app, name);
+                let timer = app
+                    .agent_timer(name)
+                    .map(|t| format_duration(t.elapsed()))
+                    .unwrap_or_else(|| "--".into());
+                Line::from(vec![
+                    Span::styled(
+                        format!("{}. ", i + 1),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(format!("{icon} "), Style::default().fg(color)),
+                    Span::raw(name.clone()),
+                    Span::styled(format!("  {timer}"), Style::default().fg(Color::DarkGray)),
+                ])
+            })
+            .collect();
+        f.render_widget(Paragraph::new(lines), area);
+        return;
+    }
+
+    // Horizontal chain
+    let mut spans: Vec<Span> = Vec::new();
+    for (i, name) in agents.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(
+                " \u{2500}\u{2192} ",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        let (icon, color) = agent_status_icon(app, name);
+        let timer = app
+            .agent_timer(name)
+            .map(|t| format!(" {}", format_duration(t.elapsed())))
+            .unwrap_or_default();
+        spans.push(Span::styled("[ ", Style::default().fg(color)));
+        spans.push(Span::styled(format!("{icon} "), Style::default().fg(color)));
+        spans.push(Span::styled(
+            name.clone(),
+            Style::default().fg(Color::White),
+        ));
+        spans.push(Span::styled(timer, Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(" ]", Style::default().fg(color)));
+    }
+
+    let p = Paragraph::new(Line::from(spans))
+        .alignment(ratatui::layout::Alignment::Center);
+    let y = area.y + area.height / 2;
+    f.render_widget(p, Rect::new(area.x, y, area.width, 1));
+}
+
+fn draw_swarm_round(f: &mut Frame, app: &App, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let round = app.current_iteration();
+    let total = app.final_iteration();
+    let header_text = if total > 0 {
+        format!("  Round {round}/{total}")
+    } else {
+        "  Round:".to_string()
+    };
+    let header = Paragraph::new(Span::styled(
+        header_text,
+        Style::default().fg(Color::Magenta),
+    ));
+    f.render_widget(header, Rect::new(area.x, area.y, area.width, 1));
+
+    if area.height > 1 {
+        let card_area = Rect::new(area.x, area.y + 1, area.width, area.height - 1);
+        draw_agent_cards(f, app, card_area);
+    }
+}
+
+fn draw_agent_cards(f: &mut Frame, app: &App, area: Rect) {
+    let agents = &app.selected_agents;
+    if agents.is_empty() || area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let n = agents.len() as u32;
+    let constraints: Vec<Constraint> = (0..n).map(|_| Constraint::Ratio(1, n)).collect();
+    let card_areas = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(constraints)
+        .split(area);
+
+    for (i, name) in agents.iter().enumerate() {
+        let (icon, color) = agent_status_icon(app, name);
+        let timer_text = app
+            .agent_timer(name)
+            .map(|t| format_duration(t.elapsed()))
+            .unwrap_or_else(|| "--".into());
+        let content = format!("{icon} {timer_text}");
+        let card = Paragraph::new(content)
+            .alignment(ratatui::layout::Alignment::Center)
+            .block(
+                Block::default()
+                    .title(format!(" {name} "))
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(color)),
+            );
+        f.render_widget(card, card_areas[i]);
+    }
+}
+
+fn draw_pipeline_dag(f: &mut Frame, app: &App, area: Rect) {
+    use crate::execution::pipeline::BlockId;
+    use ratatui::widgets::BorderType;
+
+    let blocks = &app.pipeline.pipeline_def.blocks;
+    let connections = &app.pipeline.pipeline_def.connections;
+
+    if blocks.is_empty() {
+        let msg = Paragraph::new("No pipeline blocks defined")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(ratatui::layout::Alignment::Center);
+        f.render_widget(msg, area);
+        return;
+    }
+
+    let dag_block = Block::default()
+        .title(" Pipeline ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray));
+    let inner = dag_block.inner(area);
+    f.render_widget(dag_block, area);
+
+    let block_style_fn = |block_id: BlockId| -> (Color, BorderType) {
+        let row = app.block_rows().iter().find(|r| r.block_id == block_id);
+        let color = match row.map(|r| &r.status) {
+            Some(AgentRowStatus::Running) => Color::Yellow,
+            Some(AgentRowStatus::Finished) => Color::Green,
+            Some(AgentRowStatus::Error(_)) => Color::Red,
+            Some(AgentRowStatus::Skipped(_)) => Color::Gray,
+            _ => Color::DarkGray,
+        };
+        (color, BorderType::Plain)
+    };
+
+    super::pipeline::render_dag_readonly(f, inner, blocks, connections, &block_style_fn);
 }
 
 fn draw_multi_run(f: &mut Frame, app: &App) {
@@ -659,6 +977,7 @@ fn build_event_items(app: &App) -> Vec<ListItem<'_>> {
                     });
                 }
             }
+            ProgressEvent::AgentStreamChunk { .. } | ProgressEvent::BlockStreamChunk { .. } => {}
         }
     }
 
@@ -826,14 +1145,18 @@ fn current_status(app: &App) -> String {
     if app.running.consolidation_running {
         return "Consolidating reports...".into();
     }
+    if app
+        .running
+        .cancel_flag
+        .load(std::sync::atomic::Ordering::Relaxed)
+    {
+        return if app.running.is_running {
+            "Cancelling...".into()
+        } else {
+            "Cancelled".into()
+        };
+    }
     if !app.running.is_running {
-        if app
-            .running
-            .cancel_flag
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
-            return "Cancelled".into();
-        }
         return "Done".into();
     }
 
@@ -1168,6 +1491,16 @@ mod tests {
             .cancel_flag
             .store(true, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(current_status(&a), "Cancelled");
+    }
+
+    #[test]
+    fn current_status_shows_cancelling_while_run_is_still_active() {
+        let mut a = app();
+        a.running.is_running = true;
+        a.running
+            .cancel_flag
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(current_status(&a), "Cancelling...");
     }
 
     #[test]

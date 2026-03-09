@@ -273,6 +273,9 @@ Inside the **edit popup**: `Tab` cycles between Name, Agent (use `Left`/`Right`)
 | `Esc` | Cancel in-flight run or batch |
 | `Enter` | Open results after completion |
 | `q` | Quit after run completes |
+| `l` | Toggle activity log detail panel |
+| `p` | Toggle stream preview on/off |
+| `Tab` / `Shift+Tab` | Cycle preview target between agents/blocks |
 
 ### Results Screen
 

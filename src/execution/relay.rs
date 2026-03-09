@@ -1,5 +1,7 @@
 use crate::error::AppError;
-use crate::execution::{truncate_chars, wait_for_cancel, ProgressEvent, PromptRuntimeContext};
+use crate::execution::{
+    finish_live_log_forwarder, truncate_chars, wait_for_cancel, ProgressEvent, PromptRuntimeContext,
+};
 use crate::output::OutputManager;
 use crate::provider::Provider;
 use std::collections::HashMap;
@@ -103,7 +105,21 @@ pub async fn run_relay(
                 }
             });
             let result = tokio::select! {
-                res = agents[i].1.send(&message) => Some(res),
+                res = crate::execution::send_with_streaming(
+                    agents[i].1.as_mut(),
+                    &message,
+                    &progress_tx,
+                    {
+                        let name = name.clone();
+                        let kind = *kind;
+                        move |chunk| ProgressEvent::AgentStreamChunk {
+                            agent: name.clone(),
+                            kind,
+                            iteration,
+                            chunk,
+                        }
+                    },
+                ) => Some(res),
                 _ = wait_for_cancel(&cancel) => {
                     let _ = progress_tx.send(ProgressEvent::AgentLog {
                         agent: name.clone(), kind: *kind, iteration, message: "Cancelled".into(),
@@ -112,7 +128,8 @@ pub async fn run_relay(
                 }
             };
             agents[i].1.set_live_log_sender(None);
-            let _ = live_forward.await;
+            let cancelled = result.is_none();
+            finish_live_log_forwarder(live_forward, cancelled).await;
             let Some(result) = result else {
                 let _ = progress_tx.send(ProgressEvent::AllDone);
                 return Ok(());

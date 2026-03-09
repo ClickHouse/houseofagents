@@ -8,12 +8,98 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 const ACTIVITY_LOG_LIMIT: usize = 200;
 const ERROR_LEDGER_LIMIT: usize = 200;
 const ERROR_LEDGER_ENTRY_MAX_CHARS: usize = 4096;
 const RECENT_ACTIVITY_LOG_LIMIT: usize = 10;
+
+pub(crate) struct AgentTimer {
+    pub started_at: Instant,
+    pub finished_at: Option<Instant>,
+}
+
+impl AgentTimer {
+    pub fn new() -> Self {
+        Self {
+            started_at: Instant::now(),
+            finished_at: None,
+        }
+    }
+    pub fn finish(&mut self) {
+        self.finished_at = Some(Instant::now());
+    }
+    pub fn elapsed(&self) -> Duration {
+        self.finished_at
+            .unwrap_or_else(Instant::now)
+            .duration_since(self.started_at)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AgentRowStatus {
+    Pending,
+    Running,
+    Finished,
+    Error(String),
+    Skipped(String),
+}
+
+#[allow(dead_code)]
+pub(crate) struct AgentStatusRow {
+    pub name: String,
+    pub provider: ProviderKind,
+    pub status: AgentRowStatus,
+    pub iteration: u32,
+    pub last_log: String,
+}
+
+#[allow(dead_code)]
+pub(crate) struct BlockStatusRow {
+    pub block_id: u32,
+    pub label: String,
+    pub agent_name: String,
+    pub provider: ProviderKind,
+    pub status: AgentRowStatus,
+    pub iteration: u32,
+    pub last_log: String,
+}
+
+#[derive(Hash, Eq, PartialEq, Clone, Debug)]
+pub(crate) enum StreamTarget {
+    Agent(String),
+    Block(u32),
+}
+
+pub(crate) struct StreamBuffer {
+    text: String,
+    max_bytes: usize,
+}
+
+impl StreamBuffer {
+    pub fn new(max_bytes: usize) -> Self {
+        Self {
+            text: String::new(),
+            max_bytes,
+        }
+    }
+    pub fn push(&mut self, chunk: &str) {
+        self.text.push_str(chunk);
+        if self.text.len() > self.max_bytes {
+            let trim_to = self.text.len() - self.max_bytes;
+            let mut start = trim_to;
+            while start < self.text.len() && !self.text.is_char_boundary(start) {
+                start += 1;
+            }
+            self.text.drain(..start);
+        }
+    }
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Screen {
@@ -111,6 +197,19 @@ pub(crate) struct RunningState {
     pub(crate) pending_single_execution: Option<PendingSingleExecution>,
     pub(crate) resume_prepare_rx:
         Option<mpsc::UnboundedReceiver<Result<ResumePreparation, String>>>,
+    // Phase 1: Timing
+    pub(crate) run_started_at: Option<Instant>,
+    pub(crate) current_iteration: u32,
+    pub(crate) final_iteration: u32,
+    pub(crate) agent_timers: HashMap<String, AgentTimer>,
+    pub(crate) block_timers: HashMap<u32, AgentTimer>,
+    // Phase 2: Status rows
+    pub(crate) agent_rows: Vec<AgentStatusRow>,
+    pub(crate) block_rows: Vec<BlockStatusRow>,
+    // Phase 4: Streaming
+    pub(crate) stream_buffers: HashMap<StreamTarget, StreamBuffer>,
+    pub(crate) preview_target: Option<StreamTarget>,
+    pub(crate) show_activity_log: bool,
 }
 
 pub(crate) struct ResultsState {
@@ -488,10 +587,15 @@ impl App {
 
     pub fn record_progress(&mut self, event: ProgressEvent) {
         self.running.reduce_progress_event(&event);
-        if self.running.activity_log.len() == ACTIVITY_LOG_LIMIT {
-            self.running.activity_log.pop_front();
+        if !matches!(
+            event,
+            ProgressEvent::AgentStreamChunk { .. } | ProgressEvent::BlockStreamChunk { .. }
+        ) {
+            if self.running.activity_log.len() == ACTIVITY_LOG_LIMIT {
+                self.running.activity_log.pop_front();
+            }
+            self.running.activity_log.push_back(event);
         }
-        self.running.activity_log.push_back(event);
     }
 
     pub fn activity_log(&self) -> &VecDeque<ProgressEvent> {
@@ -523,6 +627,51 @@ impl App {
             .active_blocks
             .iter()
             .map(|(_, label)| label.as_str())
+    }
+
+    pub fn run_elapsed(&self) -> Duration {
+        self.running
+            .run_started_at
+            .map(|t| t.elapsed())
+            .unwrap_or_default()
+    }
+
+    pub fn current_iteration(&self) -> u32 {
+        self.running.current_iteration
+    }
+
+    pub fn final_iteration(&self) -> u32 {
+        self.running.final_iteration
+    }
+
+    #[allow(dead_code)]
+    pub fn agent_timer(&self, name: &str) -> Option<&AgentTimer> {
+        self.running.agent_timers.get(name)
+    }
+
+    #[allow(dead_code)]
+    pub fn block_timer(&self, block_id: u32) -> Option<&AgentTimer> {
+        self.running.block_timers.get(&block_id)
+    }
+
+    pub fn agent_rows(&self) -> &[AgentStatusRow] {
+        &self.running.agent_rows
+    }
+
+    pub fn block_rows(&self) -> &[BlockStatusRow] {
+        &self.running.block_rows
+    }
+
+    pub fn stream_buffer(&self, target: &StreamTarget) -> Option<&StreamBuffer> {
+        self.running.stream_buffers.get(target)
+    }
+
+    pub fn preview_target(&self) -> Option<&StreamTarget> {
+        self.running.preview_target.as_ref()
+    }
+
+    pub fn show_activity_log(&self) -> bool {
+        self.running.show_activity_log
     }
 }
 
@@ -594,6 +743,16 @@ impl RunningState {
             run_dir: None,
             pending_single_execution: None,
             resume_prepare_rx: None,
+            run_started_at: None,
+            current_iteration: 0,
+            final_iteration: 0,
+            agent_timers: HashMap::new(),
+            block_timers: HashMap::new(),
+            agent_rows: Vec::new(),
+            block_rows: Vec::new(),
+            stream_buffers: HashMap::new(),
+            preview_target: None,
+            show_activity_log: true,
         }
     }
 
@@ -607,6 +766,12 @@ impl RunningState {
         self.completed_block_steps.clear();
         self.active_agents.clear();
         self.active_blocks.clear();
+        self.agent_timers.clear();
+        self.block_timers.clear();
+        self.agent_rows.clear();
+        self.block_rows.clear();
+        self.stream_buffers.clear();
+        self.preview_target = None;
     }
 
     fn reset_for_run(&mut self) {
@@ -632,6 +797,10 @@ impl RunningState {
         self.progress_rx = None;
         self.pending_single_execution = None;
         self.resume_prepare_rx = None;
+        self.run_started_at = Some(Instant::now());
+        self.current_iteration = 0;
+        self.final_iteration = 0;
+        self.show_activity_log = true;
     }
 
     fn reset_to_home(&mut self) {
@@ -656,20 +825,39 @@ impl RunningState {
         self.cancel_flag = Arc::new(AtomicBool::new(false));
         self.pending_single_execution = None;
         self.resume_prepare_rx = None;
+        self.current_iteration = 0;
+        self.final_iteration = 0;
+        self.show_activity_log = true;
     }
 
     fn reduce_progress_event(&mut self, event: &ProgressEvent) {
         match event {
-            ProgressEvent::AgentStarted { agent, .. } => {
+            ProgressEvent::AgentStarted {
+                agent, iteration, ..
+            } => {
                 self.active_agents.insert(agent.clone());
+                self.agent_timers.insert(agent.clone(), AgentTimer::new());
+                self.stream_buffers
+                    .remove(&StreamTarget::Agent(agent.clone()));
+                if let Some(row) = self.agent_rows.iter_mut().find(|r| &r.name == agent) {
+                    row.status = AgentRowStatus::Running;
+                    row.iteration = *iteration;
+                }
             }
             ProgressEvent::AgentLog {
                 agent,
                 iteration,
                 message,
                 ..
-            } => self
-                .push_recent_activity_log(agent.clone(), format!("[iter {iteration}] {message}")),
+            } => {
+                self.push_recent_activity_log(
+                    agent.clone(),
+                    format!("[iter {iteration}] {message}"),
+                );
+                if let Some(row) = self.agent_rows.iter_mut().find(|r| r.name == *agent) {
+                    row.last_log = crate::execution::truncate_chars(message, 60);
+                }
+            }
             ProgressEvent::AgentFinished {
                 agent, iteration, ..
             } => {
@@ -679,6 +867,12 @@ impl RunningState {
                     .insert((agent.clone(), *iteration))
                 {
                     self.completed_steps += 1;
+                }
+                if let Some(t) = self.agent_timers.get_mut(agent) {
+                    t.finish();
+                }
+                if let Some(row) = self.agent_rows.iter_mut().find(|r| r.name == *agent) {
+                    row.status = AgentRowStatus::Finished;
                 }
             }
             ProgressEvent::AgentError {
@@ -700,20 +894,46 @@ impl RunningState {
                 if let Some(details) = details {
                     self.last_error = Some((agent.clone(), details.clone()));
                 }
+                if let Some(t) = self.agent_timers.get_mut(agent) {
+                    t.finish();
+                }
+                if let Some(row) = self.agent_rows.iter_mut().find(|r| r.name == *agent) {
+                    row.status = AgentRowStatus::Error(crate::execution::truncate_chars(error, 60));
+                }
             }
-            ProgressEvent::IterationComplete { .. } => {}
+            ProgressEvent::IterationComplete { iteration } => {
+                self.current_iteration = (*iteration + 1).min(self.final_iteration);
+            }
             ProgressEvent::BlockStarted {
-                block_id, label, ..
-            } => self.upsert_active_block(*block_id, label.clone()),
+                block_id,
+                label,
+                iteration,
+                ..
+            } => {
+                self.upsert_active_block(*block_id, label.clone());
+                self.block_timers.insert(*block_id, AgentTimer::new());
+                self.stream_buffers
+                    .remove(&StreamTarget::Block(*block_id));
+                if let Some(row) = self.block_rows.iter_mut().find(|r| r.block_id == *block_id) {
+                    row.status = AgentRowStatus::Running;
+                    row.iteration = *iteration;
+                }
+            }
             ProgressEvent::BlockLog {
+                block_id,
                 agent_name,
                 iteration,
                 message,
                 ..
-            } => self.push_recent_activity_log(
-                agent_name.clone(),
-                format!("[iter {iteration}] {message}"),
-            ),
+            } => {
+                self.push_recent_activity_log(
+                    agent_name.clone(),
+                    format!("[iter {iteration}] {message}"),
+                );
+                if let Some(row) = self.block_rows.iter_mut().find(|r| r.block_id == *block_id) {
+                    row.last_log = crate::execution::truncate_chars(message, 60);
+                }
+            }
             ProgressEvent::BlockFinished {
                 block_id,
                 iteration,
@@ -722,6 +942,12 @@ impl RunningState {
                 self.remove_active_block(*block_id);
                 if self.completed_block_steps.insert((*block_id, *iteration)) {
                     self.completed_steps += 1;
+                }
+                if let Some(t) = self.block_timers.get_mut(block_id) {
+                    t.finish();
+                }
+                if let Some(row) = self.block_rows.iter_mut().find(|r| r.block_id == *block_id) {
+                    row.status = AgentRowStatus::Finished;
                 }
             }
             ProgressEvent::BlockError {
@@ -744,16 +970,46 @@ impl RunningState {
                 if let Some(details) = details {
                     self.last_error = Some((label.clone(), details.clone()));
                 }
+                if let Some(t) = self.block_timers.get_mut(block_id) {
+                    t.finish();
+                }
+                if let Some(row) = self.block_rows.iter_mut().find(|r| r.block_id == *block_id) {
+                    row.status = AgentRowStatus::Error(crate::execution::truncate_chars(error, 60));
+                }
             }
             ProgressEvent::BlockSkipped {
                 block_id,
                 iteration,
+                reason,
                 ..
             } => {
                 self.remove_active_block(*block_id);
                 if self.completed_block_steps.insert((*block_id, *iteration)) {
                     self.completed_steps += 1;
                 }
+                if let Some(t) = self.block_timers.get_mut(block_id) {
+                    t.finish();
+                }
+                if let Some(row) = self.block_rows.iter_mut().find(|r| r.block_id == *block_id) {
+                    row.status =
+                        AgentRowStatus::Skipped(crate::execution::truncate_chars(reason, 60));
+                }
+            }
+            ProgressEvent::AgentStreamChunk { agent, chunk, .. } => {
+                let target = StreamTarget::Agent(agent.clone());
+                self.stream_buffers
+                    .entry(target)
+                    .or_insert_with(|| StreamBuffer::new(32 * 1024))
+                    .push(chunk);
+            }
+            ProgressEvent::BlockStreamChunk {
+                block_id, chunk, ..
+            } => {
+                let target = StreamTarget::Block(*block_id);
+                self.stream_buffers
+                    .entry(target)
+                    .or_insert_with(|| StreamBuffer::new(32 * 1024))
+                    .push(chunk);
             }
             ProgressEvent::AllDone => {}
         }
@@ -972,6 +1228,9 @@ mod tests {
         assert_eq!(app.prompt.iterations, 1);
         assert_eq!(app.prompt.iterations_buf, "1");
         assert!(!app.running.is_running);
+        assert_eq!(app.running.current_iteration, 0);
+        assert_eq!(app.running.final_iteration, 0);
+        assert!(app.running.show_activity_log);
     }
 
     #[test]
@@ -1095,6 +1354,9 @@ mod tests {
             .load(std::sync::atomic::Ordering::Relaxed));
         assert_eq!(app.running.run_error.as_deref(), Some("keep"));
         assert!(!app.running.is_running);
+        assert_eq!(app.running.current_iteration, 0);
+        assert_eq!(app.running.final_iteration, 0);
+        assert!(app.running.show_activity_log);
         assert_eq!(app.pipeline.pipeline_next_id, 1);
         assert!(app.pipeline.pipeline_def.blocks.is_empty());
         assert_eq!(app.pipeline.pipeline_def.initial_prompt, "");

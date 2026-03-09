@@ -1,5 +1,7 @@
 use crate::error::AppError;
-use crate::execution::{truncate_chars, wait_for_cancel, ProgressEvent, PromptRuntimeContext};
+use crate::execution::{
+    finish_live_log_forwarder, truncate_chars, wait_for_cancel, ProgressEvent, PromptRuntimeContext,
+};
 use crate::output::OutputManager;
 use crate::provider::Provider;
 use std::collections::HashMap;
@@ -99,7 +101,20 @@ pub async fn run_swarm(
                 });
 
                 let result = tokio::select! {
-                    res = provider.send(&message) => Some(res),
+                    res = crate::execution::send_with_streaming(
+                        provider.as_mut(),
+                        &message,
+                        &tx,
+                        {
+                            let agent_name = agent_name.clone();
+                            move |chunk| ProgressEvent::AgentStreamChunk {
+                                agent: agent_name.clone(),
+                                kind,
+                                iteration: iter,
+                                chunk,
+                            }
+                        },
+                    ) => Some(res),
                     _ = wait_for_cancel(&cancel_flag) => {
                         let _ = tx.send(ProgressEvent::AgentLog {
                             agent: agent_name.clone(), kind, iteration: iter, message: "Cancelled".into(),
@@ -108,7 +123,8 @@ pub async fn run_swarm(
                     }
                 };
                 provider.set_live_log_sender(None);
-                let _ = live_forward.await;
+                let cancelled = result.is_none();
+                finish_live_log_forwarder(live_forward, cancelled).await;
                 let Some(result) = result else {
                     return (i, agent_name, provider, None);
                 };

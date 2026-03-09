@@ -70,6 +70,8 @@ pub(super) fn start_pipeline_execution(app: &mut App) {
     app.prompt.prompt_text = app.pipeline.pipeline_def.initial_prompt.clone();
     app.prompt.session_name = app.pipeline.pipeline_session_name.clone();
     app.prompt.iterations = iterations;
+    app.running.current_iteration = 1;
+    app.running.final_iteration = iterations;
 
     // Build agent configs keyed by agent name
     let mut agent_configs: std::collections::HashMap<String, (ProviderKind, ProviderConfig, bool)> =
@@ -93,6 +95,33 @@ pub(super) fn start_pipeline_execution(app: &mut App) {
             );
         }
     }
+
+    app.running.block_rows = app
+        .pipeline
+        .pipeline_def
+        .blocks
+        .iter()
+        .map(|block| {
+            let provider = agent_configs
+                .get(&block.agent)
+                .map(|(k, _, _)| *k)
+                .unwrap_or(ProviderKind::Anthropic);
+            let label = if block.name.trim().is_empty() {
+                format!("Block {} ({})", block.id, block.agent)
+            } else {
+                block.name.clone()
+            };
+            crate::app::BlockStatusRow {
+                block_id: block.id,
+                label,
+                agent_name: block.agent.clone(),
+                provider,
+                status: crate::app::AgentRowStatus::Pending,
+                iteration: 0,
+                last_log: String::new(),
+            }
+        })
+        .collect();
 
     // HTTP client
     let timeout_secs = app.effective_http_timeout_seconds().max(1);
@@ -794,6 +823,13 @@ fn continue_single_execution(
             },
         ));
         agent_info.push((name.clone(), agent_config.provider.config_key().to_string()));
+        app.running.agent_rows.push(crate::app::AgentStatusRow {
+            name: name.clone(),
+            provider: agent_config.provider,
+            status: crate::app::AgentRowStatus::Pending,
+            iteration: 0,
+            last_log: String::new(),
+        });
         use_cli_by_agent.insert(name.clone(), agent_config.use_cli);
 
         let pconfig = agent_config.to_provider_config();
@@ -821,6 +857,8 @@ fn continue_single_execution(
             }
         };
 
+    app.running.current_iteration = start_iteration;
+    app.running.final_iteration = start_iteration + pending.iterations - 1;
     app.running.run_dir = Some(output.run_dir().clone());
     let (tx, rx) = mpsc::unbounded_channel::<ProgressEvent>();
     let cancel = Arc::new(AtomicBool::new(false));
@@ -1252,6 +1290,8 @@ pub(super) fn update_multi_run_state(app: &mut App, run_id: u32, event: &Progres
             update_step_status(state, &step, RunStepStatus::Error);
             state.push_log(format!("{step}: {error}"));
         }
+        ProgressEvent::AgentStreamChunk { .. } => {}
+        ProgressEvent::BlockStreamChunk { .. } => {}
         ProgressEvent::AllDone => {}
     }
 }

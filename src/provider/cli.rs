@@ -452,286 +452,291 @@ impl Provider for CliProvider {
     fn send(&mut self, message: &str) -> SendFuture<'_> {
         let message = message.to_string();
         Box::pin(async move {
-        let message = &message;
-        if let Err(message) = validate_effort_config(
-            self.kind,
-            true,
-            self.reasoning_effort.as_deref(),
-            self.thinking_effort.as_deref(),
-        ) {
-            return Err(AppError::Provider {
-                provider: self.provider_name().into(),
-                message,
+            let message = &message;
+            if let Err(message) = validate_effort_config(
+                self.kind,
+                true,
+                self.reasoning_effort.as_deref(),
+                self.thinking_effort.as_deref(),
+            ) {
+                return Err(AppError::Provider {
+                    provider: self.provider_name().into(),
+                    message,
+                });
+            }
+
+            let started_at = Instant::now();
+            let mut debug_logs: Vec<String> = Vec::new();
+            self.history.push(Message {
+                role: Role::User,
+                content: message.to_string(),
             });
-        }
+            prune_history(&mut self.history, self.max_history_messages);
+            prune_history_bytes(&mut self.history, self.max_history_bytes);
+            let mut prompt = if self.uses_native_session() {
+                message.to_string()
+            } else {
+                self.build_prompt_from_history()
+            };
 
-        let started_at = Instant::now();
-        let mut debug_logs: Vec<String> = Vec::new();
-        self.history.push(Message {
-            role: Role::User,
-            content: message.to_string(),
-        });
-        prune_history(&mut self.history, self.max_history_messages);
-        prune_history_bytes(&mut self.history, self.max_history_bytes);
-        let mut prompt = if self.uses_native_session() {
-            message.to_string()
-        } else {
-            self.build_prompt_from_history()
-        };
-
-        if self.kind == ProviderKind::Anthropic && self.cli_print_mode && !self.session_started {
-            prompt = format!(
+            if self.kind == ProviderKind::Anthropic && self.cli_print_mode && !self.session_started
+            {
+                prompt = format!(
                 "IMPORTANT: Do NOT write any files. Return everything in your output.\n\n{prompt}"
             );
-        }
+            }
 
-        let bin = self.bin_name();
-        let mut codex_output_path: Option<PathBuf> = None;
-        let mut args: Vec<String> = match self.kind {
-            ProviderKind::Anthropic => {
-                let mut args = Vec::new();
-                if self.cli_print_mode {
-                    args.push("-p".to_string());
-                }
-                args.push("--output-format".to_string());
-                args.push("text".to_string());
-                for dir in &self.add_dirs {
-                    args.push("--add-dir".to_string());
-                    args.push(dir.clone());
-                }
-                if let Some(ref session_id) = self.session_id {
-                    if self.session_started {
-                        args.push("--resume".to_string());
-                    } else {
-                        args.push("--session-id".to_string());
+            let bin = self.bin_name();
+            let mut codex_output_path: Option<PathBuf> = None;
+            let mut args: Vec<String> = match self.kind {
+                ProviderKind::Anthropic => {
+                    let mut args = Vec::new();
+                    if self.cli_print_mode {
+                        args.push("-p".to_string());
                     }
-                    args.push(session_id.clone());
+                    args.push("--output-format".to_string());
+                    args.push("text".to_string());
+                    for dir in &self.add_dirs {
+                        args.push("--add-dir".to_string());
+                        args.push(dir.clone());
+                    }
+                    if let Some(ref session_id) = self.session_id {
+                        if self.session_started {
+                            args.push("--resume".to_string());
+                        } else {
+                            args.push("--session-id".to_string());
+                        }
+                        args.push(session_id.clone());
+                    }
+                    if let Some(effort) = self.anthropic_effort() {
+                        args.push("--effort".to_string());
+                        args.push(effort.to_string());
+                    }
+                    args
                 }
-                if let Some(effort) = self.anthropic_effort() {
-                    args.push("--effort".to_string());
-                    args.push(effort.to_string());
+                ProviderKind::OpenAI => {
+                    let mut args = if self.session_id.is_some() {
+                        vec!["exec".to_string(), "resume".to_string()]
+                    } else {
+                        vec!["exec".to_string()]
+                    };
+                    if let Some(effort) = self.reasoning_effort.as_deref() {
+                        args.push("-c".to_string());
+                        args.push(format!("model_reasoning_effort=\"{effort}\""));
+                    }
+                    if !self.model.is_empty() {
+                        args.push("--model".to_string());
+                        args.push(self.model.clone());
+                    }
+                    let out_path = Self::codex_temp_output_path();
+                    args.push("--json".to_string());
+                    args.push("-o".to_string());
+                    args.push(out_path.display().to_string());
+                    codex_output_path = Some(out_path);
+                    if let Some(ref session_id) = self.session_id {
+                        args.push(session_id.clone());
+                    }
+                    args.push("-".to_string());
+                    args
                 }
-                args
+                ProviderKind::Gemini => vec![
+                    "--prompt".to_string(),
+                    "".to_string(),
+                    "--output-format".to_string(),
+                    "text".to_string(),
+                ],
+            };
+
+            if self.kind != ProviderKind::OpenAI && !self.model.is_empty() {
+                args.push("--model".to_string());
+                args.push(self.model.clone());
             }
-            ProviderKind::OpenAI => {
-                let mut args = if self.session_id.is_some() {
-                    vec!["exec".to_string(), "resume".to_string()]
-                } else {
-                    vec!["exec".to_string()]
-                };
-                if let Some(effort) = self.reasoning_effort.as_deref() {
-                    args.push("-c".to_string());
-                    args.push(format!("model_reasoning_effort=\"{effort}\""));
-                }
-                if !self.model.is_empty() {
-                    args.push("--model".to_string());
-                    args.push(self.model.clone());
-                }
-                let out_path = Self::codex_temp_output_path();
-                args.push("--json".to_string());
-                args.push("-o".to_string());
-                args.push(out_path.display().to_string());
-                codex_output_path = Some(out_path);
-                if let Some(ref session_id) = self.session_id {
-                    args.push(session_id.clone());
-                }
-                args.push("-".to_string());
-                args
-            }
-            ProviderKind::Gemini => vec![
-                "--prompt".to_string(),
-                "".to_string(),
-                "--output-format".to_string(),
-                "text".to_string(),
-            ],
-        };
+            args.extend(self.parse_extra_cli_args()?);
+            self.push_command_debug(&mut debug_logs, bin, &args);
+            self.emit_live_log(format!("start {} (timeout {}s)", bin, self.timeout_seconds));
 
-        if self.kind != ProviderKind::OpenAI && !self.model.is_empty() {
-            args.push("--model".to_string());
-            args.push(self.model.clone());
-        }
-        args.extend(self.parse_extra_cli_args()?);
-        self.push_command_debug(&mut debug_logs, bin, &args);
-        self.emit_live_log(format!("start {} (timeout {}s)", bin, self.timeout_seconds));
+            let mut child = Command::new(bin)
+                .args(&args)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+                .map_err(|e| {
+                    Self::provider_error_with_debug(
+                        bin,
+                        format!("Failed to spawn: {e}"),
+                        &debug_logs,
+                    )
+                })?;
 
-        let mut child = Command::new(bin)
-            .args(&args)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| {
-                Self::provider_error_with_debug(bin, format!("Failed to spawn: {e}"), &debug_logs)
-            })?;
-
-        let stdout = child.stdout.take().ok_or_else(|| {
-            Self::provider_error_with_debug(
-                bin,
-                "Failed to capture stdout from CLI process".into(),
-                &debug_logs,
-            )
-        })?;
-        let stderr = child.stderr.take().ok_or_else(|| {
-            Self::provider_error_with_debug(
-                bin,
-                "Failed to capture stderr from CLI process".into(),
-                &debug_logs,
-            )
-        })?;
-
-        let mut stdout_task = tokio::spawn(async move {
-            CliProvider::read_bounded_bytes(stdout, CLI_STDOUT_MAX_BYTES).await
-        });
-        let live_log_tx = self.live_log_tx.clone();
-        let mut stderr_task = tokio::spawn(async move {
-            CliProvider::read_bounded_stderr(stderr, CLI_STDERR_MAX_BYTES, live_log_tx).await
-        });
-
-        // Write prompt via stdin
-        if let Some(mut stdin) = child.stdin.take() {
-            debug_logs.push(format!("stdin chars: {}", prompt.chars().count()));
-            stdin.write_all(prompt.as_bytes()).await.map_err(|e| {
+            let stdout = child.stdout.take().ok_or_else(|| {
                 Self::provider_error_with_debug(
                     bin,
-                    format!("Failed to write stdin: {e}"),
+                    "Failed to capture stdout from CLI process".into(),
                     &debug_logs,
                 )
             })?;
-            // Drop stdin to close it, signaling EOF
-        }
+            let stderr = child.stderr.take().ok_or_else(|| {
+                Self::provider_error_with_debug(
+                    bin,
+                    "Failed to capture stderr from CLI process".into(),
+                    &debug_logs,
+                )
+            })?;
 
-        let status =
-            match tokio::time::timeout(Duration::from_secs(self.timeout_seconds), child.wait())
-                .await
-            {
-                Ok(Ok(status)) => status,
-                Ok(Err(e)) => {
-                    if let Some(path) = codex_output_path.as_ref() {
-                        let _ = fs::remove_file(path).await;
-                    }
-                    debug_logs.push(format!(
-                        "cli wait failed after {} ms",
-                        started_at.elapsed().as_millis()
-                    ));
-                    self.emit_live_log("wait failed".into());
-                    stdout_task.abort();
-                    stderr_task.abort();
-                    return Err(Self::provider_error_with_debug(
+            let mut stdout_task = tokio::spawn(async move {
+                CliProvider::read_bounded_bytes(stdout, CLI_STDOUT_MAX_BYTES).await
+            });
+            let live_log_tx = self.live_log_tx.clone();
+            let mut stderr_task = tokio::spawn(async move {
+                CliProvider::read_bounded_stderr(stderr, CLI_STDERR_MAX_BYTES, live_log_tx).await
+            });
+
+            // Write prompt via stdin
+            if let Some(mut stdin) = child.stdin.take() {
+                debug_logs.push(format!("stdin chars: {}", prompt.chars().count()));
+                stdin.write_all(prompt.as_bytes()).await.map_err(|e| {
+                    Self::provider_error_with_debug(
                         bin,
-                        e.to_string(),
+                        format!("Failed to write stdin: {e}"),
                         &debug_logs,
-                    ));
-                }
-                Err(_) => {
-                    if let Some(path) = codex_output_path.as_ref() {
-                        let _ = fs::remove_file(path).await;
-                    }
-                    let _ = child.kill().await;
-                    let _ = child.wait().await;
-                    debug_logs.push(format!(
-                        "cli timeout after {} seconds",
-                        self.timeout_seconds
-                    ));
-                    self.emit_live_log(format!("timeout after {}s", self.timeout_seconds));
-                    stdout_task.abort();
-                    stderr_task.abort();
-                    return Err(Self::provider_error_with_debug(
-                        bin,
-                        format!("Timed out after {} seconds", self.timeout_seconds),
-                        &debug_logs,
-                    ));
-                }
-            };
-
-        let stdout_result =
-            Self::await_reader_task(&mut stdout_task, &stderr_task, bin, "stdout", &debug_logs)
-                .await?;
-        let stderr_result =
-            Self::await_reader_task(&mut stderr_task, &stdout_task, bin, "stderr", &debug_logs)
-                .await?;
-
-        debug_logs.push(format!(
-            "exit: {} (elapsed {} ms, stdout {} bytes, stderr {} bytes)",
-            status,
-            started_at.elapsed().as_millis(),
-            stdout_result.bytes.len(),
-            stderr_result.text.len(),
-        ));
-        self.emit_live_log(format!("exit {}", status));
-        if stdout_result.truncated {
-            debug_logs.push(format!(
-                "stdout truncated to {} bytes",
-                CLI_STDOUT_MAX_BYTES
-            ));
-        }
-        if stderr_result.truncated {
-            debug_logs.push(format!(
-                "stderr truncated to {} bytes",
-                CLI_STDERR_MAX_BYTES
-            ));
-        }
-        Self::append_stderr_debug(&mut debug_logs, &stderr_result.text);
-
-        let stdout_text: String = String::from_utf8_lossy(&stdout_result.bytes).into();
-
-        if !status.success() {
-            if let Some(path) = codex_output_path.as_ref() {
-                let _ = fs::remove_file(path).await;
+                    )
+                })?;
+                // Drop stdin to close it, signaling EOF
             }
-            let mut msg = format!("exit {}: {}", status, stderr_result.text);
-            let stdout_trimmed = stdout_text.trim();
-            if !stdout_trimmed.is_empty() {
-                msg.push_str("\nstdout: ");
-                msg.push_str(&Self::clip(stdout_trimmed, 1024));
-            }
-            return Err(Self::provider_error_with_debug(bin, msg, &debug_logs));
-        }
-        if self.kind == ProviderKind::OpenAI {
-            if let Some(session_id) = Self::extract_session_id_from_jsonl(&stdout_text) {
-                debug_logs.push(format!(
-                    "session detected: {}",
-                    Self::short_session(&session_id)
-                ));
-                self.session_id = Some(session_id);
-                self.session_started = true;
-            }
-        } else if self.kind == ProviderKind::Anthropic {
-            self.session_started = true;
-            if let Some(session_id) = self.session_id.as_deref() {
-                debug_logs.push(format!(
-                    "session active: {}",
-                    Self::short_session(session_id)
-                ));
-            }
-        }
 
-        let content = if self.kind == ProviderKind::OpenAI {
-            if let Some(path) = codex_output_path.as_ref() {
-                let text = fs::read_to_string(path)
+            let status =
+                match tokio::time::timeout(Duration::from_secs(self.timeout_seconds), child.wait())
                     .await
-                    .unwrap_or_else(|_| stdout_text.clone());
-                let _ = fs::remove_file(path).await;
-                debug_logs.push(format!("codex output chars: {}", text.chars().count()));
-                text
+                {
+                    Ok(Ok(status)) => status,
+                    Ok(Err(e)) => {
+                        if let Some(path) = codex_output_path.as_ref() {
+                            let _ = fs::remove_file(path).await;
+                        }
+                        debug_logs.push(format!(
+                            "cli wait failed after {} ms",
+                            started_at.elapsed().as_millis()
+                        ));
+                        self.emit_live_log("wait failed".into());
+                        stdout_task.abort();
+                        stderr_task.abort();
+                        return Err(Self::provider_error_with_debug(
+                            bin,
+                            e.to_string(),
+                            &debug_logs,
+                        ));
+                    }
+                    Err(_) => {
+                        if let Some(path) = codex_output_path.as_ref() {
+                            let _ = fs::remove_file(path).await;
+                        }
+                        let _ = child.kill().await;
+                        let _ = child.wait().await;
+                        debug_logs.push(format!(
+                            "cli timeout after {} seconds",
+                            self.timeout_seconds
+                        ));
+                        self.emit_live_log(format!("timeout after {}s", self.timeout_seconds));
+                        stdout_task.abort();
+                        stderr_task.abort();
+                        return Err(Self::provider_error_with_debug(
+                            bin,
+                            format!("Timed out after {} seconds", self.timeout_seconds),
+                            &debug_logs,
+                        ));
+                    }
+                };
+
+            let stdout_result =
+                Self::await_reader_task(&mut stdout_task, &stderr_task, bin, "stdout", &debug_logs)
+                    .await?;
+            let stderr_result =
+                Self::await_reader_task(&mut stderr_task, &stdout_task, bin, "stderr", &debug_logs)
+                    .await?;
+
+            debug_logs.push(format!(
+                "exit: {} (elapsed {} ms, stdout {} bytes, stderr {} bytes)",
+                status,
+                started_at.elapsed().as_millis(),
+                stdout_result.bytes.len(),
+                stderr_result.text.len(),
+            ));
+            self.emit_live_log(format!("exit {}", status));
+            if stdout_result.truncated {
+                debug_logs.push(format!(
+                    "stdout truncated to {} bytes",
+                    CLI_STDOUT_MAX_BYTES
+                ));
+            }
+            if stderr_result.truncated {
+                debug_logs.push(format!(
+                    "stderr truncated to {} bytes",
+                    CLI_STDERR_MAX_BYTES
+                ));
+            }
+            Self::append_stderr_debug(&mut debug_logs, &stderr_result.text);
+
+            let stdout_text: String = String::from_utf8_lossy(&stdout_result.bytes).into();
+
+            if !status.success() {
+                if let Some(path) = codex_output_path.as_ref() {
+                    let _ = fs::remove_file(path).await;
+                }
+                let mut msg = format!("exit {}: {}", status, stderr_result.text);
+                let stdout_trimmed = stdout_text.trim();
+                if !stdout_trimmed.is_empty() {
+                    msg.push_str("\nstdout: ");
+                    msg.push_str(&Self::clip(stdout_trimmed, 1024));
+                }
+                return Err(Self::provider_error_with_debug(bin, msg, &debug_logs));
+            }
+            if self.kind == ProviderKind::OpenAI {
+                if let Some(session_id) = Self::extract_session_id_from_jsonl(&stdout_text) {
+                    debug_logs.push(format!(
+                        "session detected: {}",
+                        Self::short_session(&session_id)
+                    ));
+                    self.session_id = Some(session_id);
+                    self.session_started = true;
+                }
+            } else if self.kind == ProviderKind::Anthropic {
+                self.session_started = true;
+                if let Some(session_id) = self.session_id.as_deref() {
+                    debug_logs.push(format!(
+                        "session active: {}",
+                        Self::short_session(session_id)
+                    ));
+                }
+            }
+
+            let content = if self.kind == ProviderKind::OpenAI {
+                if let Some(path) = codex_output_path.as_ref() {
+                    let text = fs::read_to_string(path)
+                        .await
+                        .unwrap_or_else(|_| stdout_text.clone());
+                    let _ = fs::remove_file(path).await;
+                    debug_logs.push(format!("codex output chars: {}", text.chars().count()));
+                    text
+                } else {
+                    stdout_text
+                }
             } else {
                 stdout_text
-            }
-        } else {
-            stdout_text
-        };
-        self.history.push(Message {
-            role: Role::Assistant,
-            content,
-        });
-        prune_history(&mut self.history, self.max_history_messages);
-        prune_history_bytes(&mut self.history, self.max_history_bytes);
+            };
+            self.history.push(Message {
+                role: Role::Assistant,
+                content,
+            });
+            prune_history(&mut self.history, self.max_history_messages);
+            prune_history_bytes(&mut self.history, self.max_history_bytes);
 
-        let content = self.history.last().unwrap().content.clone();
-        Ok(CompletionResponse {
-            content,
-            debug_logs,
-        })
+            let content = self.history.last().unwrap().content.clone();
+            Ok(CompletionResponse {
+                content,
+                debug_logs,
+            })
         })
     }
 }

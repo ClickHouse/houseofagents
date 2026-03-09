@@ -1,7 +1,7 @@
-use super::{
-    effort_to_budget, HttpProviderBase, Provider, ProviderKind, Role, SendFuture,
-};
+use super::{effort_to_budget, HttpProviderBase, Provider, ProviderKind, Role, SendFuture};
 use crate::error::AppError;
+use futures_util::StreamExt;
+use tokio::sync::mpsc;
 
 const GEMINI_API_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
 
@@ -28,6 +28,19 @@ impl GeminiProvider {
     }
 }
 
+fn extract_stream_text_parts(event_data: &str) -> Vec<String> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(event_data) else {
+        return Vec::new();
+    };
+
+    value["candidates"][0]["content"]["parts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|part| part["text"].as_str().map(str::to_string))
+        .collect()
+}
+
 fn build_generate_content_request(
     client: &reqwest::Client,
     base_url: &str,
@@ -37,6 +50,23 @@ fn build_generate_content_request(
 ) -> Result<reqwest::Request, AppError> {
     Ok(client
         .post(format!("{base_url}/models/{model}:generateContent"))
+        .header("content-type", "application/json")
+        .header("x-goog-api-key", api_key)
+        .json(body)
+        .build()?)
+}
+
+fn build_stream_generate_content_request(
+    client: &reqwest::Client,
+    base_url: &str,
+    api_key: &str,
+    model: &str,
+    body: &serde_json::Value,
+) -> Result<reqwest::Request, AppError> {
+    Ok(client
+        .post(format!(
+            "{base_url}/models/{model}:streamGenerateContent?alt=sse"
+        ))
         .header("content-type", "application/json")
         .header("x-goog-api-key", api_key)
         .json(body)
@@ -133,6 +163,71 @@ impl Provider for GeminiProvider {
             Ok(self.base.finish_send(content))
         })
     }
+
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
+    fn send_streaming(
+        &mut self,
+        message: &str,
+        chunk_tx: mpsc::Sender<String>,
+    ) -> SendFuture<'_> {
+        let message = message.to_string();
+        Box::pin(async move {
+            self.base.prepare_send(&message);
+            let contents = self.format_messages_gemini();
+
+            let mut gen_config = serde_json::json!({
+                "maxOutputTokens": self.base.max_tokens,
+            });
+            if let Some(ref effort) = self.base.effort {
+                let budget = effort_to_budget(effort).map_err(|e| AppError::Provider {
+                    provider: "Gemini".into(),
+                    message: e,
+                })?;
+                gen_config["thinkingConfig"] = serde_json::json!({
+                    "thinkingBudget": budget,
+                });
+            }
+
+            let body = serde_json::json!({
+                "contents": contents,
+                "generationConfig": gen_config,
+            });
+
+            let request = build_stream_generate_content_request(
+                &self.base.client,
+                GEMINI_API_BASE_URL,
+                &self.base.api_key,
+                &self.base.model,
+                &body,
+            )?;
+
+            let mut stream = self
+                .base
+                .execute_streaming_request(request, "Gemini")
+                .await?;
+            let mut parser = crate::provider::sse::SseParser::new();
+            let mut full_content = String::new();
+
+            while let Some(chunk_result) = stream.next().await {
+                let bytes = chunk_result.map_err(|e| AppError::Provider {
+                    provider: "Gemini".into(),
+                    message: format!("Stream error: {e}"),
+                })?;
+                parser.feed(&bytes);
+                while let Some(event) = parser.next_event() {
+                    for text in extract_stream_text_parts(&event.data) {
+                        full_content.push_str(&text);
+                        let _ = chunk_tx.send(text).await;
+                    }
+                }
+            }
+
+            Ok(self.base.finish_send(full_content))
+        })
+    }
 }
 
 pub async fn list_models(api_key: &str, client: &reqwest::Client) -> Result<Vec<String>, String> {
@@ -159,7 +254,10 @@ pub async fn list_models(api_key: &str, client: &reqwest::Client) -> Result<Vec<
 
 #[cfg(test)]
 mod tests {
-    use super::{build_generate_content_request, build_list_models_request, extract_content};
+    use super::{
+        build_generate_content_request, build_list_models_request, extract_content,
+        extract_stream_text_parts,
+    };
     use serde_json::json;
 
     #[test]
@@ -221,6 +319,21 @@ mod tests {
         assert!(err
             .to_string()
             .contains("No text content found in response"));
+    }
+
+    #[test]
+    fn extract_stream_text_parts_reads_all_text_parts() {
+        let data = r#"{"candidates":[{"content":{"parts":[{"text":"a "},{"text":"b"}]}}]}"#;
+        assert_eq!(
+            extract_stream_text_parts(data),
+            vec!["a ".to_string(), "b".to_string()]
+        );
+    }
+
+    #[test]
+    fn extract_stream_text_parts_ignores_payload_without_text_parts() {
+        let data = r#"{"candidates":[{"content":{"parts":[{"type":"inline_data"}]}}]}"#;
+        assert!(extract_stream_text_parts(data).is_empty());
     }
 
     #[test]

@@ -2,6 +2,7 @@ pub mod anthropic;
 pub mod cli;
 pub mod gemini;
 pub mod openai;
+pub(crate) mod sse;
 
 use crate::config::{AgentConfig, ProviderConfig};
 use crate::error::AppError;
@@ -74,6 +75,26 @@ impl HttpProviderBase {
             provider: provider_name.into(),
             message: format!("Failed to parse response: {e}"),
         })
+    }
+
+    /// Send a built request and return a byte stream for SSE processing.
+    /// On non-success status, returns an error with the response body.
+    pub async fn execute_streaming_request(
+        &self,
+        request: reqwest::Request,
+        provider_name: &'static str,
+    ) -> Result<impl futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>>, AppError>
+    {
+        let resp = self.client.execute(request).await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let resp_text = resp.text().await?;
+            return Err(AppError::Provider {
+                provider: provider_name.into(),
+                message: format!("{status}: {resp_text}"),
+            });
+        }
+        Ok(resp.bytes_stream())
     }
 
     /// Push assistant message and return `CompletionResponse`.
@@ -172,6 +193,16 @@ pub trait Provider: Send {
     fn kind(&self) -> ProviderKind;
     fn set_live_log_sender(&mut self, _tx: Option<mpsc::UnboundedSender<String>>) {}
     fn send(&mut self, message: &str) -> SendFuture<'_>;
+    fn supports_streaming(&self) -> bool {
+        false
+    }
+    fn send_streaming(
+        &mut self,
+        message: &str,
+        _chunk_tx: mpsc::Sender<String>,
+    ) -> SendFuture<'_> {
+        self.send(message)
+    }
 }
 
 /// Prune message history by byte budget — remove oldest messages until total fits.
