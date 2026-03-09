@@ -17,6 +17,11 @@ pub struct AppConfig {
     pub model_fetch_timeout_seconds: u64,
     #[serde(default = "default_cli_timeout_seconds")]
     pub cli_timeout_seconds: u64,
+    #[serde(default = "default_max_history_bytes")]
+    pub max_history_bytes: usize,
+    /// Max concurrent pipeline blocks (0 = unlimited). Controls how many blocks execute in parallel.
+    #[serde(default)]
+    pub pipeline_block_concurrency: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diagnostic_provider: Option<String>,
     #[serde(default)]
@@ -122,6 +127,10 @@ fn default_true() -> bool {
 
 fn default_cli_timeout_seconds() -> u64 {
     600
+}
+
+fn default_max_history_bytes() -> usize {
+    102400
 }
 
 impl AppConfig {
@@ -289,6 +298,11 @@ max_history_messages = 50
 http_timeout_seconds = 120
 model_fetch_timeout_seconds = 30
 cli_timeout_seconds = 600
+# Maximum total bytes of conversation history kept per provider session (default 100KB).
+# Applied after message-count pruning as a second pass.
+max_history_bytes = 102400
+# Max concurrent pipeline blocks (0 = unlimited)
+# pipeline_block_concurrency = 0
 
 # Optional: set the diagnostic agent (agent name, e.g. "Claude")
 # diagnostic_provider = "Claude"
@@ -354,6 +368,8 @@ mod tests {
             http_timeout_seconds: 120,
             model_fetch_timeout_seconds: 30,
             cli_timeout_seconds: 600,
+            max_history_bytes: 102400,
+            pipeline_block_concurrency: 0,
             diagnostic_provider: None,
             agents: Vec::new(),
             providers: HashMap::new(),

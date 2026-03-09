@@ -513,6 +513,7 @@ pub(super) fn start_consolidation(app: &mut App) {
     let batch_stage1_done = app.running.batch_stage1_done;
     let default_max_tokens = app.config.default_max_tokens;
     let max_history_messages = app.config.max_history_messages;
+    let max_history_bytes = app.config.max_history_bytes;
     let cli_timeout = app.effective_cli_timeout_seconds().max(1);
 
     tokio::spawn(async move {
@@ -535,6 +536,7 @@ pub(super) fn start_consolidation(app: &mut App) {
                     client.clone(),
                     default_max_tokens,
                     max_history_messages,
+                    max_history_bytes,
                     cli_timeout,
                 )
             },

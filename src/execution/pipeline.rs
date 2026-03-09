@@ -338,6 +338,7 @@ pub async fn run_pipeline(
 ) -> Result<(), AppError> {
     run_pipeline_with_provider_factory(
         def,
+        config.pipeline_block_concurrency,
         agent_configs,
         prompt_context,
         output,
@@ -350,6 +351,7 @@ pub async fn run_pipeline(
                 client.clone(),
                 config.default_max_tokens,
                 config.max_history_messages,
+                config.max_history_bytes,
                 cli_timeout_secs,
             )
         },
@@ -357,8 +359,10 @@ pub async fn run_pipeline(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_pipeline_with_provider_factory<F>(
     def: &PipelineDefinition,
+    max_block_concurrency: u32,
     agent_configs: PipelineAgentConfigs,
     prompt_context: &PromptRuntimeContext,
     output: &OutputManager,
@@ -374,6 +378,12 @@ where
         let _ = progress_tx.send(ProgressEvent::AllDone);
         return Ok(());
     }
+
+    let concurrency_sem = Arc::new(tokio::sync::Semaphore::new(if max_block_concurrency == 0 {
+        tokio::sync::Semaphore::MAX_PERMITS
+    } else {
+        max_block_concurrency as usize
+    }));
 
     // Build provider pool: key = (agent_name, session_key)
     let mut provider_pool: ProviderPool = HashMap::new();
@@ -540,8 +550,14 @@ where
 
                     let task_agent_name = agent_name.clone();
                     let task_label = label.clone();
+                    let sem_clone = concurrency_sem.clone();
                     let task_handle = tasks.spawn(async move {
+                        // Lock the provider first so shared-session tasks queue here
+                        // without consuming a semaphore permit. Then acquire the permit
+                        // right before the actual API call to avoid underutilizing
+                        // concurrency when unrelated blocks could run instead.
                         let mut guard = provider_arc.lock().await;
+                        let _permit = sem_clone.acquire().await.expect("semaphore closed");
 
                         // Wire live-log channel
                         let (live_tx, mut live_rx) = mpsc::unbounded_channel::<String>();
@@ -1258,6 +1274,7 @@ to = 1
 
         run_pipeline_with_provider_factory(
             &def,
+            0,
             agent_configs,
             &context,
             &output,
@@ -1333,6 +1350,7 @@ to = 1
 
         run_pipeline_with_provider_factory(
             &def,
+            0,
             agent_configs,
             &context,
             &output,
@@ -1365,5 +1383,102 @@ to = 1
         let log = std::fs::read_to_string(output.run_dir().join("_errors.log")).expect("log");
         assert!(log.contains("block 1 Claude iter1"));
         assert!(log.contains("provider failed"));
+    }
+
+    #[tokio::test]
+    async fn pipeline_concurrency_limit_enforced() {
+        use crate::provider::{CompletionResponse, Provider, SendFuture};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct ConcurrencyTracker {
+            kind: ProviderKind,
+            active: Arc<AtomicUsize>,
+            peak: Arc<AtomicUsize>,
+        }
+
+        impl Provider for ConcurrencyTracker {
+            fn kind(&self) -> ProviderKind {
+                self.kind
+            }
+
+            fn send(&mut self, _message: &str) -> SendFuture<'_> {
+                let active = self.active.clone();
+                let peak = self.peak.clone();
+                Box::pin(async move {
+                    let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(current, Ordering::SeqCst);
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    Ok(CompletionResponse {
+                        content: "ok".to_string(),
+                        debug_logs: Vec::new(),
+                    })
+                })
+            }
+        }
+
+        let def = def_with(
+            vec![block(1, 0, 0), block(2, 1, 0), block(3, 2, 0)],
+            vec![], // All independent roots
+        );
+
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+
+        let agent_configs = {
+            let mut m: PipelineAgentConfigs = HashMap::new();
+            m.insert(
+                "Claude".to_string(),
+                (
+                    ProviderKind::Anthropic,
+                    ProviderConfig {
+                        api_key: "k".to_string(),
+                        model: "m".to_string(),
+                        reasoning_effort: None,
+                        thinking_effort: None,
+                        use_cli: false,
+                        cli_print_mode: true,
+                        extra_cli_args: String::new(),
+                    },
+                    false,
+                ),
+            );
+            m
+        };
+
+        let context = PromptRuntimeContext::new(def.initial_prompt.clone(), false);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output = OutputManager::new(dir.path(), Some("pipeline-concurrency")).unwrap();
+        let (tx, rx) = mpsc::unbounded_channel();
+
+        let active_clone = active.clone();
+        let peak_clone = peak.clone();
+
+        run_pipeline_with_provider_factory(
+            &def,
+            1, // max_block_concurrency = 1
+            agent_configs,
+            &context,
+            &output,
+            tx,
+            Arc::new(AtomicBool::new(false)),
+            move |_kind, _cfg| -> Box<dyn Provider> {
+                Box::new(ConcurrencyTracker {
+                    kind: ProviderKind::Anthropic,
+                    active: active_clone.clone(),
+                    peak: peak_clone.clone(),
+                })
+            },
+        )
+        .await
+        .expect("run");
+
+        let events = collect_progress_events(rx);
+        let finished_count = events
+            .iter()
+            .filter(|e| matches!(e, ProgressEvent::BlockFinished { .. }))
+            .count();
+        assert_eq!(finished_count, 3);
+        assert_eq!(peak.load(Ordering::SeqCst), 1);
     }
 }

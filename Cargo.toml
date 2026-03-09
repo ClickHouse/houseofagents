@@ -7,7 +7,6 @@ description = "Multi-agent prompt runner with TUI"
 
 [dependencies]
 anyhow = "1"
-async-trait = "0.1"
 chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.29"

@@ -5,10 +5,103 @@ pub mod openai;
 
 use crate::config::{AgentConfig, ProviderConfig};
 use crate::error::AppError;
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
 use tokio::sync::mpsc;
+
+pub type SendFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<CompletionResponse, AppError>> + Send + 'a>>;
+
+// ---------------------------------------------------------------------------
+// HttpProviderBase — shared fields + helpers for API-backed providers
+// ---------------------------------------------------------------------------
+
+pub(crate) struct HttpProviderBase {
+    pub api_key: String,
+    pub model: String,
+    pub client: reqwest::Client,
+    pub max_tokens: u32,
+    pub max_history_messages: usize,
+    pub max_history_bytes: usize,
+    pub effort: Option<String>,
+    pub history: Vec<Message>,
+}
+
+impl HttpProviderBase {
+    /// Push the user message and prune history by count, then by byte budget.
+    pub fn prepare_send(&mut self, message: &str) {
+        self.history.push(Message {
+            role: Role::User,
+            content: message.to_string(),
+        });
+        prune_history(&mut self.history, self.max_history_messages);
+        prune_history_bytes(&mut self.history, self.max_history_bytes);
+    }
+
+    /// Format history as `{"role": "user"|"assistant", "content": ...}` (Anthropic + OpenAI).
+    pub fn format_messages_standard(&self) -> Vec<serde_json::Value> {
+        self.history
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "role": match m.role { Role::User => "user", Role::Assistant => "assistant" },
+                    "content": m.content,
+                })
+            })
+            .collect()
+    }
+
+    /// Send a built request, check status, parse JSON, return body or provider error.
+    pub async fn execute_request(
+        &self,
+        request: reqwest::Request,
+        provider_name: &'static str,
+    ) -> Result<serde_json::Value, AppError> {
+        let resp = self.client.execute(request).await?;
+        let status = resp.status();
+        let resp_text = resp.text().await?;
+
+        if !status.is_success() {
+            return Err(AppError::Provider {
+                provider: provider_name.into(),
+                message: format!("{status}: {resp_text}"),
+            });
+        }
+
+        serde_json::from_str(&resp_text).map_err(|e| AppError::Provider {
+            provider: provider_name.into(),
+            message: format!("Failed to parse response: {e}"),
+        })
+    }
+
+    /// Push assistant message and return `CompletionResponse`.
+    pub fn finish_send(&mut self, content: String) -> CompletionResponse {
+        self.history.push(Message {
+            role: Role::Assistant,
+            content,
+        });
+        CompletionResponse {
+            content: self.history.last().unwrap().content.clone(),
+            debug_logs: Vec::new(),
+        }
+    }
+
+    /// Shared HTTP logic for model-listing endpoints (static method).
+    pub async fn fetch_models(
+        client: &reqwest::Client,
+        request: reqwest::Request,
+    ) -> Result<serde_json::Value, String> {
+        let resp = client.execute(request).await.map_err(|e| e.to_string())?;
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.map_err(|e| e.to_string())?;
+            return Err(format!("{status}: {text}"));
+        }
+        resp.json().await.map_err(|e| e.to_string())
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -75,11 +168,27 @@ pub struct CompletionResponse {
     pub debug_logs: Vec<String>,
 }
 
-#[async_trait]
-pub trait Provider: Send + Sync {
+pub trait Provider: Send {
     fn kind(&self) -> ProviderKind;
     fn set_live_log_sender(&mut self, _tx: Option<mpsc::UnboundedSender<String>>) {}
-    async fn send(&mut self, message: &str) -> Result<CompletionResponse, AppError>;
+    fn send(&mut self, message: &str) -> SendFuture<'_>;
+}
+
+/// Prune message history by byte budget — remove oldest messages until total fits.
+/// Always keeps at least one message to avoid emptying the history.
+pub fn prune_history_bytes(history: &mut Vec<Message>, max_bytes: usize) {
+    if max_bytes == 0 {
+        return;
+    }
+    let total: usize = history.iter().map(|m| m.content.len()).sum();
+    if total <= max_bytes {
+        return;
+    }
+    let mut current = total;
+    while current > max_bytes && history.len() > 1 {
+        current -= history[0].content.len();
+        history.remove(0);
+    }
 }
 
 /// Prune message history, preserving the first exchange only when the cap is large enough.
@@ -111,6 +220,7 @@ pub fn create_provider(
     client: reqwest::Client,
     max_tokens: u32,
     max_history_messages: usize,
+    max_history_bytes: usize,
     cli_timeout_seconds: u64,
 ) -> Box<dyn Provider> {
     if config.use_cli {
@@ -124,33 +234,27 @@ pub fn create_provider(
             vec![],
             cli_timeout_seconds,
             max_history_messages,
+            max_history_bytes,
         ));
     }
+    let effort = match kind {
+        ProviderKind::Anthropic | ProviderKind::Gemini => config.thinking_effort.clone(),
+        ProviderKind::OpenAI => config.reasoning_effort.clone(),
+    };
+    let base = HttpProviderBase {
+        api_key: config.api_key.clone(),
+        model: config.model.clone(),
+        client,
+        max_tokens,
+        max_history_messages,
+        max_history_bytes,
+        effort,
+        history: Vec::new(),
+    };
     match kind {
-        ProviderKind::Anthropic => Box::new(anthropic::AnthropicProvider::new(
-            config.api_key.clone(),
-            config.model.clone(),
-            client,
-            max_tokens,
-            max_history_messages,
-            config.thinking_effort.clone(),
-        )),
-        ProviderKind::OpenAI => Box::new(openai::OpenAIProvider::new(
-            config.api_key.clone(),
-            config.model.clone(),
-            client,
-            max_tokens,
-            max_history_messages,
-            config.reasoning_effort.clone(),
-        )),
-        ProviderKind::Gemini => Box::new(gemini::GeminiProvider::new(
-            config.api_key.clone(),
-            config.model.clone(),
-            client,
-            max_tokens,
-            max_history_messages,
-            config.thinking_effort.clone(),
-        )),
+        ProviderKind::Anthropic => Box::new(anthropic::AnthropicProvider::new(base)),
+        ProviderKind::OpenAI => Box::new(openai::OpenAIProvider::new(base)),
+        ProviderKind::Gemini => Box::new(gemini::GeminiProvider::new(base)),
     }
 }
 
@@ -160,6 +264,7 @@ pub fn create_provider_from_agent(
     client: reqwest::Client,
     max_tokens: u32,
     max_history_messages: usize,
+    max_history_bytes: usize,
     cli_timeout_seconds: u64,
 ) -> Box<dyn Provider> {
     create_provider(
@@ -168,6 +273,7 @@ pub fn create_provider_from_agent(
         client,
         max_tokens,
         max_history_messages,
+        max_history_bytes,
         cli_timeout_seconds,
     )
 }
@@ -433,7 +539,7 @@ mod tests {
     fn create_provider_cli_returns_expected_kind() {
         let client = reqwest::Client::new();
         for kind in ProviderKind::all() {
-            let p = create_provider(*kind, &cfg(true), client.clone(), 100, 20, 5);
+            let p = create_provider(*kind, &cfg(true), client.clone(), 100, 20, 102400, 5);
             assert_eq!(p.kind(), *kind);
         }
     }
@@ -442,7 +548,7 @@ mod tests {
     fn create_provider_api_returns_expected_kind() {
         let client = reqwest::Client::new();
         for kind in ProviderKind::all() {
-            let p = create_provider(*kind, &cfg(false), client.clone(), 100, 20, 5);
+            let p = create_provider(*kind, &cfg(false), client.clone(), 100, 20, 102400, 5);
             assert_eq!(p.kind(), *kind);
         }
     }
@@ -497,5 +603,64 @@ mod tests {
         assert_eq!(w.kind, ProviderKind::Anthropic);
         let w: W = toml::from_str("kind = \"openai\"").expect("deserialize");
         assert_eq!(w.kind, ProviderKind::OpenAI);
+    }
+
+    #[test]
+    fn prune_history_bytes_removes_oldest_when_over_budget() {
+        let mut history = vec![
+            Message {
+                role: Role::User,
+                content: "a".repeat(50),
+            },
+            Message {
+                role: Role::Assistant,
+                content: "b".repeat(50),
+            },
+            Message {
+                role: Role::User,
+                content: "c".repeat(50),
+            },
+        ];
+        // Total = 150 bytes, budget = 100
+        prune_history_bytes(&mut history, 100);
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].content, "b".repeat(50));
+        assert_eq!(history[1].content, "c".repeat(50));
+    }
+
+    #[test]
+    fn prune_history_bytes_noop_when_under_budget() {
+        let mut history = vec![
+            Message {
+                role: Role::User,
+                content: "short".to_string(),
+            },
+            Message {
+                role: Role::Assistant,
+                content: "reply".to_string(),
+            },
+        ];
+        prune_history_bytes(&mut history, 1000);
+        assert_eq!(history.len(), 2);
+    }
+
+    #[test]
+    fn prune_history_bytes_keeps_at_least_one_message() {
+        let mut history = vec![Message {
+            role: Role::User,
+            content: "x".repeat(200),
+        }];
+        prune_history_bytes(&mut history, 50);
+        assert_eq!(history.len(), 1);
+    }
+
+    #[test]
+    fn prune_history_bytes_zero_budget_is_noop() {
+        let mut history = vec![Message {
+            role: Role::User,
+            content: "hello".to_string(),
+        }];
+        prune_history_bytes(&mut history, 0);
+        assert_eq!(history.len(), 1);
     }
 }

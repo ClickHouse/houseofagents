@@ -1,9 +1,8 @@
 use crate::error::AppError;
 use crate::provider::{
-    prune_history, validate_effort_config, CompletionResponse, Message, Provider, ProviderKind,
-    Role,
+    prune_history, prune_history_bytes, validate_effort_config, CompletionResponse, Message,
+    Provider, ProviderKind, Role, SendFuture,
 };
-use async_trait::async_trait;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -42,6 +41,7 @@ pub struct CliProvider {
     session_started: bool,
     timeout_seconds: u64,
     max_history_messages: usize,
+    max_history_bytes: usize,
     history: Vec<Message>,
     live_log_tx: Option<mpsc::UnboundedSender<String>>,
 }
@@ -58,6 +58,7 @@ impl CliProvider {
         add_dirs: Vec<String>,
         timeout_seconds: u64,
         max_history_messages: usize,
+        max_history_bytes: usize,
     ) -> Self {
         Self {
             kind,
@@ -74,6 +75,7 @@ impl CliProvider {
             session_started: false,
             timeout_seconds: timeout_seconds.max(1),
             max_history_messages,
+            max_history_bytes,
             history: Vec::new(),
             live_log_tx: None,
         }
@@ -438,7 +440,6 @@ impl CliProvider {
     }
 }
 
-#[async_trait]
 impl Provider for CliProvider {
     fn kind(&self) -> ProviderKind {
         self.kind
@@ -448,7 +449,10 @@ impl Provider for CliProvider {
         self.live_log_tx = tx;
     }
 
-    async fn send(&mut self, message: &str) -> Result<CompletionResponse, AppError> {
+    fn send(&mut self, message: &str) -> SendFuture<'_> {
+        let message = message.to_string();
+        Box::pin(async move {
+        let message = &message;
         if let Err(message) = validate_effort_config(
             self.kind,
             true,
@@ -468,6 +472,7 @@ impl Provider for CliProvider {
             content: message.to_string(),
         });
         prune_history(&mut self.history, self.max_history_messages);
+        prune_history_bytes(&mut self.history, self.max_history_bytes);
         let mut prompt = if self.uses_native_session() {
             message.to_string()
         } else {
@@ -720,11 +725,13 @@ impl Provider for CliProvider {
             content,
         });
         prune_history(&mut self.history, self.max_history_messages);
+        prune_history_bytes(&mut self.history, self.max_history_bytes);
 
         let content = self.history.last().unwrap().content.clone();
         Ok(CompletionResponse {
             content,
             debug_logs,
+        })
         })
     }
 }
@@ -751,6 +758,7 @@ mod tests {
             Vec::new(),
             30,
             50,
+            0,
         )
     }
 
@@ -845,6 +853,7 @@ not json
             Vec::new(),
             30,
             50,
+            0,
         );
         provider.session_id = Some("123e4567-e89b-12d3-a456-426614174000".to_string());
         provider.session_started = true;
@@ -908,5 +917,22 @@ not json
             .expect_err("should timeout");
 
         assert!(err.to_string().contains("Timed out draining stdout"));
+    }
+
+    #[test]
+    fn cli_provider_stores_max_history_bytes() {
+        let provider = CliProvider::new(
+            ProviderKind::Gemini,
+            String::new(),
+            None,
+            None,
+            String::new(),
+            false,
+            Vec::new(),
+            30,
+            50,
+            4096,
+        );
+        assert_eq!(provider.max_history_bytes, 4096);
     }
 }

@@ -59,6 +59,7 @@ pub(super) fn maybe_start_diagnostics(app: &mut App) {
         client,
         app.config.default_max_tokens,
         app.config.max_history_messages,
+        app.config.max_history_bytes,
         app.effective_cli_timeout_seconds().max(1),
     );
 

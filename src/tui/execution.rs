@@ -304,6 +304,7 @@ pub(super) fn start_multi_execution(app: &mut App, params: MultiExecutionParams)
     let batch_root_dir = batch_root.run_dir().clone();
     let default_max_tokens = config.default_max_tokens;
     let max_history_messages = config.max_history_messages;
+    let max_history_bytes = config.max_history_bytes;
 
     tokio::spawn(async move {
         run_multi(
@@ -391,6 +392,7 @@ pub(super) fn start_multi_execution(app: &mut App, params: MultiExecutionParams)
                                 client.clone(),
                                 default_max_tokens,
                                 max_history_messages,
+                                max_history_bytes,
                                 cli_timeout_secs,
                             ),
                         ));
@@ -803,6 +805,7 @@ fn continue_single_execution(
                 pending.client.clone(),
                 pending.config.default_max_tokens,
                 pending.config.max_history_messages,
+                pending.config.max_history_bytes,
                 pending.cli_timeout_secs,
             ),
         ));

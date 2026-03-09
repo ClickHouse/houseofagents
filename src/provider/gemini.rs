@@ -1,39 +1,30 @@
 use super::{
-    effort_to_budget, prune_history, CompletionResponse, Message, Provider, ProviderKind, Role,
+    effort_to_budget, HttpProviderBase, Provider, ProviderKind, Role, SendFuture,
 };
 use crate::error::AppError;
-use async_trait::async_trait;
 
 const GEMINI_API_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
 
 pub struct GeminiProvider {
-    api_key: String,
-    model: String,
-    client: reqwest::Client,
-    max_tokens: u32,
-    max_history_messages: usize,
-    thinking_effort: Option<String>,
-    history: Vec<Message>,
+    base: HttpProviderBase,
 }
 
 impl GeminiProvider {
-    pub fn new(
-        api_key: String,
-        model: String,
-        client: reqwest::Client,
-        max_tokens: u32,
-        max_history_messages: usize,
-        thinking_effort: Option<String>,
-    ) -> Self {
-        Self {
-            api_key,
-            model,
-            client,
-            max_tokens,
-            max_history_messages,
-            thinking_effort,
-            history: Vec::new(),
-        }
+    pub fn new(base: HttpProviderBase) -> Self {
+        Self { base }
+    }
+
+    fn format_messages_gemini(&self) -> Vec<serde_json::Value> {
+        self.base
+            .history
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "role": match m.role { Role::User => "user", Role::Assistant => "model" },
+                    "parts": [{ "text": m.content }],
+                })
+            })
+            .collect()
     }
 }
 
@@ -100,101 +91,53 @@ fn extract_content(resp_body: &serde_json::Value) -> Result<String, AppError> {
     })
 }
 
-#[async_trait]
 impl Provider for GeminiProvider {
     fn kind(&self) -> ProviderKind {
         ProviderKind::Gemini
     }
 
-    async fn send(&mut self, message: &str) -> Result<CompletionResponse, AppError> {
-        self.history.push(Message {
-            role: Role::User,
-            content: message.to_string(),
-        });
+    fn send(&mut self, message: &str) -> SendFuture<'_> {
+        let message = message.to_string();
+        Box::pin(async move {
+            self.base.prepare_send(&message);
+            let contents = self.format_messages_gemini();
 
-        prune_history(&mut self.history, self.max_history_messages);
-
-        let contents: Vec<serde_json::Value> = self
-            .history
-            .iter()
-            .map(|m| {
-                serde_json::json!({
-                    "role": match m.role { Role::User => "user", Role::Assistant => "model" },
-                    "parts": [{ "text": m.content }],
-                })
-            })
-            .collect();
-
-        let mut gen_config = serde_json::json!({
-            "maxOutputTokens": self.max_tokens,
-        });
-        if let Some(ref effort) = self.thinking_effort {
-            let budget = effort_to_budget(effort).map_err(|e| AppError::Provider {
-                provider: "Gemini".into(),
-                message: e,
-            })?;
-            gen_config["thinkingConfig"] = serde_json::json!({
-                "thinkingBudget": budget,
+            let mut gen_config = serde_json::json!({
+                "maxOutputTokens": self.base.max_tokens,
             });
-        }
+            if let Some(ref effort) = self.base.effort {
+                let budget = effort_to_budget(effort).map_err(|e| AppError::Provider {
+                    provider: "Gemini".into(),
+                    message: e,
+                })?;
+                gen_config["thinkingConfig"] = serde_json::json!({
+                    "thinkingBudget": budget,
+                });
+            }
 
-        let body = serde_json::json!({
-            "contents": contents,
-            "generationConfig": gen_config,
-        });
-
-        let request = build_generate_content_request(
-            &self.client,
-            GEMINI_API_BASE_URL,
-            &self.api_key,
-            &self.model,
-            &body,
-        )?;
-
-        let resp = self.client.execute(request).await?;
-
-        let status = resp.status();
-        let resp_text = resp.text().await?;
-
-        if !status.is_success() {
-            return Err(AppError::Provider {
-                provider: "Gemini".into(),
-                message: format!("{status}: {resp_text}"),
+            let body = serde_json::json!({
+                "contents": contents,
+                "generationConfig": gen_config,
             });
-        }
 
-        let resp_body: serde_json::Value =
-            serde_json::from_str(&resp_text).map_err(|e| AppError::Provider {
-                provider: "Gemini".into(),
-                message: format!("Failed to parse response: {e}"),
-            })?;
+            let request = build_generate_content_request(
+                &self.base.client,
+                GEMINI_API_BASE_URL,
+                &self.base.api_key,
+                &self.base.model,
+                &body,
+            )?;
 
-        let content = extract_content(&resp_body)?;
-
-        self.history.push(Message {
-            role: Role::Assistant,
-            content,
-        });
-
-        let content = self.history.last().unwrap().content.clone();
-        Ok(CompletionResponse {
-            content,
-            debug_logs: Vec::new(),
+            let resp_body = self.base.execute_request(request, "Gemini").await?;
+            let content = extract_content(&resp_body)?;
+            Ok(self.base.finish_send(content))
         })
     }
 }
 
 pub async fn list_models(api_key: &str, client: &reqwest::Client) -> Result<Vec<String>, String> {
     let request = build_list_models_request(client, GEMINI_API_BASE_URL, api_key)?;
-    let resp = client.execute(request).await.map_err(|e| e.to_string())?;
-    let status = resp.status();
-
-    if !status.is_success() {
-        let text = resp.text().await.map_err(|e| e.to_string())?;
-        return Err(format!("{status}: {text}"));
-    }
-
-    let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let body = HttpProviderBase::fetch_models(client, request).await?;
 
     let mut models: Vec<String> = body["models"]
         .as_array()

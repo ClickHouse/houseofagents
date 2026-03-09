@@ -25,6 +25,8 @@ fn test_config() -> AppConfig {
         http_timeout_seconds: 120,
         model_fetch_timeout_seconds: 30,
         cli_timeout_seconds: 600,
+        max_history_bytes: 102400,
+        pipeline_block_concurrency: 0,
         diagnostic_provider: None,
         agents: Vec::new(),
         providers: HashMap::new(),
@@ -89,17 +91,18 @@ struct HistoryEchoProvider {
     calls: usize,
 }
 
-#[async_trait::async_trait]
 impl Provider for HistoryEchoProvider {
     fn kind(&self) -> ProviderKind {
         self.kind
     }
 
-    async fn send(&mut self, _message: &str) -> Result<CompletionResponse, AppError> {
-        self.calls += 1;
-        Ok(CompletionResponse {
-            content: format!("call {}", self.calls),
-            debug_logs: Vec::new(),
+    fn send(&mut self, _message: &str) -> crate::provider::SendFuture<'_> {
+        Box::pin(async move {
+            self.calls += 1;
+            Ok(CompletionResponse {
+                content: format!("call {}", self.calls),
+                debug_logs: Vec::new(),
+            })
         })
     }
 }

@@ -1,7 +1,6 @@
 use crate::error::AppError;
 use crate::execution::ProgressEvent;
-use crate::provider::{CompletionResponse, Provider, ProviderKind};
-use async_trait::async_trait;
+use crate::provider::{CompletionResponse, Provider, ProviderKind, SendFuture};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
@@ -61,7 +60,6 @@ impl PanicProvider {
     }
 }
 
-#[async_trait]
 impl Provider for MockProvider {
     fn kind(&self) -> ProviderKind {
         self.kind
@@ -71,31 +69,36 @@ impl Provider for MockProvider {
         self.live_tx = tx;
     }
 
-    async fn send(&mut self, message: &str) -> Result<CompletionResponse, AppError> {
-        self.received
-            .lock()
-            .expect("lock")
-            .push(message.to_string());
-        if let Some(tx) = self.live_tx.as_ref() {
-            let _ = tx.send("live".to_string());
-        }
-        self.responses.pop_front().unwrap_or_else(|| {
-            Ok(CompletionResponse {
-                content: "default".to_string(),
-                debug_logs: Vec::new(),
+    fn send(&mut self, message: &str) -> SendFuture<'_> {
+        let message = message.to_string();
+        Box::pin(async move {
+            self.received
+                .lock()
+                .expect("lock")
+                .push(message);
+            if let Some(tx) = self.live_tx.as_ref() {
+                let _ = tx.send("live".to_string());
+            }
+            self.responses.pop_front().unwrap_or_else(|| {
+                Ok(CompletionResponse {
+                    content: "default".to_string(),
+                    debug_logs: Vec::new(),
+                })
             })
         })
     }
 }
 
-#[async_trait]
 impl Provider for PanicProvider {
     fn kind(&self) -> ProviderKind {
         self.kind
     }
 
-    async fn send(&mut self, _message: &str) -> Result<CompletionResponse, AppError> {
-        panic!("{}", self.panic_message);
+    fn send(&mut self, _message: &str) -> SendFuture<'_> {
+        let msg = self.panic_message;
+        Box::pin(async move {
+            panic!("{}", msg);
+        })
     }
 }
 

@@ -1,38 +1,15 @@
 use super::{
-    effort_to_budget, prune_history, validate_effort_config, CompletionResponse, Message, Provider,
-    ProviderKind, Role,
+    effort_to_budget, validate_effort_config, HttpProviderBase, Provider, ProviderKind, SendFuture,
 };
 use crate::error::AppError;
-use async_trait::async_trait;
 
 pub struct AnthropicProvider {
-    api_key: String,
-    model: String,
-    client: reqwest::Client,
-    max_tokens: u32,
-    max_history_messages: usize,
-    thinking_effort: Option<String>,
-    history: Vec<Message>,
+    base: HttpProviderBase,
 }
 
 impl AnthropicProvider {
-    pub fn new(
-        api_key: String,
-        model: String,
-        client: reqwest::Client,
-        max_tokens: u32,
-        max_history_messages: usize,
-        thinking_effort: Option<String>,
-    ) -> Self {
-        Self {
-            api_key,
-            model,
-            client,
-            max_tokens,
-            max_history_messages,
-            thinking_effort,
-            history: Vec::new(),
-        }
+    pub fn new(base: HttpProviderBase) -> Self {
+        Self { base }
     }
 }
 
@@ -79,117 +56,72 @@ fn extract_text_content(resp_body: &serde_json::Value) -> Result<String, AppErro
     })
 }
 
-#[async_trait]
 impl Provider for AnthropicProvider {
     fn kind(&self) -> ProviderKind {
         ProviderKind::Anthropic
     }
 
-    async fn send(&mut self, message: &str) -> Result<CompletionResponse, AppError> {
-        if let Err(message) = validate_effort_config(
-            ProviderKind::Anthropic,
-            false,
-            None,
-            self.thinking_effort.as_deref(),
-        ) {
-            return Err(AppError::Provider {
-                provider: "Anthropic".into(),
-                message,
+    fn send(&mut self, message: &str) -> SendFuture<'_> {
+        let message = message.to_string();
+        Box::pin(async move {
+            if let Err(message) = validate_effort_config(
+                ProviderKind::Anthropic,
+                false,
+                None,
+                self.base.effort.as_deref(),
+            ) {
+                return Err(AppError::Provider {
+                    provider: "Anthropic".into(),
+                    message,
+                });
+            }
+
+            self.base.prepare_send(&message);
+            let messages = self.base.format_messages_standard();
+
+            let mut body = serde_json::json!({
+                "model": self.base.model,
+                "max_tokens": self.base.max_tokens,
+                "messages": messages,
             });
-        }
 
-        self.history.push(Message {
-            role: Role::User,
-            content: message.to_string(),
-        });
+            if let Some(ref effort) = self.base.effort {
+                let budget = effort_to_budget(effort).map_err(|e| AppError::Provider {
+                    provider: "Anthropic".into(),
+                    message: e,
+                })?;
+                body["thinking"] = serde_json::json!({
+                    "type": "enabled",
+                    "budget_tokens": budget,
+                });
+            }
 
-        prune_history(&mut self.history, self.max_history_messages);
+            let request = self
+                .base
+                .client
+                .post("https://api.anthropic.com/v1/messages")
+                .header("x-api-key", &self.base.api_key)
+                .header("anthropic-version", "2023-06-01")
+                .header("content-type", "application/json")
+                .json(&body)
+                .build()?;
 
-        let messages: Vec<serde_json::Value> = self
-            .history
-            .iter()
-            .map(|m| {
-                serde_json::json!({
-                    "role": match m.role { Role::User => "user", Role::Assistant => "assistant" },
-                    "content": m.content,
-                })
-            })
-            .collect();
-
-        let mut body = serde_json::json!({
-            "model": self.model,
-            "max_tokens": self.max_tokens,
-            "messages": messages,
-        });
-
-        if let Some(ref effort) = self.thinking_effort {
-            let budget = effort_to_budget(effort).map_err(|e| AppError::Provider {
-                provider: "Anthropic".into(),
-                message: e,
-            })?;
-            body["thinking"] = serde_json::json!({
-                "type": "enabled",
-                "budget_tokens": budget,
-            });
-        }
-
-        let resp = self
-            .client
-            .post("https://api.anthropic.com/v1/messages")
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await?;
-
-        let status = resp.status();
-        let resp_text = resp.text().await?;
-
-        if !status.is_success() {
-            return Err(AppError::Provider {
-                provider: "Anthropic".into(),
-                message: format!("{status}: {resp_text}"),
-            });
-        }
-
-        let resp_body: serde_json::Value =
-            serde_json::from_str(&resp_text).map_err(|e| AppError::Provider {
-                provider: "Anthropic".into(),
-                message: format!("Failed to parse response: {e}"),
-            })?;
-
-        let content = extract_text_content(&resp_body)?;
-
-        self.history.push(Message {
-            role: Role::Assistant,
-            content,
-        });
-
-        let content = self.history.last().unwrap().content.clone();
-        Ok(CompletionResponse {
-            content,
-            debug_logs: Vec::new(),
+            let resp_body = self.base.execute_request(request, "Anthropic").await?;
+            let content = extract_text_content(&resp_body)?;
+            Ok(self.base.finish_send(content))
         })
     }
 }
 
 pub async fn list_models(api_key: &str, client: &reqwest::Client) -> Result<Vec<String>, String> {
-    let resp = client
+    let request = client
         .get("https://api.anthropic.com/v1/models")
         .header("x-api-key", api_key)
         .header("anthropic-version", "2023-06-01")
-        .send()
-        .await
+        .build()
         .map_err(|e| e.to_string())?;
-    let status = resp.status();
 
-    if !status.is_success() {
-        let text = resp.text().await.map_err(|e| e.to_string())?;
-        return Err(format!("{status}: {text}"));
-    }
-
-    let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let body = HttpProviderBase::fetch_models(client, request).await?;
 
     let mut entries: Vec<(String, i64)> = body["data"]
         .as_array()

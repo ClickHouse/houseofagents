@@ -118,6 +118,8 @@ max_history_messages = 50
 http_timeout_seconds = 120
 model_fetch_timeout_seconds = 30
 cli_timeout_seconds = 600
+max_history_bytes = 102400
+# pipeline_block_concurrency = 0
 
 # Optional: set to an agent name to enable diagnostics
 # diagnostic_provider = "Claude"
@@ -164,6 +166,8 @@ extra_cli_args = ""
 | `http_timeout_seconds` | Timeout for API calls (`use_cli = false`) |
 | `model_fetch_timeout_seconds` | Timeout for model list fetch in config editor |
 | `cli_timeout_seconds` | Timeout for CLI calls (`use_cli = true`) |
+| `max_history_bytes` | Max total bytes of conversation history per provider session (default 100 KB). Applied after message-count pruning. |
+| `pipeline_block_concurrency` | Max concurrent pipeline blocks. `0` = unlimited (default). |
 | `diagnostic_provider` | Agent name for the automatic diagnostics pass (disabled when unset) |
 
 **Agent settings** (`[[agents]]`):

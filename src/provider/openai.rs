@@ -1,35 +1,13 @@
-use super::{prune_history, CompletionResponse, Message, Provider, ProviderKind, Role};
+use super::{HttpProviderBase, Provider, ProviderKind, SendFuture};
 use crate::error::AppError;
-use async_trait::async_trait;
 
 pub struct OpenAIProvider {
-    api_key: String,
-    model: String,
-    client: reqwest::Client,
-    max_tokens: u32,
-    max_history_messages: usize,
-    reasoning_effort: Option<String>,
-    history: Vec<Message>,
+    base: HttpProviderBase,
 }
 
 impl OpenAIProvider {
-    pub fn new(
-        api_key: String,
-        model: String,
-        client: reqwest::Client,
-        max_tokens: u32,
-        max_history_messages: usize,
-        reasoning_effort: Option<String>,
-    ) -> Self {
-        Self {
-            api_key,
-            model,
-            client,
-            max_tokens,
-            max_history_messages,
-            reasoning_effort,
-            history: Vec::new(),
-        }
+    pub fn new(base: HttpProviderBase) -> Self {
+        Self { base }
     }
 }
 
@@ -73,101 +51,56 @@ fn extract_content(resp_body: &serde_json::Value) -> Result<String, AppError> {
     })
 }
 
-#[async_trait]
 impl Provider for OpenAIProvider {
     fn kind(&self) -> ProviderKind {
         ProviderKind::OpenAI
     }
 
-    async fn send(&mut self, message: &str) -> Result<CompletionResponse, AppError> {
-        self.history.push(Message {
-            role: Role::User,
-            content: message.to_string(),
-        });
+    fn send(&mut self, message: &str) -> SendFuture<'_> {
+        let message = message.to_string();
+        Box::pin(async move {
+            self.base.prepare_send(&message);
+            let messages = self.base.format_messages_standard();
 
-        prune_history(&mut self.history, self.max_history_messages);
-
-        let messages: Vec<serde_json::Value> = self
-            .history
-            .iter()
-            .map(|m| {
+            let body = if let Some(ref effort) = self.base.effort {
                 serde_json::json!({
-                    "role": match m.role { Role::User => "user", Role::Assistant => "assistant" },
-                    "content": m.content,
+                    "model": self.base.model,
+                    "max_completion_tokens": self.base.max_tokens,
+                    "reasoning_effort": effort,
+                    "messages": messages,
                 })
-            })
-            .collect();
+            } else {
+                serde_json::json!({
+                    "model": self.base.model,
+                    "max_tokens": self.base.max_tokens,
+                    "messages": messages,
+                })
+            };
 
-        let body = if let Some(ref effort) = self.reasoning_effort {
-            serde_json::json!({
-                "model": self.model,
-                "max_completion_tokens": self.max_tokens,
-                "reasoning_effort": effort,
-                "messages": messages,
-            })
-        } else {
-            serde_json::json!({
-                "model": self.model,
-                "max_tokens": self.max_tokens,
-                "messages": messages,
-            })
-        };
+            let request = self
+                .base
+                .client
+                .post("https://api.openai.com/v1/chat/completions")
+                .header("Authorization", format!("Bearer {}", self.base.api_key))
+                .header("content-type", "application/json")
+                .json(&body)
+                .build()?;
 
-        let resp = self
-            .client
-            .post("https://api.openai.com/v1/chat/completions")
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await?;
-
-        let status = resp.status();
-        let resp_text = resp.text().await?;
-
-        if !status.is_success() {
-            return Err(AppError::Provider {
-                provider: "OpenAI".into(),
-                message: format!("{status}: {resp_text}"),
-            });
-        }
-
-        let resp_body: serde_json::Value =
-            serde_json::from_str(&resp_text).map_err(|e| AppError::Provider {
-                provider: "OpenAI".into(),
-                message: format!("Failed to parse response: {e}"),
-            })?;
-
-        let content = extract_content(&resp_body)?;
-
-        self.history.push(Message {
-            role: Role::Assistant,
-            content,
-        });
-
-        let content = self.history.last().unwrap().content.clone();
-        Ok(CompletionResponse {
-            content,
-            debug_logs: Vec::new(),
+            let resp_body = self.base.execute_request(request, "OpenAI").await?;
+            let content = extract_content(&resp_body)?;
+            Ok(self.base.finish_send(content))
         })
     }
 }
 
 pub async fn list_models(api_key: &str, client: &reqwest::Client) -> Result<Vec<String>, String> {
-    let resp = client
+    let request = client
         .get("https://api.openai.com/v1/models")
         .header("Authorization", format!("Bearer {}", api_key))
-        .send()
-        .await
+        .build()
         .map_err(|e| e.to_string())?;
-    let status = resp.status();
 
-    if !status.is_success() {
-        let text = resp.text().await.map_err(|e| e.to_string())?;
-        return Err(format!("{status}: {text}"));
-    }
-
-    let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let body = HttpProviderBase::fetch_models(client, request).await?;
 
     let mut entries: Vec<(String, i64)> = body["data"]
         .as_array()
