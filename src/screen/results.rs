@@ -19,6 +19,7 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     // Title
     let run_dir_display = app
+        .running
         .run_dir
         .as_ref()
         .map(|p| absolute_path(p).display().to_string())
@@ -53,7 +54,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             .iter()
             .enumerate()
             .map(|(i, item)| {
-                let style = if i == app.result_cursor {
+                let style = if i == app.results.result_cursor {
                     Style::default()
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD)
@@ -78,7 +79,8 @@ pub fn draw(f: &mut Frame, app: &App) {
             })
             .collect()
     } else {
-        app.result_files
+        app.results
+            .result_files
             .iter()
             .enumerate()
             .map(|(i, path)| {
@@ -87,7 +89,7 @@ pub fn draw(f: &mut Frame, app: &App) {
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_default();
 
-                let style = if i == app.result_cursor {
+                let style = if i == app.results.result_cursor {
                     Style::default()
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD)
@@ -110,7 +112,7 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     // Preview pane
     let selected = selected_file_ref(app, batch_items.as_deref());
-    let preview = Paragraph::new(render_preview(&app.result_preview, selected))
+    let preview = Paragraph::new(render_preview(&app.results.result_preview, selected))
         .wrap(Wrap { trim: false })
         .block(Block::default().title(" Preview ").borders(Borders::ALL));
     f.render_widget(preview, main_chunks[1]);
@@ -157,17 +159,17 @@ fn selected_file_ref<'a>(
     batch_items: Option<&'a [VisibleBatchItem<'a>]>,
 ) -> Option<&'a PathBuf> {
     if let Some(items) = batch_items {
-        match items.get(app.result_cursor) {
+        match items.get(app.results.result_cursor) {
             Some(VisibleBatchItem::File { path, .. }) => Some(*path),
             _ => None,
         }
     } else {
-        app.result_files.get(app.result_cursor)
+        app.results.result_files.get(app.results.result_cursor)
     }
 }
 
 fn has_batch_results(app: &App) -> bool {
-    !app.batch_result_runs.is_empty() || !app.batch_result_root_files.is_empty()
+    !app.results.batch_result_runs.is_empty() || !app.results.batch_result_root_files.is_empty()
 }
 
 enum VisibleBatchItem<'a> {
@@ -177,8 +179,8 @@ enum VisibleBatchItem<'a> {
 
 fn visible_batch_items(app: &App) -> Vec<VisibleBatchItem<'_>> {
     let mut items = Vec::new();
-    for run in &app.batch_result_runs {
-        let expanded = app.batch_result_expanded.contains(&run.run_id);
+    for run in &app.results.batch_result_runs {
+        let expanded = app.results.batch_result_expanded.contains(&run.run_id);
         items.push(VisibleBatchItem::RunHeader {
             run_id: run.run_id,
             expanded,
@@ -189,7 +191,7 @@ fn visible_batch_items(app: &App) -> Vec<VisibleBatchItem<'_>> {
             }
         }
     }
-    for path in &app.batch_result_root_files {
+    for path in &app.results.batch_result_root_files {
         items.push(VisibleBatchItem::File { depth: 0, path });
     }
     items
@@ -394,8 +396,8 @@ mod tests {
             providers: HashMap::new(),
         };
         let mut app = App::new(cfg);
-        app.result_files = files;
-        app.result_cursor = cursor;
+        app.results.result_files = files;
+        app.results.result_cursor = cursor;
         app
     }
 

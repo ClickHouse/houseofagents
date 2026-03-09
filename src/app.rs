@@ -1,8 +1,9 @@
 use crate::config::{AgentConfig, AppConfig};
 use crate::execution::pipeline::{BlockId, PipelineDefinition};
-use crate::execution::{BatchProgressEvent, ExecutionMode, ProgressEvent};
+use crate::execution::{BatchProgressEvent, ExecutionMode, ProgressEvent, PromptRuntimeContext};
 use crate::output::OutputManager;
 use crate::provider::ProviderKind;
+use reqwest::Client;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -25,41 +26,58 @@ pub enum Screen {
 }
 
 pub struct App {
-    pub config: AppConfig,
-    pub config_path_override: Option<String>,
+    pub(crate) config: AppConfig,
+    pub(crate) config_path_override: Option<String>,
     /// Session overrides keyed by agent name
-    pub session_overrides: HashMap<String, AgentConfig>,
-    pub session_http_timeout_seconds: Option<u64>,
-    pub session_model_fetch_timeout_seconds: Option<u64>,
-    pub session_cli_timeout_seconds: Option<u64>,
-    pub screen: Screen,
-    pub should_quit: bool,
+    pub(crate) session_overrides: HashMap<String, AgentConfig>,
+    pub(crate) session_http_timeout_seconds: Option<u64>,
+    pub(crate) session_model_fetch_timeout_seconds: Option<u64>,
+    pub(crate) session_cli_timeout_seconds: Option<u64>,
+    pub(crate) screen: Screen,
+    pub(crate) should_quit: bool,
 
-    // Home screen state — selected agents by name
-    pub selected_agents: Vec<String>,
-    pub selected_mode: ExecutionMode,
-    pub home_cursor: usize,
-    pub home_section: HomeSection,
+    // Home screen state
+    pub(crate) selected_agents: Vec<String>,
+    pub(crate) selected_mode: ExecutionMode,
+    pub(crate) home_cursor: usize,
+    pub(crate) home_section: HomeSection,
 
-    // Prompt screen state
-    pub prompt_text: String,
-    pub prompt_cursor: usize,
-    pub session_name: String,
-    pub iterations: u32,
-    pub iterations_buf: String,
-    pub runs: u32,
-    pub runs_buf: String,
-    pub concurrency: u32,
-    pub concurrency_buf: String,
-    pub resume_previous: bool,
-    pub forward_prompt: bool,
-    pub prompt_focus: PromptFocus,
+    // Prompt / order / execution / results / edit / pipeline
+    pub(crate) prompt: PromptState,
+    pub(crate) order_cursor: usize,
+    pub(crate) order_grabbed: Option<usize>,
+    pub(crate) running: RunningState,
+    pub(crate) results: ResultsState,
+    pub(crate) edit_popup: EditPopupState,
+    pub(crate) pipeline: PipelineState,
 
-    // Order screen state (relay only)
-    pub order_cursor: usize,
-    pub order_grabbed: Option<usize>,
+    // CLI availability per provider kind
+    pub(crate) cli_available: HashMap<ProviderKind, bool>,
 
-    // Running screen state
+    // Help popup
+    pub(crate) show_help_popup: bool,
+    pub(crate) help_popup_scroll: u16,
+
+    // Error modal
+    pub(crate) error_modal: Option<String>,
+}
+
+pub(crate) struct PromptState {
+    pub(crate) prompt_text: String,
+    pub(crate) prompt_cursor: usize,
+    pub(crate) session_name: String,
+    pub(crate) iterations: u32,
+    pub(crate) iterations_buf: String,
+    pub(crate) runs: u32,
+    pub(crate) runs_buf: String,
+    pub(crate) concurrency: u32,
+    pub(crate) concurrency_buf: String,
+    pub(crate) resume_previous: bool,
+    pub(crate) forward_prompt: bool,
+    pub(crate) prompt_focus: PromptFocus,
+}
+
+pub(crate) struct RunningState {
     activity_log: VecDeque<ProgressEvent>,
     error_ledger: VecDeque<String>,
     recent_activity_logs: VecDeque<(String, String)>,
@@ -69,112 +87,127 @@ pub struct App {
     completed_block_steps: HashSet<(u32, u32)>,
     active_agents: HashSet<String>,
     active_blocks: Vec<(u32, String)>,
-    pub is_running: bool,
-    pub run_error: Option<String>,
-    pub consolidation_active: bool,
-    pub consolidation_phase: ConsolidationPhase,
-    pub consolidation_target: ConsolidationTarget,
-    pub consolidation_provider_cursor: usize,
-    pub consolidation_prompt: String,
-    pub consolidation_running: bool,
-    pub consolidation_rx: Option<mpsc::UnboundedReceiver<Result<String, String>>>,
-    pub diagnostic_running: bool,
-    pub diagnostic_rx: Option<mpsc::UnboundedReceiver<Result<String, String>>>,
-    pub batch_stage1_done: bool,
-    pub multi_run_total: u32,
-    pub multi_run_concurrency: u32,
-    pub multi_run_cursor: usize,
-    pub multi_run_states: Vec<RunState>,
-    pub multi_run_step_labels: Vec<String>,
+    pub(crate) is_running: bool,
+    pub(crate) run_error: Option<String>,
+    pub(crate) consolidation_active: bool,
+    pub(crate) consolidation_phase: ConsolidationPhase,
+    pub(crate) consolidation_target: ConsolidationTarget,
+    pub(crate) consolidation_provider_cursor: usize,
+    pub(crate) consolidation_prompt: String,
+    pub(crate) consolidation_running: bool,
+    pub(crate) consolidation_rx: Option<mpsc::UnboundedReceiver<Result<String, String>>>,
+    pub(crate) diagnostic_running: bool,
+    pub(crate) diagnostic_rx: Option<mpsc::UnboundedReceiver<Result<String, String>>>,
+    pub(crate) batch_stage1_done: bool,
+    pub(crate) multi_run_total: u32,
+    pub(crate) multi_run_concurrency: u32,
+    pub(crate) multi_run_cursor: usize,
+    pub(crate) multi_run_states: Vec<RunState>,
+    pub(crate) multi_run_step_labels: Vec<String>,
+    pub(crate) progress_rx: Option<mpsc::UnboundedReceiver<ProgressEvent>>,
+    pub(crate) batch_progress_rx: Option<mpsc::UnboundedReceiver<BatchProgressEvent>>,
+    pub(crate) cancel_flag: Arc<AtomicBool>,
+    pub(crate) run_dir: Option<PathBuf>,
+    pub(crate) pending_single_execution: Option<PendingSingleExecution>,
+    pub(crate) resume_prepare_rx:
+        Option<mpsc::UnboundedReceiver<Result<ResumePreparation, String>>>,
+}
 
-    // Results screen state
-    pub result_files: Vec<PathBuf>,
-    pub result_cursor: usize,
-    pub result_preview: String,
-    pub batch_result_runs: Vec<BatchRunGroup>,
-    pub batch_result_root_files: Vec<PathBuf>,
-    pub batch_result_expanded: HashSet<u32>,
+pub(crate) struct ResultsState {
+    pub(crate) result_files: Vec<PathBuf>,
+    pub(crate) result_cursor: usize,
+    pub(crate) result_preview: String,
+    pub(crate) batch_result_runs: Vec<BatchRunGroup>,
+    pub(crate) batch_result_root_files: Vec<PathBuf>,
+    pub(crate) batch_result_expanded: HashSet<u32>,
+    pub(crate) results_loading: bool,
+    pub(crate) results_load_rx: Option<mpsc::UnboundedReceiver<Result<ResultsLoadPayload, String>>>,
+    pub(crate) preview_loading: bool,
+    pub(crate) preview_request_id: u64,
+    pub(crate) preview_rx: Option<mpsc::UnboundedReceiver<PreviewLoadResult>>,
+}
 
-    // Edit popup
-    pub show_edit_popup: bool,
-    pub edit_popup_section: EditPopupSection,
-    pub edit_popup_cursor: usize,
-    pub edit_popup_timeout_cursor: usize,
-    pub edit_popup_field: EditField,
-    pub edit_popup_editing: bool,
-    pub edit_buffer: String,
+pub(crate) struct EditPopupState {
+    pub(crate) show_edit_popup: bool,
+    pub(crate) edit_popup_section: EditPopupSection,
+    pub(crate) edit_popup_cursor: usize,
+    pub(crate) edit_popup_timeout_cursor: usize,
+    pub(crate) edit_popup_field: EditField,
+    pub(crate) edit_popup_editing: bool,
+    pub(crate) edit_buffer: String,
+    pub(crate) model_picker_active: bool,
+    pub(crate) model_picker_loading: bool,
+    pub(crate) model_picker_all_models: Vec<String>,
+    pub(crate) model_picker_list: Vec<String>,
+    pub(crate) model_picker_filter: String,
+    pub(crate) model_picker_cursor: usize,
+    pub(crate) model_picker_rx: Option<mpsc::UnboundedReceiver<Result<Vec<String>, String>>>,
+    pub(crate) config_save_in_progress: bool,
+    pub(crate) config_save_rx: Option<mpsc::UnboundedReceiver<Result<(), String>>>,
+}
 
-    // Model picker (within edit popup)
-    pub model_picker_active: bool,
-    pub model_picker_loading: bool,
-    pub model_picker_all_models: Vec<String>,
-    pub model_picker_list: Vec<String>,
-    pub model_picker_filter: String,
-    pub model_picker_cursor: usize,
-    pub model_picker_rx: Option<mpsc::UnboundedReceiver<Result<Vec<String>, String>>>,
+pub(crate) struct PipelineState {
+    pub(crate) pipeline_def: PipelineDefinition,
+    pub(crate) pipeline_next_id: BlockId,
+    pub(crate) pipeline_block_cursor: Option<BlockId>,
+    pub(crate) pipeline_focus: PipelineFocus,
+    pub(crate) pipeline_canvas_offset: (i16, i16),
+    pub(crate) pipeline_prompt_cursor: usize,
+    pub(crate) pipeline_session_name: String,
+    pub(crate) pipeline_iterations_buf: String,
+    pub(crate) pipeline_runs: u32,
+    pub(crate) pipeline_runs_buf: String,
+    pub(crate) pipeline_concurrency: u32,
+    pub(crate) pipeline_concurrency_buf: String,
+    pub(crate) pipeline_connecting_from: Option<BlockId>,
+    pub(crate) pipeline_removing_conn: bool,
+    pub(crate) pipeline_conn_cursor: usize,
+    pub(crate) pipeline_show_edit: bool,
+    pub(crate) pipeline_edit_field: PipelineEditField,
+    pub(crate) pipeline_edit_name_buf: String,
+    pub(crate) pipeline_edit_name_cursor: usize,
+    pub(crate) pipeline_edit_agent_idx: usize,
+    pub(crate) pipeline_edit_prompt_buf: String,
+    pub(crate) pipeline_edit_prompt_cursor: usize,
+    pub(crate) pipeline_edit_session_buf: String,
+    pub(crate) pipeline_edit_session_cursor: usize,
+    pub(crate) pipeline_file_dialog: Option<PipelineDialogMode>,
+    pub(crate) pipeline_file_input: String,
+    pub(crate) pipeline_file_list: Vec<String>,
+    pub(crate) pipeline_file_cursor: usize,
+    pub(crate) pipeline_save_path: Option<PathBuf>,
+}
 
-    // Config save state (within edit popup)
-    pub config_save_in_progress: bool,
-    pub config_save_rx: Option<mpsc::UnboundedReceiver<Result<(), String>>>,
+pub(crate) struct PendingSingleExecution {
+    pub(crate) config: AppConfig,
+    pub(crate) client: Client,
+    pub(crate) raw_prompt: String,
+    pub(crate) session_name: Option<String>,
+    pub(crate) prompt_context: PromptRuntimeContext,
+    pub(crate) agent_names: Vec<String>,
+    pub(crate) mode: ExecutionMode,
+    pub(crate) forward_prompt: bool,
+    pub(crate) iterations: u32,
+    pub(crate) cli_timeout_secs: u64,
+}
 
-    // CLI availability per provider kind
-    pub cli_available: HashMap<ProviderKind, bool>,
+pub(crate) struct ResumePreparation {
+    pub(crate) run_dir: PathBuf,
+    pub(crate) start_iteration: u32,
+    pub(crate) relay_initial_last_output: Option<String>,
+    pub(crate) swarm_initial_outputs: HashMap<String, String>,
+}
 
-    // Help popup
-    pub show_help_popup: bool,
-    pub help_popup_scroll: u16,
+pub(crate) struct ResultsLoadPayload {
+    pub(crate) result_files: Vec<PathBuf>,
+    pub(crate) batch_result_runs: Vec<BatchRunGroup>,
+    pub(crate) batch_result_root_files: Vec<PathBuf>,
+    pub(crate) batch_result_expanded: HashSet<u32>,
+}
 
-    // Error modal
-    pub error_modal: Option<String>,
-
-    // Execution channel state (not part of UI state)
-    pub progress_rx: Option<mpsc::UnboundedReceiver<ProgressEvent>>,
-    pub batch_progress_rx: Option<mpsc::UnboundedReceiver<BatchProgressEvent>>,
-    pub cancel_flag: Arc<AtomicBool>,
-    pub run_dir: Option<PathBuf>,
-
-    // Pipeline builder — core
-    pub pipeline_def: PipelineDefinition,
-    pub pipeline_next_id: BlockId,
-    pub pipeline_block_cursor: Option<BlockId>,
-    pub pipeline_focus: PipelineFocus,
-    pub pipeline_canvas_offset: (i16, i16),
-
-    // Pipeline prompt/session/iterations
-    pub pipeline_prompt_cursor: usize,
-    pub pipeline_session_name: String,
-    pub pipeline_iterations_buf: String,
-    pub pipeline_runs: u32,
-    pub pipeline_runs_buf: String,
-    pub pipeline_concurrency: u32,
-    pub pipeline_concurrency_buf: String,
-
-    // Pipeline connect mode
-    pub pipeline_connecting_from: Option<BlockId>,
-
-    // Pipeline remove-connection mode
-    pub pipeline_removing_conn: bool,
-    pub pipeline_conn_cursor: usize,
-
-    // Pipeline block edit popup
-    pub pipeline_show_edit: bool,
-    pub pipeline_edit_field: PipelineEditField,
-    pub pipeline_edit_name_buf: String,
-    pub pipeline_edit_name_cursor: usize,
-    pub pipeline_edit_agent_idx: usize,
-    pub pipeline_edit_prompt_buf: String,
-    pub pipeline_edit_prompt_cursor: usize,
-    pub pipeline_edit_session_buf: String,
-    pub pipeline_edit_session_cursor: usize,
-
-    // Pipeline file dialog
-    pub pipeline_file_dialog: Option<PipelineDialogMode>,
-    pub pipeline_file_input: String,
-    pub pipeline_file_list: Vec<String>,
-    pub pipeline_file_cursor: usize,
-
-    // Pipeline save state
-    pub pipeline_save_path: Option<PathBuf>,
+pub(crate) struct PreviewLoadResult {
+    pub(crate) request_id: u64,
+    pub(crate) preview: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -256,24 +289,24 @@ pub enum RunStepStatus {
 }
 
 #[derive(Debug, Clone)]
-pub struct RunStepState {
-    pub label: String,
-    pub status: RunStepStatus,
+pub(crate) struct RunStepState {
+    pub(crate) label: String,
+    pub(crate) status: RunStepStatus,
 }
 
 #[derive(Debug, Clone)]
-pub struct RunState {
-    pub run_id: u32,
-    pub status: RunStatus,
-    pub steps: Vec<RunStepState>,
-    pub recent_logs: VecDeque<String>,
-    pub error: Option<String>,
+pub(crate) struct RunState {
+    pub(crate) run_id: u32,
+    pub(crate) status: RunStatus,
+    pub(crate) steps: Vec<RunStepState>,
+    pub(crate) recent_logs: VecDeque<String>,
+    pub(crate) error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
-pub struct BatchRunGroup {
-    pub run_id: u32,
-    pub files: Vec<PathBuf>,
+pub(crate) struct BatchRunGroup {
+    pub(crate) run_id: u32,
+    pub(crate) files: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -307,7 +340,6 @@ impl App {
         cli_available.insert(ProviderKind::OpenAI, detect_cli("codex"));
         cli_available.insert(ProviderKind::Gemini, detect_cli("gemini"));
 
-        // Auto-default: if no API key but CLI available, insert session override with use_cli
         let mut session_overrides = HashMap::new();
         for agent in &config.agents {
             let has_key = !agent.api_key.is_empty();
@@ -332,105 +364,17 @@ impl App {
             selected_mode: ExecutionMode::Solo,
             home_cursor: 0,
             home_section: HomeSection::Agents,
-            prompt_text: String::new(),
-            prompt_cursor: 0,
-            session_name: String::new(),
-            iterations: 1,
-            iterations_buf: "1".into(),
-            runs: 1,
-            runs_buf: "1".into(),
-            concurrency: 0,
-            concurrency_buf: "0".into(),
-            resume_previous: false,
-            forward_prompt: false,
-            prompt_focus: PromptFocus::Text,
+            prompt: PromptState::new(),
             order_cursor: 0,
             order_grabbed: None,
-            activity_log: VecDeque::new(),
-            error_ledger: VecDeque::new(),
-            recent_activity_logs: VecDeque::new(),
-            last_error: None,
-            completed_steps: 0,
-            completed_agent_steps: HashSet::new(),
-            completed_block_steps: HashSet::new(),
-            active_agents: HashSet::new(),
-            active_blocks: Vec::new(),
-            is_running: false,
-            run_error: None,
-            consolidation_active: false,
-            consolidation_phase: ConsolidationPhase::Confirm,
-            consolidation_target: ConsolidationTarget::Single,
-            consolidation_provider_cursor: 0,
-            consolidation_prompt: String::new(),
-            consolidation_running: false,
-            consolidation_rx: None,
-            diagnostic_running: false,
-            diagnostic_rx: None,
-            batch_stage1_done: false,
-            multi_run_total: 0,
-            multi_run_concurrency: 0,
-            multi_run_cursor: 0,
-            multi_run_states: Vec::new(),
-            multi_run_step_labels: Vec::new(),
-            result_files: Vec::new(),
-            result_cursor: 0,
-            result_preview: String::new(),
-            batch_result_runs: Vec::new(),
-            batch_result_root_files: Vec::new(),
-            batch_result_expanded: HashSet::new(),
-            show_edit_popup: false,
-            edit_popup_section: EditPopupSection::Providers,
-            edit_popup_cursor: 0,
-            edit_popup_timeout_cursor: 0,
-            edit_popup_field: EditField::ApiKey,
-            edit_popup_editing: false,
-            edit_buffer: String::new(),
-            model_picker_active: false,
-            model_picker_loading: false,
-            model_picker_all_models: Vec::new(),
-            model_picker_list: Vec::new(),
-            model_picker_filter: String::new(),
-            model_picker_cursor: 0,
-            model_picker_rx: None,
-            config_save_in_progress: false,
-            config_save_rx: None,
+            running: RunningState::new(),
+            results: ResultsState::new(),
+            edit_popup: EditPopupState::new(),
+            pipeline: PipelineState::new(),
             cli_available,
             show_help_popup: false,
             help_popup_scroll: 0,
             error_modal: None,
-            progress_rx: None,
-            batch_progress_rx: None,
-            cancel_flag: Arc::new(AtomicBool::new(false)),
-            run_dir: None,
-            pipeline_def: PipelineDefinition::default(),
-            pipeline_next_id: 1,
-            pipeline_block_cursor: None,
-            pipeline_focus: PipelineFocus::InitialPrompt,
-            pipeline_canvas_offset: (0, 0),
-            pipeline_prompt_cursor: 0,
-            pipeline_session_name: String::new(),
-            pipeline_iterations_buf: "1".into(),
-            pipeline_runs: 1,
-            pipeline_runs_buf: "1".into(),
-            pipeline_concurrency: 0,
-            pipeline_concurrency_buf: "0".into(),
-            pipeline_connecting_from: None,
-            pipeline_removing_conn: false,
-            pipeline_conn_cursor: 0,
-            pipeline_show_edit: false,
-            pipeline_edit_field: PipelineEditField::Name,
-            pipeline_edit_name_buf: String::new(),
-            pipeline_edit_name_cursor: 0,
-            pipeline_edit_agent_idx: 0,
-            pipeline_edit_prompt_buf: String::new(),
-            pipeline_edit_prompt_cursor: 0,
-            pipeline_edit_session_buf: String::new(),
-            pipeline_edit_session_cursor: 0,
-            pipeline_file_dialog: None,
-            pipeline_file_input: String::new(),
-            pipeline_file_list: Vec::new(),
-            pipeline_file_cursor: 0,
-            pipeline_save_path: None,
         }
     }
 
@@ -510,16 +454,150 @@ impl App {
     }
 
     pub fn init_multi_run_state(&mut self, runs: u32, concurrency: u32, step_labels: Vec<String>) {
-        self.multi_run_total = runs;
-        self.multi_run_concurrency = concurrency;
-        self.multi_run_cursor = 0;
-        self.multi_run_states = (1..=runs)
+        self.running.multi_run_total = runs;
+        self.running.multi_run_concurrency = concurrency;
+        self.running.multi_run_cursor = 0;
+        self.running.multi_run_states = (1..=runs)
             .map(|run_id| RunState::new(run_id, &step_labels))
             .collect();
-        self.multi_run_step_labels = step_labels;
+        self.running.multi_run_step_labels = step_labels;
     }
 
     pub fn clear_run_activity(&mut self) {
+        self.running.clear_activity();
+    }
+
+    pub fn reset_running_state(&mut self) {
+        self.screen = Screen::Running;
+        self.running.reset_for_run();
+        self.results.reset_for_run();
+    }
+
+    /// Preserve the legacy reset semantics from the monolithic TUI refactor.
+    /// This intentionally leaves `running.is_running`/`running.run_error` alone
+    /// because the old `reset_to_home()` only cleared the fields listed below.
+    pub fn reset_to_home(&mut self) {
+        self.screen = Screen::Home;
+        self.prompt.reset_to_home();
+        self.selected_agents.clear();
+        self.clear_run_activity();
+        self.results.reset_to_home();
+        self.running.reset_to_home();
+        self.pipeline = PipelineState::new();
+    }
+
+    pub fn record_progress(&mut self, event: ProgressEvent) {
+        self.running.reduce_progress_event(&event);
+        if self.running.activity_log.len() == ACTIVITY_LOG_LIMIT {
+            self.running.activity_log.pop_front();
+        }
+        self.running.activity_log.push_back(event);
+    }
+
+    pub fn activity_log(&self) -> &VecDeque<ProgressEvent> {
+        &self.running.activity_log
+    }
+
+    pub fn error_ledger(&self) -> &VecDeque<String> {
+        &self.running.error_ledger
+    }
+
+    pub fn recent_activity_logs(&self) -> &VecDeque<(String, String)> {
+        &self.running.recent_activity_logs
+    }
+
+    pub fn last_error(&self) -> Option<&(String, String)> {
+        self.running.last_error.as_ref()
+    }
+
+    pub fn completed_steps(&self) -> usize {
+        self.running.completed_steps
+    }
+
+    pub fn is_agent_active(&self, name: &str) -> bool {
+        self.running.active_agents.contains(name)
+    }
+
+    pub fn active_block_labels(&self) -> impl Iterator<Item = &str> {
+        self.running
+            .active_blocks
+            .iter()
+            .map(|(_, label)| label.as_str())
+    }
+}
+
+impl PromptState {
+    fn new() -> Self {
+        Self {
+            prompt_text: String::new(),
+            prompt_cursor: 0,
+            session_name: String::new(),
+            iterations: 1,
+            iterations_buf: "1".into(),
+            runs: 1,
+            runs_buf: "1".into(),
+            concurrency: 0,
+            concurrency_buf: "0".into(),
+            resume_previous: false,
+            forward_prompt: false,
+            prompt_focus: PromptFocus::Text,
+        }
+    }
+
+    fn reset_to_home(&mut self) {
+        self.prompt_text.clear();
+        self.prompt_cursor = 0;
+        self.session_name.clear();
+        self.iterations = 1;
+        self.iterations_buf = "1".into();
+        self.runs = 1;
+        self.runs_buf = "1".into();
+        self.concurrency = 0;
+        self.concurrency_buf = "0".into();
+        self.resume_previous = false;
+        self.forward_prompt = false;
+    }
+}
+
+impl RunningState {
+    fn new() -> Self {
+        Self {
+            activity_log: VecDeque::new(),
+            error_ledger: VecDeque::new(),
+            recent_activity_logs: VecDeque::new(),
+            last_error: None,
+            completed_steps: 0,
+            completed_agent_steps: HashSet::new(),
+            completed_block_steps: HashSet::new(),
+            active_agents: HashSet::new(),
+            active_blocks: Vec::new(),
+            is_running: false,
+            run_error: None,
+            consolidation_active: false,
+            consolidation_phase: ConsolidationPhase::Confirm,
+            consolidation_target: ConsolidationTarget::Single,
+            consolidation_provider_cursor: 0,
+            consolidation_prompt: String::new(),
+            consolidation_running: false,
+            consolidation_rx: None,
+            diagnostic_running: false,
+            diagnostic_rx: None,
+            batch_stage1_done: false,
+            multi_run_total: 0,
+            multi_run_concurrency: 0,
+            multi_run_cursor: 0,
+            multi_run_states: Vec::new(),
+            multi_run_step_labels: Vec::new(),
+            progress_rx: None,
+            batch_progress_rx: None,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
+            run_dir: None,
+            pending_single_execution: None,
+            resume_prepare_rx: None,
+        }
+    }
+
+    fn clear_activity(&mut self) {
         self.activity_log.clear();
         self.error_ledger.clear();
         self.recent_activity_logs.clear();
@@ -531,40 +609,53 @@ impl App {
         self.active_blocks.clear();
     }
 
-    pub fn record_progress(&mut self, event: ProgressEvent) {
-        self.reduce_progress_event(&event);
-        if self.activity_log.len() == ACTIVITY_LOG_LIMIT {
-            self.activity_log.pop_front();
-        }
-        self.activity_log.push_back(event);
+    fn reset_for_run(&mut self) {
+        self.clear_activity();
+        self.is_running = true;
+        self.run_error = None;
+        self.consolidation_active = false;
+        self.consolidation_phase = ConsolidationPhase::Confirm;
+        self.consolidation_target = ConsolidationTarget::Single;
+        self.consolidation_provider_cursor = 0;
+        self.consolidation_prompt.clear();
+        self.consolidation_running = false;
+        self.consolidation_rx = None;
+        self.diagnostic_running = false;
+        self.diagnostic_rx = None;
+        self.batch_stage1_done = false;
+        self.batch_progress_rx = None;
+        self.multi_run_total = 0;
+        self.multi_run_concurrency = 0;
+        self.multi_run_cursor = 0;
+        self.multi_run_states.clear();
+        self.multi_run_step_labels.clear();
+        self.progress_rx = None;
+        self.pending_single_execution = None;
+        self.resume_prepare_rx = None;
     }
 
-    pub fn activity_log(&self) -> &VecDeque<ProgressEvent> {
-        &self.activity_log
-    }
-
-    pub fn error_ledger(&self) -> &VecDeque<String> {
-        &self.error_ledger
-    }
-
-    pub fn recent_activity_logs(&self) -> &VecDeque<(String, String)> {
-        &self.recent_activity_logs
-    }
-
-    pub fn last_error(&self) -> Option<&(String, String)> {
-        self.last_error.as_ref()
-    }
-
-    pub fn completed_steps(&self) -> usize {
-        self.completed_steps
-    }
-
-    pub fn is_agent_active(&self, name: &str) -> bool {
-        self.active_agents.contains(name)
-    }
-
-    pub fn active_block_labels(&self) -> impl Iterator<Item = &str> {
-        self.active_blocks.iter().map(|(_, label)| label.as_str())
+    fn reset_to_home(&mut self) {
+        self.consolidation_active = false;
+        self.consolidation_phase = ConsolidationPhase::Confirm;
+        self.consolidation_target = ConsolidationTarget::Single;
+        self.consolidation_provider_cursor = 0;
+        self.consolidation_prompt.clear();
+        self.consolidation_running = false;
+        self.consolidation_rx = None;
+        self.diagnostic_running = false;
+        self.diagnostic_rx = None;
+        self.batch_stage1_done = false;
+        self.batch_progress_rx = None;
+        self.multi_run_total = 0;
+        self.multi_run_concurrency = 0;
+        self.multi_run_cursor = 0;
+        self.multi_run_states.clear();
+        self.multi_run_step_labels.clear();
+        self.progress_rx = None;
+        self.run_dir = None;
+        self.cancel_flag = Arc::new(AtomicBool::new(false));
+        self.pending_single_execution = None;
+        self.resume_prepare_rx = None;
     }
 
     fn reduce_progress_event(&mut self, event: &ProgressEvent) {
@@ -693,6 +784,100 @@ impl App {
     }
 }
 
+impl ResultsState {
+    fn new() -> Self {
+        Self {
+            result_files: Vec::new(),
+            result_cursor: 0,
+            result_preview: String::new(),
+            batch_result_runs: Vec::new(),
+            batch_result_root_files: Vec::new(),
+            batch_result_expanded: HashSet::new(),
+            results_loading: false,
+            results_load_rx: None,
+            preview_loading: false,
+            preview_request_id: 0,
+            preview_rx: None,
+        }
+    }
+
+    pub fn reset_to_home(&mut self) {
+        self.result_files.clear();
+        self.result_cursor = 0;
+        self.result_preview.clear();
+        self.batch_result_runs.clear();
+        self.batch_result_root_files.clear();
+        self.batch_result_expanded.clear();
+        self.results_loading = false;
+        self.results_load_rx = None;
+        self.preview_loading = false;
+        self.preview_rx = None;
+    }
+
+    fn reset_for_run(&mut self) {
+        self.reset_to_home();
+    }
+}
+
+impl EditPopupState {
+    fn new() -> Self {
+        Self {
+            show_edit_popup: false,
+            edit_popup_section: EditPopupSection::Providers,
+            edit_popup_cursor: 0,
+            edit_popup_timeout_cursor: 0,
+            edit_popup_field: EditField::ApiKey,
+            edit_popup_editing: false,
+            edit_buffer: String::new(),
+            model_picker_active: false,
+            model_picker_loading: false,
+            model_picker_all_models: Vec::new(),
+            model_picker_list: Vec::new(),
+            model_picker_filter: String::new(),
+            model_picker_cursor: 0,
+            model_picker_rx: None,
+            config_save_in_progress: false,
+            config_save_rx: None,
+        }
+    }
+}
+
+impl PipelineState {
+    fn new() -> Self {
+        Self {
+            pipeline_def: PipelineDefinition::default(),
+            pipeline_next_id: 1,
+            pipeline_block_cursor: None,
+            pipeline_focus: PipelineFocus::InitialPrompt,
+            pipeline_canvas_offset: (0, 0),
+            pipeline_prompt_cursor: 0,
+            pipeline_session_name: String::new(),
+            pipeline_iterations_buf: "1".into(),
+            pipeline_runs: 1,
+            pipeline_runs_buf: "1".into(),
+            pipeline_concurrency: 0,
+            pipeline_concurrency_buf: "0".into(),
+            pipeline_connecting_from: None,
+            pipeline_removing_conn: false,
+            pipeline_conn_cursor: 0,
+            pipeline_show_edit: false,
+            pipeline_edit_field: PipelineEditField::Name,
+            pipeline_edit_name_buf: String::new(),
+            pipeline_edit_name_cursor: 0,
+            pipeline_edit_agent_idx: 0,
+            pipeline_edit_prompt_buf: String::new(),
+            pipeline_edit_prompt_cursor: 0,
+            pipeline_edit_session_buf: String::new(),
+            pipeline_edit_session_cursor: 0,
+            pipeline_file_dialog: None,
+            pipeline_file_input: String::new(),
+            pipeline_file_list: Vec::new(),
+            pipeline_file_cursor: 0,
+            pipeline_save_path: None,
+        }
+    }
+}
+
 fn truncate_error_ledger_entry(entry: &str) -> String {
     let clipped: String = entry.chars().take(ERROR_LEDGER_ENTRY_MAX_CHARS).collect();
     if entry.chars().count() > ERROR_LEDGER_ENTRY_MAX_CHARS {
@@ -782,9 +967,161 @@ mod tests {
         assert!(!app.should_quit);
         assert!(app.selected_agents.is_empty());
         assert_eq!(app.selected_mode, crate::execution::ExecutionMode::Solo);
-        assert_eq!(app.iterations, 1);
-        assert_eq!(app.iterations_buf, "1");
-        assert!(!app.is_running);
+        assert_eq!(app.prompt.iterations, 1);
+        assert_eq!(app.prompt.iterations_buf, "1");
+        assert!(!app.running.is_running);
+    }
+
+    #[test]
+    fn reset_to_home_preserves_existing_semantics() {
+        let mut app = App::new(base_config());
+        app.selected_agents = vec!["Claude".into()];
+        app.prompt.prompt_text = "prompt".into();
+        app.prompt.prompt_cursor = 4;
+        app.prompt.session_name = "session".into();
+        app.prompt.iterations = 3;
+        app.prompt.iterations_buf = "3".into();
+        app.prompt.runs = 4;
+        app.prompt.runs_buf = "4".into();
+        app.prompt.concurrency = 2;
+        app.prompt.concurrency_buf = "2".into();
+        app.prompt.resume_previous = true;
+        app.prompt.forward_prompt = true;
+        app.running.is_running = false;
+        app.running.run_error = Some("keep".into());
+        app.running.progress_rx = Some(mpsc::unbounded_channel().1);
+        app.running.batch_progress_rx = Some(mpsc::unbounded_channel().1);
+        app.running.run_dir = Some(PathBuf::from("run"));
+        app.running.cancel_flag = Arc::new(AtomicBool::new(true));
+        app.running.consolidation_active = true;
+        app.running.consolidation_phase = ConsolidationPhase::Prompt;
+        app.running.consolidation_target = ConsolidationTarget::AcrossRuns;
+        app.running.consolidation_provider_cursor = 2;
+        app.running.consolidation_prompt = "extra".into();
+        app.running.consolidation_running = true;
+        app.running.consolidation_rx = Some(mpsc::unbounded_channel().1);
+        app.running.diagnostic_running = true;
+        app.running.diagnostic_rx = Some(mpsc::unbounded_channel().1);
+        app.running.batch_stage1_done = true;
+        app.running.multi_run_total = 3;
+        app.running.multi_run_concurrency = 2;
+        app.running.multi_run_cursor = 1;
+        app.running.multi_run_states = vec![RunState::new(1, &["a".into()])];
+        app.running.multi_run_step_labels = vec!["a".into()];
+        app.results.result_files = vec![PathBuf::from("a.md")];
+        app.results.result_preview = "preview".into();
+        app.results.batch_result_runs = vec![BatchRunGroup {
+            run_id: 1,
+            files: vec![PathBuf::from("child.md")],
+        }];
+        app.results.batch_result_root_files = vec![PathBuf::from("root.md")];
+        app.results.batch_result_expanded.insert(1);
+        app.pipeline.pipeline_def.initial_prompt = "pipe".into();
+        app.pipeline.pipeline_next_id = 5;
+        app.pipeline.pipeline_block_cursor = Some(2);
+        app.pipeline.pipeline_focus = PipelineFocus::Builder;
+        app.pipeline.pipeline_canvas_offset = (4, 7);
+        app.pipeline.pipeline_prompt_cursor = 9;
+        app.pipeline.pipeline_session_name = "pipeline".into();
+        app.pipeline.pipeline_iterations_buf = "5".into();
+        app.pipeline.pipeline_runs = 6;
+        app.pipeline.pipeline_runs_buf = "6".into();
+        app.pipeline.pipeline_concurrency = 4;
+        app.pipeline.pipeline_concurrency_buf = "4".into();
+        app.pipeline.pipeline_connecting_from = Some(3);
+        app.pipeline.pipeline_removing_conn = true;
+        app.pipeline.pipeline_conn_cursor = 2;
+        app.pipeline.pipeline_show_edit = true;
+        app.pipeline.pipeline_edit_field = PipelineEditField::Prompt;
+        app.pipeline.pipeline_edit_name_buf = "name".into();
+        app.pipeline.pipeline_edit_name_cursor = 2;
+        app.pipeline.pipeline_edit_agent_idx = 1;
+        app.pipeline.pipeline_edit_prompt_buf = "prompt".into();
+        app.pipeline.pipeline_edit_prompt_cursor = 3;
+        app.pipeline.pipeline_edit_session_buf = "sid".into();
+        app.pipeline.pipeline_edit_session_cursor = 2;
+        app.pipeline.pipeline_file_dialog = Some(PipelineDialogMode::Save);
+        app.pipeline.pipeline_file_input = "file".into();
+        app.pipeline.pipeline_file_list = vec!["one".into()];
+        app.pipeline.pipeline_file_cursor = 1;
+        app.pipeline.pipeline_save_path = Some(PathBuf::from("pipeline.toml"));
+
+        app.reset_to_home();
+
+        assert_eq!(app.screen, Screen::Home);
+        assert!(app.selected_agents.is_empty());
+        assert_eq!(app.prompt.prompt_text, "");
+        assert_eq!(app.prompt.prompt_cursor, 0);
+        assert_eq!(app.prompt.session_name, "");
+        assert_eq!(app.prompt.iterations, 1);
+        assert_eq!(app.prompt.iterations_buf, "1");
+        assert_eq!(app.prompt.runs, 1);
+        assert_eq!(app.prompt.runs_buf, "1");
+        assert_eq!(app.prompt.concurrency, 0);
+        assert_eq!(app.prompt.concurrency_buf, "0");
+        assert!(!app.prompt.resume_previous);
+        assert!(!app.prompt.forward_prompt);
+        assert!(app.results.result_files.is_empty());
+        assert_eq!(app.results.result_preview, "");
+        assert!(app.results.batch_result_runs.is_empty());
+        assert!(app.results.batch_result_root_files.is_empty());
+        assert!(app.results.batch_result_expanded.is_empty());
+        assert!(!app.running.consolidation_active);
+        assert_eq!(app.running.consolidation_phase, ConsolidationPhase::Confirm);
+        assert_eq!(
+            app.running.consolidation_target,
+            ConsolidationTarget::Single
+        );
+        assert_eq!(app.running.consolidation_provider_cursor, 0);
+        assert_eq!(app.running.consolidation_prompt, "");
+        assert!(!app.running.consolidation_running);
+        assert!(app.running.consolidation_rx.is_none());
+        assert!(!app.running.diagnostic_running);
+        assert!(app.running.diagnostic_rx.is_none());
+        assert!(!app.running.batch_stage1_done);
+        assert!(app.running.batch_progress_rx.is_none());
+        assert_eq!(app.running.multi_run_total, 0);
+        assert_eq!(app.running.multi_run_concurrency, 0);
+        assert_eq!(app.running.multi_run_cursor, 0);
+        assert!(app.running.multi_run_states.is_empty());
+        assert!(app.running.multi_run_step_labels.is_empty());
+        assert!(app.running.progress_rx.is_none());
+        assert!(app.running.run_dir.is_none());
+        assert!(!app
+            .running
+            .cancel_flag
+            .load(std::sync::atomic::Ordering::Relaxed));
+        assert_eq!(app.running.run_error.as_deref(), Some("keep"));
+        assert!(!app.running.is_running);
+        assert_eq!(app.pipeline.pipeline_next_id, 1);
+        assert!(app.pipeline.pipeline_def.blocks.is_empty());
+        assert_eq!(app.pipeline.pipeline_def.initial_prompt, "");
+        assert_eq!(app.pipeline.pipeline_focus, PipelineFocus::InitialPrompt);
+        assert_eq!(app.pipeline.pipeline_canvas_offset, (0, 0));
+        assert_eq!(app.pipeline.pipeline_prompt_cursor, 0);
+        assert_eq!(app.pipeline.pipeline_session_name, "");
+        assert_eq!(app.pipeline.pipeline_iterations_buf, "1");
+        assert_eq!(app.pipeline.pipeline_runs, 1);
+        assert_eq!(app.pipeline.pipeline_runs_buf, "1");
+        assert_eq!(app.pipeline.pipeline_concurrency, 0);
+        assert_eq!(app.pipeline.pipeline_concurrency_buf, "0");
+        assert!(app.pipeline.pipeline_connecting_from.is_none());
+        assert!(!app.pipeline.pipeline_removing_conn);
+        assert_eq!(app.pipeline.pipeline_conn_cursor, 0);
+        assert!(!app.pipeline.pipeline_show_edit);
+        assert_eq!(app.pipeline.pipeline_edit_field, PipelineEditField::Name);
+        assert_eq!(app.pipeline.pipeline_edit_name_buf, "");
+        assert_eq!(app.pipeline.pipeline_edit_name_cursor, 0);
+        assert_eq!(app.pipeline.pipeline_edit_agent_idx, 0);
+        assert_eq!(app.pipeline.pipeline_edit_prompt_buf, "");
+        assert_eq!(app.pipeline.pipeline_edit_prompt_cursor, 0);
+        assert_eq!(app.pipeline.pipeline_edit_session_buf, "");
+        assert_eq!(app.pipeline.pipeline_edit_session_cursor, 0);
+        assert!(app.pipeline.pipeline_file_dialog.is_none());
+        assert_eq!(app.pipeline.pipeline_file_input, "");
+        assert!(app.pipeline.pipeline_file_list.is_empty());
+        assert_eq!(app.pipeline.pipeline_file_cursor, 0);
+        assert!(app.pipeline.pipeline_save_path.is_none());
     }
 
     #[test]
@@ -799,9 +1136,9 @@ mod tests {
             });
         }
 
-        assert_eq!(app.activity_log.len(), ACTIVITY_LOG_LIMIT);
+        assert_eq!(app.activity_log().len(), ACTIVITY_LOG_LIMIT);
         assert_eq!(
-            app.recent_activity_logs.back(),
+            app.recent_activity_logs().back(),
             Some(&(
                 "Claude".to_string(),
                 format!(
@@ -853,10 +1190,10 @@ mod tests {
             });
         }
 
-        assert_eq!(app.error_ledger.len(), ERROR_LEDGER_LIMIT);
-        assert!(app.error_ledger[0].contains("iter 5"));
+        assert_eq!(app.error_ledger().len(), ERROR_LEDGER_LIMIT);
+        assert!(app.error_ledger()[0].contains("iter 5"));
         assert!(app
-            .error_ledger
+            .error_ledger()
             .back()
             .unwrap()
             .ends_with("... [truncated]"));

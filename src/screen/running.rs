@@ -10,9 +10,9 @@ use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn draw(f: &mut Frame, app: &App) {
-    if app.multi_run_total > 1 {
+    if app.running.multi_run_total > 1 {
         draw_multi_run(f, app);
-        if app.consolidation_active {
+        if app.running.consolidation_active {
             draw_consolidation_modal(f, app);
         }
         return;
@@ -31,6 +31,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     // Title with current status and output dir
     let status_text = current_status(app);
     let out_dir = app
+        .running
         .run_dir
         .as_ref()
         .map(|p| p.display().to_string())
@@ -130,18 +131,18 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
 
     // Help bar
-    let help_text = if app.diagnostic_running {
+    let help_text = if app.running.diagnostic_running {
         "Analyzing reports for errors..."
-    } else if app.consolidation_running {
+    } else if app.running.consolidation_running {
         "Consolidating reports..."
-    } else if app.is_running {
+    } else if app.running.is_running {
         "Esc: cancel run"
-    } else if app.consolidation_active {
-        match app.consolidation_phase {
+    } else if app.running.consolidation_active {
+        match app.running.consolidation_phase {
             ConsolidationPhase::Confirm => "Consolidate final outputs? y/n",
             ConsolidationPhase::Provider => "j/k: choose provider  Enter: next  Esc: back",
             ConsolidationPhase::Prompt => {
-                if app.consolidation_running {
+                if app.running.consolidation_running {
                     "Consolidating..."
                 } else {
                     "Type extra prompt  Enter: run  Esc: back"
@@ -156,7 +157,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     let help = Paragraph::new(help_text).block(Block::default().borders(Borders::TOP));
     f.render_widget(help, chunks[3]);
 
-    if app.consolidation_active {
+    if app.running.consolidation_active {
         draw_consolidation_modal(f, app);
     }
 }
@@ -174,6 +175,7 @@ fn draw_multi_run(f: &mut Frame, app: &App) {
         .split(f.area());
 
     let out_dir = app
+        .running
         .run_dir
         .as_ref()
         .map(|p| p.display().to_string())
@@ -182,7 +184,7 @@ fn draw_multi_run(f: &mut Frame, app: &App) {
         Line::from(Span::styled(
             format!(
                 "Running — {} mode ({} runs, concurrency {})",
-                app.selected_mode, app.multi_run_total, app.multi_run_concurrency
+                app.selected_mode, app.running.multi_run_total, app.running.multi_run_concurrency
             ),
             Style::default()
                 .fg(Color::Cyan)
@@ -197,6 +199,7 @@ fn draw_multi_run(f: &mut Frame, app: &App) {
     f.render_widget(title, chunks[0]);
 
     let completed = app
+        .running
         .multi_run_states
         .iter()
         .filter(|state| {
@@ -206,7 +209,7 @@ fn draw_multi_run(f: &mut Frame, app: &App) {
             )
         })
         .count();
-    let total = app.multi_run_states.len();
+    let total = app.running.multi_run_states.len();
     let ratio = if total > 0 {
         completed as f64 / total as f64
     } else {
@@ -220,13 +223,14 @@ fn draw_multi_run(f: &mut Frame, app: &App) {
     f.render_widget(gauge, chunks[1]);
 
     let items = app
+        .running
         .multi_run_states
         .iter()
         .enumerate()
         .map(|(idx, state)| {
             let mut spans = vec![Span::styled(
                 format!("Run {:>2}  ", state.run_id),
-                if idx == app.multi_run_cursor {
+                if idx == app.running.multi_run_cursor {
                     Style::default()
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD)
@@ -258,14 +262,20 @@ fn draw_multi_run(f: &mut Frame, app: &App) {
             .border_style(Style::default().fg(Color::Cyan)),
     );
     let mut list_state = ListState::default();
-    if !app.multi_run_states.is_empty() {
+    if !app.running.multi_run_states.is_empty() {
         list_state.select(Some(
-            app.multi_run_cursor.min(app.multi_run_states.len() - 1),
+            app.running
+                .multi_run_cursor
+                .min(app.running.multi_run_states.len() - 1),
         ));
     }
     f.render_stateful_widget(list, chunks[2], &mut list_state);
 
-    let detail_lines = if let Some(state) = app.multi_run_states.get(app.multi_run_cursor) {
+    let detail_lines = if let Some(state) = app
+        .running
+        .multi_run_states
+        .get(app.running.multi_run_cursor)
+    {
         if state.recent_logs.is_empty() {
             vec![Line::from("No logs yet.")]
         } else {
@@ -288,13 +298,13 @@ fn draw_multi_run(f: &mut Frame, app: &App) {
         );
     f.render_widget(detail, chunks[3]);
 
-    let help_text = if app.diagnostic_running {
+    let help_text = if app.running.diagnostic_running {
         "Analyzing reports for errors..."
-    } else if app.consolidation_running {
+    } else if app.running.consolidation_running {
         "Consolidating reports..."
-    } else if app.is_running {
+    } else if app.running.is_running {
         "j/k: select run  Esc: cancel batch"
-    } else if app.consolidation_active {
+    } else if app.running.consolidation_active {
         "Enter consolidation choice"
     } else {
         "j/k: select run  Enter: view results  q: quit"
@@ -313,16 +323,16 @@ fn draw_consolidation_modal(f: &mut Frame, app: &App) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let content = if app.consolidation_running {
+    let content = if app.running.consolidation_running {
         vec![
             Line::from("Running consolidation in a fresh provider session..."),
             Line::from(""),
             Line::from("Please wait."),
         ]
     } else {
-        match app.consolidation_phase {
+        match app.running.consolidation_phase {
             ConsolidationPhase::Confirm => vec![
-                Line::from(if app.multi_run_total > 1 {
+                Line::from(if app.running.multi_run_total > 1 {
                     "Consolidate each successful run individually?"
                 } else {
                     "Consolidate last-iteration outputs now?"
@@ -338,7 +348,7 @@ fn draw_consolidation_modal(f: &mut Frame, app: &App) {
             ConsolidationPhase::Provider => {
                 let mut lines = vec![Line::from("Select consolidation agent:"), Line::from("")];
                 for (i, agent) in app.config.agents.iter().enumerate() {
-                    let style = if i == app.consolidation_provider_cursor {
+                    let style = if i == app.running.consolidation_provider_cursor {
                         Style::default()
                             .fg(Color::Cyan)
                             .add_modifier(Modifier::BOLD)
@@ -356,7 +366,7 @@ fn draw_consolidation_modal(f: &mut Frame, app: &App) {
                 Line::from("Additional prompt to append (optional):"),
                 Line::from(""),
                 Line::from(Span::styled(
-                    format!("{}_ ", app.consolidation_prompt),
+                    format!("{}_ ", app.running.consolidation_prompt),
                     Style::default().fg(Color::Yellow),
                 )),
                 Line::from(""),
@@ -376,7 +386,7 @@ fn draw_consolidation_modal(f: &mut Frame, app: &App) {
                 Line::from("Additional cross-run prompt to append (optional):"),
                 Line::from(""),
                 Line::from(Span::styled(
-                    format!("{}_ ", app.consolidation_prompt),
+                    format!("{}_ ", app.running.consolidation_prompt),
                     Style::default().fg(Color::Yellow),
                 )),
                 Line::from(""),
@@ -424,12 +434,13 @@ fn build_event_items(app: &App) -> Vec<ListItem<'_>> {
 
     // Show prompt snippet first
     let prompt_preview: String = app
+        .prompt
         .prompt_text
         .chars()
         .take(120)
         .collect::<String>()
         .replace('\n', " ");
-    let prompt_suffix = if app.prompt_text.chars().count() > 120 {
+    let prompt_suffix = if app.prompt.prompt_text.chars().count() > 120 {
         "..."
     } else {
         ""
@@ -652,7 +663,12 @@ fn build_event_items(app: &App) -> Vec<ListItem<'_>> {
     }
 
     // If run finished due to cancellation, mark still-thinking items as cancelled
-    if !app.is_running && app.cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
+    if !app.running.is_running
+        && app
+            .running
+            .cancel_flag
+            .load(std::sync::atomic::Ordering::Relaxed)
+    {
         for row in &mut rows {
             match row {
                 Row::Agent { status, .. } | Row::Block { status, .. } => {
@@ -791,10 +807,10 @@ fn compute_total_steps(app: &App) -> usize {
     let agents = app.selected_agents.len();
     match app.selected_mode {
         crate::execution::ExecutionMode::Solo => agents,
-        crate::execution::ExecutionMode::Relay => agents * app.iterations as usize,
-        crate::execution::ExecutionMode::Swarm => agents * app.iterations as usize,
+        crate::execution::ExecutionMode::Relay => agents * app.prompt.iterations as usize,
+        crate::execution::ExecutionMode::Swarm => agents * app.prompt.iterations as usize,
         crate::execution::ExecutionMode::Pipeline => {
-            app.pipeline_def.blocks.len() * app.pipeline_def.iterations as usize
+            app.pipeline.pipeline_def.blocks.len() * app.pipeline.pipeline_def.iterations as usize
         }
     }
 }
@@ -804,14 +820,18 @@ fn count_completed_steps(app: &App) -> usize {
 }
 
 fn current_status(app: &App) -> String {
-    if app.diagnostic_running {
+    if app.running.diagnostic_running {
         return "Analyzing reports for errors...".into();
     }
-    if app.consolidation_running {
+    if app.running.consolidation_running {
         return "Consolidating reports...".into();
     }
-    if !app.is_running {
-        if app.cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
+    if !app.running.is_running {
+        if app
+            .running
+            .cancel_flag
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
             return "Cancelled".into();
         }
         return "Done".into();
@@ -892,7 +912,7 @@ mod tests {
         let mut a = app();
         a.selected_mode = ExecutionMode::Solo;
         a.selected_agents = vec!["Claude".into(), "OpenAI".into()];
-        a.iterations = 9;
+        a.prompt.iterations = 9;
         assert_eq!(compute_total_steps(&a), 2);
     }
 
@@ -901,7 +921,7 @@ mod tests {
         let mut a = app();
         a.selected_mode = ExecutionMode::Relay;
         a.selected_agents = vec!["Claude".into(), "OpenAI".into()];
-        a.iterations = 3;
+        a.prompt.iterations = 3;
         assert_eq!(compute_total_steps(&a), 6);
     }
 
@@ -910,7 +930,7 @@ mod tests {
         let mut a = app();
         a.selected_mode = ExecutionMode::Swarm;
         a.selected_agents = vec!["Claude".into()];
-        a.iterations = 4;
+        a.prompt.iterations = 4;
         assert_eq!(compute_total_steps(&a), 4);
     }
 
@@ -1003,25 +1023,25 @@ mod tests {
     #[test]
     fn current_status_reports_done_when_not_running() {
         let mut a = app();
-        a.is_running = false;
+        a.running.is_running = false;
         assert_eq!(current_status(&a), "Done");
     }
 
     #[test]
     fn current_status_reports_diagnostic_and_consolidation() {
         let mut a = app();
-        a.is_running = true;
-        a.diagnostic_running = true;
+        a.running.is_running = true;
+        a.running.diagnostic_running = true;
         assert_eq!(current_status(&a), "Analyzing reports for errors...");
-        a.diagnostic_running = false;
-        a.consolidation_running = true;
+        a.running.diagnostic_running = false;
+        a.running.consolidation_running = true;
         assert_eq!(current_status(&a), "Consolidating reports...");
     }
 
     #[test]
     fn current_status_reports_waiting_when_no_active_agents() {
         let mut a = app();
-        a.is_running = true;
+        a.running.is_running = true;
         a.selected_agents = vec!["Claude".into()];
         push_events(
             &mut a,
@@ -1037,7 +1057,7 @@ mod tests {
     #[test]
     fn current_status_reports_active_agent_names() {
         let mut a = app();
-        a.is_running = true;
+        a.running.is_running = true;
         a.selected_agents = vec!["Claude".into(), "OpenAI".into()];
         push_events(
             &mut a,
@@ -1063,7 +1083,7 @@ mod tests {
     #[test]
     fn current_status_pipeline_shows_active_blocks() {
         let mut a = app();
-        a.is_running = true;
+        a.running.is_running = true;
         a.selected_mode = ExecutionMode::Pipeline;
         push_events(
             &mut a,
@@ -1091,7 +1111,7 @@ mod tests {
     #[test]
     fn current_status_pipeline_excludes_finished_blocks() {
         let mut a = app();
-        a.is_running = true;
+        a.running.is_running = true;
         a.selected_mode = ExecutionMode::Pipeline;
         push_events(
             &mut a,
@@ -1124,7 +1144,7 @@ mod tests {
     #[test]
     fn current_status_pipeline_waiting_when_no_active_blocks() {
         let mut a = app();
-        a.is_running = true;
+        a.running.is_running = true;
         a.selected_mode = ExecutionMode::Pipeline;
         push_events(
             &mut a,
@@ -1141,8 +1161,9 @@ mod tests {
     #[test]
     fn current_status_shows_cancelled_when_flag_set() {
         let mut a = app();
-        a.is_running = false;
-        a.cancel_flag
+        a.running.is_running = false;
+        a.running
+            .cancel_flag
             .store(true, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(current_status(&a), "Cancelled");
     }
@@ -1150,8 +1171,9 @@ mod tests {
     #[test]
     fn build_event_items_marks_thinking_as_cancelled() {
         let mut a = app();
-        a.is_running = false;
-        a.cancel_flag
+        a.running.is_running = false;
+        a.running
+            .cancel_flag
             .store(true, std::sync::atomic::Ordering::Relaxed);
         push_events(
             &mut a,
@@ -1189,7 +1211,7 @@ mod tests {
     #[test]
     fn build_event_items_keeps_thinking_when_not_cancelled() {
         let mut a = app();
-        a.is_running = true;
+        a.running.is_running = true;
         push_events(
             &mut a,
             vec![ProgressEvent::AgentStarted {
@@ -1209,8 +1231,9 @@ mod tests {
     #[test]
     fn build_event_items_marks_thinking_blocks_as_cancelled() {
         let mut a = app();
-        a.is_running = false;
-        a.cancel_flag
+        a.running.is_running = false;
+        a.running
+            .cancel_flag
             .store(true, std::sync::atomic::Ordering::Relaxed);
         push_events(
             &mut a,

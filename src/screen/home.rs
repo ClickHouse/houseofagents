@@ -66,7 +66,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
 
     // Edit popup overlay
-    if app.show_edit_popup {
+    if app.edit_popup.show_edit_popup {
         draw_edit_popup(f, app);
     }
 }
@@ -287,9 +287,9 @@ fn draw_edit_popup(f: &mut Frame, app: &App) {
     let area = centered_rect(70, 60, f.area());
     let mut selected_line_start = 0usize;
     let diag_agent = app.config.diagnostic_provider.as_deref();
-    let selected_cursor = match app.edit_popup_section {
-        EditPopupSection::Providers => app.edit_popup_cursor,
-        EditPopupSection::Timeouts => app.edit_popup_timeout_cursor,
+    let selected_cursor = match app.edit_popup.edit_popup_section {
+        EditPopupSection::Providers => app.edit_popup.edit_popup_cursor,
+        EditPopupSection::Timeouts => app.edit_popup.edit_popup_timeout_cursor,
     };
 
     let mut header_lines = vec![
@@ -301,7 +301,7 @@ fn draw_edit_popup(f: &mut Frame, app: &App) {
         Line::from(vec![
             Span::raw("Section: "),
             Span::styled(
-                match app.edit_popup_section {
+                match app.edit_popup.edit_popup_section {
                     EditPopupSection::Providers => "Agents",
                     EditPopupSection::Timeouts => "Timeouts",
                 },
@@ -331,7 +331,7 @@ fn draw_edit_popup(f: &mut Frame, app: &App) {
             Span::styled("  [d]", Style::default().fg(Color::DarkGray)),
         ]),
         Line::from(""),
-        Line::from(if app.config_save_in_progress {
+        Line::from(if app.edit_popup.config_save_in_progress {
             Span::styled(
                 "Saving config to disk...",
                 Style::default().fg(Color::Yellow),
@@ -342,11 +342,16 @@ fn draw_edit_popup(f: &mut Frame, app: &App) {
         Line::from(""),
     ];
 
-    if app.edit_popup_editing && matches!(app.edit_popup_field, crate::app::EditField::OutputDir) {
+    if app.edit_popup.edit_popup_editing
+        && matches!(
+            app.edit_popup.edit_popup_field,
+            crate::app::EditField::OutputDir
+        )
+    {
         header_lines.push(Line::from(Span::styled(
             format!(
                 "New output dir: {}_ (Enter: save, Esc: cancel)",
-                app.edit_buffer
+                app.edit_popup.edit_buffer
             ),
             Style::default().fg(Color::Yellow),
         )));
@@ -354,7 +359,7 @@ fn draw_edit_popup(f: &mut Frame, app: &App) {
     }
 
     let mut body_lines: Vec<Line> = Vec::new();
-    match app.edit_popup_section {
+    match app.edit_popup.edit_popup_section {
         EditPopupSection::Providers => {
             let agents = app.available_agents();
             for (i, (agent_cfg, _available)) in agents.iter().enumerate() {
@@ -429,7 +434,7 @@ fn draw_edit_popup(f: &mut Frame, app: &App) {
                 }
                 body_lines.push(Line::from(name_spans));
                 let cli_print_mode = config.map(|c| c.cli_print_mode).unwrap_or(true);
-                if is_selected && !app.edit_popup_editing {
+                if is_selected && !app.edit_popup.edit_popup_editing {
                     body_lines.push(Line::from(vec![
                         Span::raw("  Mode:     "),
                         Span::styled(mode_text, mode_style),
@@ -516,10 +521,13 @@ fn draw_edit_popup(f: &mut Frame, app: &App) {
                 }
 
                 if is_selected
-                    && app.edit_popup_editing
-                    && !matches!(app.edit_popup_field, crate::app::EditField::OutputDir)
+                    && app.edit_popup.edit_popup_editing
+                    && !matches!(
+                        app.edit_popup.edit_popup_field,
+                        crate::app::EditField::OutputDir
+                    )
                 {
-                    let field_name = match app.edit_popup_field {
+                    let field_name = match app.edit_popup.edit_popup_field {
                         crate::app::EditField::ApiKey => "key",
                         crate::app::EditField::Model => "model",
                         crate::app::EditField::ExtraCliArgs => "extra cli args",
@@ -531,7 +539,7 @@ fn draw_edit_popup(f: &mut Frame, app: &App) {
                     body_lines.push(Line::from(Span::styled(
                         format!(
                             "  New {}: {}_ (Enter: save, Esc: cancel)",
-                            field_name, app.edit_buffer
+                            field_name, app.edit_popup.edit_buffer
                         ),
                         Style::default().fg(Color::Yellow),
                     )));
@@ -605,14 +613,17 @@ fn draw_edit_popup(f: &mut Frame, app: &App) {
                 ]));
 
                 if is_selected
-                    && app.edit_popup_editing
-                    && matches!(app.edit_popup_field, crate::app::EditField::TimeoutSeconds)
+                    && app.edit_popup.edit_popup_editing
+                    && matches!(
+                        app.edit_popup.edit_popup_field,
+                        crate::app::EditField::TimeoutSeconds
+                    )
                 {
                     selected_line_start = body_lines.len();
                     body_lines.push(Line::from(Span::styled(
                         format!(
                             "   New timeout: {}_ (seconds, Enter: save, Esc: cancel)",
-                            app.edit_buffer
+                            app.edit_popup.edit_buffer
                         ),
                         Style::default().fg(Color::Yellow),
                     )));
@@ -669,7 +680,7 @@ fn draw_edit_popup(f: &mut Frame, app: &App) {
     }
 
     // Model picker overlay
-    if app.model_picker_active {
+    if app.edit_popup.model_picker_active {
         draw_model_picker(f, app);
     }
 }
@@ -680,11 +691,11 @@ fn draw_model_picker(f: &mut Frame, app: &App) {
     let provider_name: &str = app
         .config
         .agents
-        .get(app.edit_popup_cursor)
+        .get(app.edit_popup.edit_popup_cursor)
         .map(|a| a.name.as_str())
         .unwrap_or("?");
 
-    if app.model_picker_loading {
+    if app.edit_popup.model_picker_loading {
         let block = Block::default()
             .title(format!(" {} — Loading models... ", provider_name))
             .borders(Borders::ALL)
@@ -697,12 +708,12 @@ fn draw_model_picker(f: &mut Frame, app: &App) {
     }
 
     // Search bar
-    let filter_display = if app.model_picker_filter.is_empty() {
+    let filter_display = if app.edit_popup.model_picker_filter.is_empty() {
         "Type to filter...".to_string()
     } else {
-        app.model_picker_filter.clone()
+        app.edit_popup.model_picker_filter.clone()
     };
-    let filter_style = if app.model_picker_filter.is_empty() {
+    let filter_style = if app.edit_popup.model_picker_filter.is_empty() {
         Style::default().fg(Color::DarkGray)
     } else {
         Style::default().fg(Color::Yellow)
@@ -711,9 +722,10 @@ fn draw_model_picker(f: &mut Frame, app: &App) {
     let inner_height = area.height.saturating_sub(2) as usize;
     let reserved_rows = 4usize; // filter, spacer, spacer, help
     let visible_model_rows = inner_height.saturating_sub(reserved_rows).max(1);
-    let total_models = app.model_picker_list.len();
+    let total_models = app.edit_popup.model_picker_list.len();
     let max_start = total_models.saturating_sub(visible_model_rows);
     let start = app
+        .edit_popup
         .model_picker_cursor
         .saturating_sub(visible_model_rows / 2)
         .min(max_start);
@@ -725,19 +737,19 @@ fn draw_model_picker(f: &mut Frame, app: &App) {
     ])))
     .chain(std::iter::once(ListItem::new("")))
     .chain(
-        app.model_picker_list[start..end]
+        app.edit_popup.model_picker_list[start..end]
             .iter()
             .enumerate()
             .map(|(offset, model)| {
                 let i = start + offset;
-                let style = if i == app.model_picker_cursor {
+                let style = if i == app.edit_popup.model_picker_cursor {
                     Style::default()
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
                 };
-                let marker = if i == app.model_picker_cursor {
+                let marker = if i == app.edit_popup.model_picker_cursor {
                     "▸ "
                 } else {
                     "  "
@@ -747,8 +759,8 @@ fn draw_model_picker(f: &mut Frame, app: &App) {
     )
     .collect();
 
-    let shown = app.model_picker_list.len();
-    let total = app.model_picker_all_models.len();
+    let shown = app.edit_popup.model_picker_list.len();
+    let total = app.edit_popup.model_picker_all_models.len();
     let count_label = if shown == total {
         format!("{total}")
     } else {

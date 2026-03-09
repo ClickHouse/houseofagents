@@ -87,10 +87,10 @@ pub fn draw(f: &mut Frame, app: &App) {
     draw_help_bar(f, app, chunks[3]);
 
     // Overlays
-    if app.pipeline_show_edit {
+    if app.pipeline.pipeline_show_edit {
         draw_edit_popup(f, app, area);
     }
-    if app.pipeline_file_dialog.is_some() {
+    if app.pipeline.pipeline_file_dialog.is_some() {
         draw_file_dialog(f, app, area);
     }
     if let Some(ref msg) = app.error_modal {
@@ -118,7 +118,7 @@ fn draw_prompt_area(f: &mut Frame, app: &App, area: Rect) {
         .split(area);
 
     // Initial prompt textarea
-    let prompt_focus = app.pipeline_focus == PipelineFocus::InitialPrompt;
+    let prompt_focus = app.pipeline.pipeline_focus == PipelineFocus::InitialPrompt;
     let prompt_style = if prompt_focus {
         Style::default().fg(Color::Cyan)
     } else {
@@ -130,13 +130,13 @@ fn draw_prompt_area(f: &mut Frame, app: &App, area: Rect) {
         .border_style(prompt_style);
     let inner = prompt_block.inner(cols[0]);
 
-    let display_text = if app.pipeline_def.initial_prompt.is_empty() && !prompt_focus {
+    let display_text = if app.pipeline.pipeline_def.initial_prompt.is_empty() && !prompt_focus {
         "Enter initial prompt..."
     } else {
-        app.pipeline_def.initial_prompt.as_str()
+        app.pipeline.pipeline_def.initial_prompt.as_str()
     };
 
-    let text_style = if app.pipeline_def.initial_prompt.is_empty() && !prompt_focus {
+    let text_style = if app.pipeline.pipeline_def.initial_prompt.is_empty() && !prompt_focus {
         Style::default().fg(Color::DarkGray)
     } else {
         Style::default()
@@ -144,8 +144,8 @@ fn draw_prompt_area(f: &mut Frame, app: &App, area: Rect) {
 
     let (scroll_y, cursor_col, cursor_row) = if prompt_focus {
         prompt_cursor_layout(
-            app.pipeline_def.initial_prompt.as_str(),
-            app.pipeline_prompt_cursor,
+            app.pipeline.pipeline_def.initial_prompt.as_str(),
+            app.pipeline.pipeline_prompt_cursor,
             inner.width as usize,
             inner.height as usize,
         )
@@ -160,8 +160,9 @@ fn draw_prompt_area(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(prompt_block, cols[0]);
     f.render_widget(prompt_p, inner);
 
-    let has_overlay =
-        app.pipeline_show_edit || app.pipeline_file_dialog.is_some() || app.error_modal.is_some();
+    let has_overlay = app.pipeline.pipeline_show_edit
+        || app.pipeline.pipeline_file_dialog.is_some()
+        || app.error_modal.is_some();
     if prompt_focus && !has_overlay && inner.width > 0 && inner.height > 0 {
         let visible_row = cursor_row.saturating_sub(scroll_y as usize);
         let x = inner.x + (cursor_col.min(inner.width.saturating_sub(1) as usize) as u16);
@@ -181,24 +182,24 @@ fn draw_prompt_area(f: &mut Frame, app: &App, area: Rect) {
         .split(cols[1]);
 
     // Session name field
-    let name_focus = app.pipeline_focus == PipelineFocus::SessionName;
+    let name_focus = app.pipeline.pipeline_focus == PipelineFocus::SessionName;
     let name_border = if name_focus {
         Style::default().fg(Color::Cyan)
     } else {
         Style::default().fg(Color::DarkGray)
     };
-    let name_display = if app.pipeline_session_name.is_empty() {
+    let name_display = if app.pipeline.pipeline_session_name.is_empty() {
         if name_focus {
             "_".to_string()
         } else {
             "(optional)".to_string()
         }
     } else if name_focus {
-        format!("{}_", app.pipeline_session_name)
+        format!("{}_", app.pipeline.pipeline_session_name)
     } else {
-        app.pipeline_session_name.clone()
+        app.pipeline.pipeline_session_name.clone()
     };
-    let name_style = if app.pipeline_session_name.is_empty() && !name_focus {
+    let name_style = if app.pipeline.pipeline_session_name.is_empty() && !name_focus {
         Style::default().fg(Color::DarkGray)
     } else {
         Style::default()
@@ -212,16 +213,16 @@ fn draw_prompt_area(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(session_name, right_chunks[0]);
 
     // Iterations field
-    let iter_focus = app.pipeline_focus == PipelineFocus::Iterations;
+    let iter_focus = app.pipeline.pipeline_focus == PipelineFocus::Iterations;
     let iter_border = if iter_focus {
         Style::default().fg(Color::Cyan)
     } else {
         Style::default().fg(Color::DarkGray)
     };
     let iter_display = if iter_focus {
-        format!("{}_", app.pipeline_iterations_buf)
+        format!("{}_", app.pipeline.pipeline_iterations_buf)
     } else {
-        app.pipeline_iterations_buf.clone()
+        app.pipeline.pipeline_iterations_buf.clone()
     };
     let iter_widget = Paragraph::new(iter_display).block(
         Block::default()
@@ -231,16 +232,16 @@ fn draw_prompt_area(f: &mut Frame, app: &App, area: Rect) {
     );
     f.render_widget(iter_widget, right_chunks[1]);
 
-    let runs_focus = app.pipeline_focus == PipelineFocus::Runs;
+    let runs_focus = app.pipeline.pipeline_focus == PipelineFocus::Runs;
     let runs_border = if runs_focus {
         Style::default().fg(Color::Cyan)
     } else {
         Style::default().fg(Color::DarkGray)
     };
     let runs_display = if runs_focus {
-        format!("{}_", app.pipeline_runs_buf)
+        format!("{}_", app.pipeline.pipeline_runs_buf)
     } else {
-        app.pipeline_runs.to_string()
+        app.pipeline.pipeline_runs.to_string()
     };
     let runs_widget = Paragraph::new(runs_display).block(
         Block::default()
@@ -250,18 +251,18 @@ fn draw_prompt_area(f: &mut Frame, app: &App, area: Rect) {
     );
     f.render_widget(runs_widget, right_chunks[2]);
 
-    let concurrency_focus = app.pipeline_focus == PipelineFocus::Concurrency;
+    let concurrency_focus = app.pipeline.pipeline_focus == PipelineFocus::Concurrency;
     let concurrency_border = if concurrency_focus {
         Style::default().fg(Color::Cyan)
     } else {
         Style::default().fg(Color::DarkGray)
     };
     let concurrency_display = if concurrency_focus {
-        format!("{}_", app.pipeline_concurrency_buf)
-    } else if app.pipeline_concurrency == 0 {
+        format!("{}_", app.pipeline.pipeline_concurrency_buf)
+    } else if app.pipeline.pipeline_concurrency == 0 {
         "0 (unlimited)".to_string()
     } else {
-        app.pipeline_concurrency.to_string()
+        app.pipeline.pipeline_concurrency.to_string()
     };
     let concurrency_widget = Paragraph::new(concurrency_display).block(
         Block::default()
@@ -273,7 +274,7 @@ fn draw_prompt_area(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_canvas(f: &mut Frame, app: &App, area: Rect) {
-    let builder_focus = app.pipeline_focus == PipelineFocus::Builder;
+    let builder_focus = app.pipeline.pipeline_focus == PipelineFocus::Builder;
     let canvas_style = if builder_focus {
         Style::default().fg(Color::Cyan)
     } else {
@@ -290,7 +291,7 @@ fn draw_canvas(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    if app.pipeline_def.blocks.is_empty() {
+    if app.pipeline.pipeline_def.blocks.is_empty() {
         let msg = Paragraph::new("Press 'a' to add a block")
             .style(Style::default().fg(Color::DarkGray))
             .alignment(ratatui::layout::Alignment::Center);
@@ -300,11 +301,11 @@ fn draw_canvas(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    let ox = app.pipeline_canvas_offset.0;
-    let oy = app.pipeline_canvas_offset.1;
+    let ox = app.pipeline.pipeline_canvas_offset.0;
+    let oy = app.pipeline.pipeline_canvas_offset.1;
 
     // Draw blocks first
-    for block in &app.pipeline_def.blocks {
+    for block in &app.pipeline.pipeline_def.blocks {
         let sx = block.position.0 as i16 * CELL_W as i16 - ox;
         let sy = block.position.1 as i16 * CELL_H as i16 - oy;
 
@@ -322,8 +323,8 @@ fn draw_canvas(f: &mut Frame, app: &App, area: Rect) {
         }
         let block_area = Rect::new(rx as u16, ry as u16, BLOCK_W, BLOCK_H);
 
-        let is_selected = app.pipeline_block_cursor == Some(block.id);
-        let is_connect_src = app.pipeline_connecting_from == Some(block.id);
+        let is_selected = app.pipeline.pipeline_block_cursor == Some(block.id);
+        let is_connect_src = app.pipeline.pipeline_connecting_from == Some(block.id);
 
         let border_type = if is_selected {
             BorderType::Double
@@ -389,19 +390,26 @@ fn draw_canvas(f: &mut Frame, app: &App, area: Rect) {
     }
 
     // ── Connection rendering (two-phase: route then paint) ──
-    let grid_occ = grid_occupancy(&app.pipeline_def.blocks);
-    let lanes = assign_lanes(&app.pipeline_def.connections, &app.pipeline_def.blocks);
-    let ports = assign_ports(&app.pipeline_def.connections, &app.pipeline_def.blocks);
+    let grid_occ = grid_occupancy(&app.pipeline.pipeline_def.blocks);
+    let lanes = assign_lanes(
+        &app.pipeline.pipeline_def.connections,
+        &app.pipeline.pipeline_def.blocks,
+    );
+    let ports = assign_ports(
+        &app.pipeline.pipeline_def.connections,
+        &app.pipeline.pipeline_def.blocks,
+    );
 
     // Resolve pipeline_conn_cursor (index into filtered subset) to global connection index
-    let highlighted_global_idx = if app.pipeline_removing_conn {
-        let sel = app.pipeline_block_cursor.unwrap_or(0);
-        app.pipeline_def
+    let highlighted_global_idx = if app.pipeline.pipeline_removing_conn {
+        let sel = app.pipeline.pipeline_block_cursor.unwrap_or(0);
+        app.pipeline
+            .pipeline_def
             .connections
             .iter()
             .enumerate()
             .filter(|(_, c)| c.from == sel || c.to == sel)
-            .nth(app.pipeline_conn_cursor)
+            .nth(app.pipeline.pipeline_conn_cursor)
             .map(|(i, _)| i)
     } else {
         None
@@ -409,14 +417,25 @@ fn draw_canvas(f: &mut Frame, app: &App, area: Rect) {
 
     let mut rendered_connections: Vec<(u8, ConnectionRaster)> = Vec::new();
 
-    for (ci, conn) in app.pipeline_def.connections.iter().enumerate() {
-        let fb = app.pipeline_def.blocks.iter().find(|b| b.id == conn.from);
-        let tb = app.pipeline_def.blocks.iter().find(|b| b.id == conn.to);
+    for (ci, conn) in app.pipeline.pipeline_def.connections.iter().enumerate() {
+        let fb = app
+            .pipeline
+            .pipeline_def
+            .blocks
+            .iter()
+            .find(|b| b.id == conn.from);
+        let tb = app
+            .pipeline
+            .pipeline_def
+            .blocks
+            .iter()
+            .find(|b| b.id == conn.to);
         let (Some(fb), Some(tb)) = (fb, tb) else {
             continue;
         };
 
-        let removing = app.pipeline_removing_conn && is_conn_for_selected(app, conn.from, conn.to);
+        let removing =
+            app.pipeline.pipeline_removing_conn && is_conn_for_selected(app, conn.from, conn.to);
         let highlighted = highlighted_global_idx == Some(ci);
         let color = if highlighted {
             Color::Red
@@ -465,7 +484,7 @@ fn draw_canvas(f: &mut Frame, app: &App, area: Rect) {
     // Paint each connection independently; do not merge glyphs across connections.
     for (_, conn_map) in rendered_connections {
         for (&(wx, wy), cell) in &conn_map {
-            if pixel_hits_block(wx, wy, &app.pipeline_def.blocks) {
+            if pixel_hits_block(wx, wy, &app.pipeline.pipeline_def.blocks) {
                 continue;
             }
             let ch = if cell.is_arrow {
@@ -485,12 +504,12 @@ fn draw_canvas(f: &mut Frame, app: &App, area: Rect) {
     }
 
     // Status line for connect/remove modes
-    if app.pipeline_connecting_from.is_some() {
+    if app.pipeline.pipeline_connecting_from.is_some() {
         let status = Paragraph::new("Select target block (Enter=connect, Esc=cancel)")
             .style(Style::default().fg(Color::Yellow));
         let sy = canvas_inner.y + canvas_inner.height.saturating_sub(1);
         f.render_widget(status, Rect::new(canvas_inner.x, sy, canvas_inner.width, 1));
-    } else if app.pipeline_removing_conn {
+    } else if app.pipeline.pipeline_removing_conn {
         let status = Paragraph::new("\u{2191}\u{2193} cycle connections, Enter=remove, Esc=cancel")
             .style(Style::default().fg(Color::Yellow));
         let sy = canvas_inner.y + canvas_inner.height.saturating_sub(1);
@@ -499,7 +518,7 @@ fn draw_canvas(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn is_conn_for_selected(app: &App, from: BlockId, to: BlockId) -> bool {
-    if let Some(sel) = app.pipeline_block_cursor {
+    if let Some(sel) = app.pipeline.pipeline_block_cursor {
         from == sel || to == sel
     } else {
         false
@@ -799,9 +818,9 @@ fn put_char(f: &mut Frame, canvas: Rect, x: i16, y: i16, ch: char, style: Style)
 }
 
 fn draw_help_bar(f: &mut Frame, app: &App, area: Rect) {
-    let help = if app.pipeline_connecting_from.is_some() {
+    let help = if app.pipeline.pipeline_connecting_from.is_some() {
         "Arrows: navigate | Enter: connect | Esc: cancel"
-    } else if app.pipeline_removing_conn {
+    } else if app.pipeline.pipeline_removing_conn {
         "j/k: cycle | Enter: remove | Esc: cancel"
     } else {
         "Arrows/hjkl: select | Shift+Arrows/HJKL: move block | Ctrl+Arrows: scroll | a: add | d: delete | e: edit | c: connect | x: disconnect | Ctrl+S: save | Ctrl+L: load | F5: run | ?: help | Esc: back"
@@ -843,7 +862,7 @@ fn draw_edit_popup(f: &mut Frame, app: &App, area: Rect) {
         .split(inner);
 
     // Name field
-    let name_focus = app.pipeline_edit_field == PipelineEditField::Name;
+    let name_focus = app.pipeline.pipeline_edit_field == PipelineEditField::Name;
     let name_style = if name_focus {
         Style::default().fg(Color::Cyan)
     } else {
@@ -852,17 +871,17 @@ fn draw_edit_popup(f: &mut Frame, app: &App, area: Rect) {
     let name_line = Line::from(vec![
         Span::styled("Name: ", Style::default().fg(Color::White)),
         Span::styled("[", name_style),
-        Span::raw(&app.pipeline_edit_name_buf),
+        Span::raw(&app.pipeline.pipeline_edit_name_buf),
         Span::styled("]", name_style),
     ]);
     f.render_widget(Paragraph::new(name_line), chunks[0]);
 
     // Agent selector
-    let agent_focus = app.pipeline_edit_field == PipelineEditField::Agent;
+    let agent_focus = app.pipeline.pipeline_edit_field == PipelineEditField::Agent;
     let agent_name = app
         .config
         .agents
-        .get(app.pipeline_edit_agent_idx)
+        .get(app.pipeline.pipeline_edit_agent_idx)
         .map(|a| a.name.as_str())
         .unwrap_or("(none)");
     let avail_agents: std::collections::HashMap<&str, bool> = app
@@ -892,7 +911,7 @@ fn draw_edit_popup(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(agent_p, chunks[2]);
 
     // Prompt textarea
-    let prompt_focus = app.pipeline_edit_field == PipelineEditField::Prompt;
+    let prompt_focus = app.pipeline.pipeline_edit_field == PipelineEditField::Prompt;
     let prompt_style = if prompt_focus {
         Style::default().fg(Color::Cyan)
     } else {
@@ -907,8 +926,8 @@ fn draw_edit_popup(f: &mut Frame, app: &App, area: Rect) {
 
     let (prompt_scroll, prompt_cursor_col, prompt_cursor_row) = if prompt_focus {
         prompt_cursor_layout(
-            &app.pipeline_edit_prompt_buf,
-            app.pipeline_edit_prompt_cursor,
+            &app.pipeline.pipeline_edit_prompt_buf,
+            app.pipeline.pipeline_edit_prompt_cursor,
             prompt_inner.width as usize,
             prompt_inner.height as usize,
         )
@@ -916,7 +935,10 @@ fn draw_edit_popup(f: &mut Frame, app: &App, area: Rect) {
         (0, 0, 0)
     };
 
-    let edit_wrapped = char_wrap_text(&app.pipeline_edit_prompt_buf, prompt_inner.width as usize);
+    let edit_wrapped = char_wrap_text(
+        &app.pipeline.pipeline_edit_prompt_buf,
+        prompt_inner.width as usize,
+    );
     let prompt_p = Paragraph::new(edit_wrapped.as_str()).scroll((prompt_scroll, 0));
     f.render_widget(prompt_p, prompt_inner);
 
@@ -930,7 +952,7 @@ fn draw_edit_popup(f: &mut Frame, app: &App, area: Rect) {
     }
 
     // Session ID
-    let sess_focus = app.pipeline_edit_field == PipelineEditField::SessionId;
+    let sess_focus = app.pipeline.pipeline_edit_field == PipelineEditField::SessionId;
     let sess_style = if sess_focus {
         Style::default().fg(Color::Cyan)
     } else {
@@ -939,7 +961,7 @@ fn draw_edit_popup(f: &mut Frame, app: &App, area: Rect) {
     let sess_line = Line::from(vec![
         Span::styled("Session ID: ", Style::default().fg(Color::White)),
         Span::styled("[", sess_style),
-        Span::raw(&app.pipeline_edit_session_buf),
+        Span::raw(&app.pipeline.pipeline_edit_session_buf),
         Span::styled("]", sess_style),
     ]);
     f.render_widget(Paragraph::new(sess_line), chunks[6]);
@@ -954,7 +976,7 @@ fn draw_file_dialog(f: &mut Frame, app: &App, area: Rect) {
     let popup = centered_rect(50, 40, area);
     f.render_widget(Clear, popup);
 
-    match app.pipeline_file_dialog {
+    match app.pipeline.pipeline_file_dialog {
         Some(PipelineDialogMode::Save) => {
             let block = Block::default()
                 .title(" Save Pipeline ")
@@ -974,7 +996,7 @@ fn draw_file_dialog(f: &mut Frame, app: &App, area: Rect) {
 
             let input_line = Line::from(vec![
                 Span::styled("Filename: ", Style::default().fg(Color::White)),
-                Span::raw(format!("{}_", &app.pipeline_file_input)),
+                Span::raw(format!("{}_", &app.pipeline.pipeline_file_input)),
                 Span::styled(".toml", Style::default().fg(Color::DarkGray)),
             ]);
             f.render_widget(Paragraph::new(input_line), chunks[0]);
@@ -992,17 +1014,18 @@ fn draw_file_dialog(f: &mut Frame, app: &App, area: Rect) {
             let inner = block.inner(popup);
             f.render_widget(block, popup);
 
-            if app.pipeline_file_list.is_empty() {
+            if app.pipeline.pipeline_file_list.is_empty() {
                 let msg = Paragraph::new("No pipeline files found")
                     .style(Style::default().fg(Color::DarkGray));
                 f.render_widget(msg, inner);
             } else {
                 let items: Vec<Line> = app
+                    .pipeline
                     .pipeline_file_list
                     .iter()
                     .enumerate()
                     .map(|(i, name)| {
-                        let style = if i == app.pipeline_file_cursor {
+                        let style = if i == app.pipeline.pipeline_file_cursor {
                             Style::default()
                                 .fg(Color::Cyan)
                                 .add_modifier(Modifier::BOLD)

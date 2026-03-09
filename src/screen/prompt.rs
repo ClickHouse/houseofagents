@@ -40,7 +40,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     f.render_widget(title, chunks[0]);
 
     // Prompt text area
-    let prompt_border = if app.prompt_focus == PromptFocus::Text {
+    let prompt_border = if app.prompt.prompt_focus == PromptFocus::Text {
         Style::default().fg(Color::Cyan)
     } else {
         Style::default().fg(Color::DarkGray)
@@ -52,22 +52,24 @@ pub fn draw(f: &mut Frame, app: &App) {
         .border_style(prompt_border);
     let prompt_inner = prompt_block.inner(chunks[1]);
 
-    let display_text = if app.prompt_text.is_empty() && app.prompt_focus != PromptFocus::Text {
-        "Enter your prompt here..."
-    } else {
-        app.prompt_text.as_str()
-    };
+    let display_text =
+        if app.prompt.prompt_text.is_empty() && app.prompt.prompt_focus != PromptFocus::Text {
+            "Enter your prompt here..."
+        } else {
+            app.prompt.prompt_text.as_str()
+        };
 
-    let text_style = if app.prompt_text.is_empty() && app.prompt_focus != PromptFocus::Text {
-        Style::default().fg(Color::DarkGray)
-    } else {
-        Style::default()
-    };
+    let text_style =
+        if app.prompt.prompt_text.is_empty() && app.prompt.prompt_focus != PromptFocus::Text {
+            Style::default().fg(Color::DarkGray)
+        } else {
+            Style::default()
+        };
 
-    let (scroll_y, cursor_col, cursor_row) = if app.prompt_focus == PromptFocus::Text {
+    let (scroll_y, cursor_col, cursor_row) = if app.prompt.prompt_focus == PromptFocus::Text {
         prompt_cursor_layout(
-            app.prompt_text.as_str(),
-            app.prompt_cursor,
+            app.prompt.prompt_text.as_str(),
+            app.prompt.prompt_cursor,
             prompt_inner.width as usize,
             prompt_inner.height as usize,
         )
@@ -82,7 +84,10 @@ pub fn draw(f: &mut Frame, app: &App) {
         .block(prompt_block);
     f.render_widget(prompt_area, chunks[1]);
 
-    if app.prompt_focus == PromptFocus::Text && prompt_inner.width > 0 && prompt_inner.height > 0 {
+    if app.prompt.prompt_focus == PromptFocus::Text
+        && prompt_inner.width > 0
+        && prompt_inner.height > 0
+    {
         let visible_row = cursor_row.saturating_sub(scroll_y as usize);
         let x =
             prompt_inner.x + (cursor_col.min(prompt_inner.width.saturating_sub(1) as usize) as u16);
@@ -92,25 +97,26 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
 
     // Session name
-    let name_border = if app.prompt_focus == PromptFocus::SessionName {
+    let name_border = if app.prompt.prompt_focus == PromptFocus::SessionName {
         Style::default().fg(Color::Cyan)
     } else {
         Style::default().fg(Color::DarkGray)
     };
 
-    let name_display = if app.session_name.is_empty() {
-        if app.prompt_focus == PromptFocus::SessionName {
+    let name_display = if app.prompt.session_name.is_empty() {
+        if app.prompt.prompt_focus == PromptFocus::SessionName {
             "_".to_string()
         } else {
             "(optional)".to_string()
         }
-    } else if app.prompt_focus == PromptFocus::SessionName {
-        format!("{}_", app.session_name)
+    } else if app.prompt.prompt_focus == PromptFocus::SessionName {
+        format!("{}_", app.prompt.session_name)
     } else {
-        app.session_name.clone()
+        app.prompt.session_name.clone()
     };
 
-    let name_style = if app.session_name.is_empty() && app.prompt_focus != PromptFocus::SessionName
+    let name_style = if app.prompt.session_name.is_empty()
+        && app.prompt.prompt_focus != PromptFocus::SessionName
     {
         Style::default().fg(Color::DarkGray)
     } else {
@@ -126,7 +132,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     f.render_widget(session_name, chunks[2]);
 
     // Iterations
-    let iter_border = if app.prompt_focus == PromptFocus::Iterations {
+    let iter_border = if app.prompt.prompt_focus == PromptFocus::Iterations {
         Style::default().fg(Color::Cyan)
     } else {
         Style::default().fg(Color::DarkGray)
@@ -134,10 +140,10 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     let iter_info = if is_solo {
         "(Solo mode: always 1 iteration)".to_string()
-    } else if app.prompt_focus == PromptFocus::Iterations {
-        format!("{}_", app.iterations_buf)
+    } else if app.prompt.prompt_focus == PromptFocus::Iterations {
+        format!("{}_", app.prompt.iterations_buf)
     } else {
-        format!("{}", app.iterations)
+        format!("{}", app.prompt.iterations)
     };
 
     let iterations = Paragraph::new(iter_info).block(
@@ -153,15 +159,15 @@ pub fn draw(f: &mut Frame, app: &App) {
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(chunks[4]);
 
-    let runs_border = if app.prompt_focus == PromptFocus::Runs {
+    let runs_border = if app.prompt.prompt_focus == PromptFocus::Runs {
         Style::default().fg(Color::Cyan)
     } else {
         Style::default().fg(Color::DarkGray)
     };
-    let runs_text = if app.prompt_focus == PromptFocus::Runs {
-        format!("{}_", app.runs_buf)
+    let runs_text = if app.prompt.prompt_focus == PromptFocus::Runs {
+        format!("{}_", app.prompt.runs_buf)
     } else {
-        app.runs.to_string()
+        app.prompt.runs.to_string()
     };
     let runs_widget = Paragraph::new(runs_text).block(
         Block::default()
@@ -171,17 +177,17 @@ pub fn draw(f: &mut Frame, app: &App) {
     );
     f.render_widget(runs_widget, run_cols[0]);
 
-    let concurrency_border = if app.prompt_focus == PromptFocus::Concurrency {
+    let concurrency_border = if app.prompt.prompt_focus == PromptFocus::Concurrency {
         Style::default().fg(Color::Cyan)
     } else {
         Style::default().fg(Color::DarkGray)
     };
-    let concurrency_text = if app.prompt_focus == PromptFocus::Concurrency {
-        format!("{}_", app.concurrency_buf)
-    } else if app.concurrency == 0 {
+    let concurrency_text = if app.prompt.prompt_focus == PromptFocus::Concurrency {
+        format!("{}_", app.prompt.concurrency_buf)
+    } else if app.prompt.concurrency == 0 {
         "0 (unlimited)".to_string()
     } else {
-        app.concurrency.to_string()
+        app.prompt.concurrency.to_string()
     };
     let concurrency_widget = Paragraph::new(concurrency_text).block(
         Block::default()
@@ -208,17 +214,17 @@ pub fn draw(f: &mut Frame, app: &App) {
         };
 
         // Resume box
-        let resume_border = if app.prompt_focus == PromptFocus::Resume {
+        let resume_border = if app.prompt.prompt_focus == PromptFocus::Resume {
             Style::default().fg(Color::Cyan)
         } else {
             Style::default().fg(Color::DarkGray)
         };
-        let resume_text = if app.resume_previous {
+        let resume_text = if app.prompt.resume_previous {
             "on (uses session name, or latest compatible run if empty)"
         } else {
             "off"
         };
-        let resume_style = if app.resume_previous {
+        let resume_style = if app.prompt.resume_previous {
             Style::default().fg(Color::Green)
         } else {
             Style::default()
@@ -233,13 +239,17 @@ pub fn draw(f: &mut Frame, app: &App) {
 
         // Forward Prompt box (Relay only)
         if is_relay {
-            let fp_border = if app.prompt_focus == PromptFocus::ForwardPrompt {
+            let fp_border = if app.prompt.prompt_focus == PromptFocus::ForwardPrompt {
                 Style::default().fg(Color::Cyan)
             } else {
                 Style::default().fg(Color::DarkGray)
             };
-            let fp_text = if app.forward_prompt { "on" } else { "off" };
-            let fp_style = if app.forward_prompt {
+            let fp_text = if app.prompt.forward_prompt {
+                "on"
+            } else {
+                "off"
+            };
+            let fp_style = if app.prompt.forward_prompt {
                 Style::default().fg(Color::Green)
             } else {
                 Style::default()
@@ -255,7 +265,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
 
     // Help bar
-    let help_spans: Vec<Span> = match app.prompt_focus {
+    let help_spans: Vec<Span> = match app.prompt.prompt_focus {
         PromptFocus::Iterations if !is_solo => {
             vec![
                 Span::styled("Type", Style::default().fg(Color::Yellow)),
