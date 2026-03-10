@@ -276,7 +276,7 @@ pub fn pipeline_help_lines(tab: usize) -> &'static [Line<'static>] {
                     Span::styled("  e / Enter", k),
                     Span::raw(": Edit the selected block (name, agent, prompt,"),
                 ]),
-                Line::from("    session ID)"),
+                Line::from("    session ID, replicas)"),
                 Line::from(vec![
                     Span::styled("  F5", k),
                     Span::raw(": Start pipeline execution"),

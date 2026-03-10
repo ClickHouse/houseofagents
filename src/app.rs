@@ -59,6 +59,8 @@ pub(crate) struct AgentStatusRow {
 #[allow(dead_code)]
 pub(crate) struct BlockStatusRow {
     pub block_id: u32,
+    pub source_block_id: u32,
+    pub replica_index: u32,
     pub label: String,
     pub agent_name: String,
     pub provider: ProviderKind,
@@ -297,6 +299,7 @@ pub(crate) struct PipelineState {
     pub(crate) pipeline_edit_prompt_cursor: usize,
     pub(crate) pipeline_edit_session_buf: String,
     pub(crate) pipeline_edit_session_cursor: usize,
+    pub(crate) pipeline_edit_replicas_buf: String,
     pub(crate) pipeline_file_dialog: Option<PipelineDialogMode>,
     pub(crate) pipeline_file_input: String,
     pub(crate) pipeline_file_list: Vec<String>,
@@ -445,6 +448,7 @@ pub enum PipelineEditField {
     Agent,
     Prompt,
     SessionId,
+    Replicas,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -998,7 +1002,7 @@ impl RunningState {
                 }
                 let body = details.as_deref().unwrap_or(error);
                 self.push_error_ledger_entry(format!(
-                    "[block {block_id} {agent_name} iter {iteration}] {body}"
+                    "[{label} {agent_name} iter {iteration}] {body}"
                 ));
                 if let Some(details) = details {
                     self.last_error = Some((label.clone(), details.clone()));
@@ -1158,6 +1162,7 @@ impl PipelineState {
             pipeline_edit_prompt_cursor: 0,
             pipeline_edit_session_buf: String::new(),
             pipeline_edit_session_cursor: 0,
+            pipeline_edit_replicas_buf: "1".into(),
             pipeline_file_dialog: None,
             pipeline_file_input: String::new(),
             pipeline_file_list: Vec::new(),
@@ -1656,5 +1661,43 @@ mod tests {
         let mut s = HelpPopupState::new();
         s.open(0);
         assert_eq!(s.tab_count, 1);
+    }
+
+    #[test]
+    fn block_error_ledger_uses_display_label_not_runtime_id() {
+        let mut app = App::new(base_config());
+        app.record_progress(ProgressEvent::BlockError {
+            block_id: 0,
+            agent_name: "Claude".into(),
+            label: "Writer (r1)".into(),
+            iteration: 2,
+            error: "timeout".into(),
+            details: Some("provider timed out".into()),
+        });
+        let entries: Vec<_> = app.error_ledger().iter().cloned().collect();
+        assert_eq!(entries.len(), 1);
+        assert!(
+            entries[0].contains("[Writer (r1) Claude iter 2]"),
+            "expected display label in error ledger, got: {}",
+            entries[0]
+        );
+        assert!(entries[0].contains("provider timed out"));
+    }
+
+    #[test]
+    fn block_error_ledger_unnamed_block_no_agent_duplication() {
+        let mut app = App::new(base_config());
+        app.record_progress(ProgressEvent::BlockError {
+            block_id: 0,
+            agent_name: "Claude".into(),
+            label: "Block 1".into(),
+            iteration: 1,
+            error: "fail".into(),
+            details: None,
+        });
+        let entries: Vec<_> = app.error_ledger().iter().cloned().collect();
+        assert_eq!(entries.len(), 1);
+        // Should be "[Block 1 Claude iter 1] fail" — agent appears exactly once
+        assert_eq!(entries[0], "[Block 1 Claude iter 1] fail");
     }
 }

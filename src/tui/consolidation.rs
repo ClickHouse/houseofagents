@@ -5,6 +5,51 @@ use super::resume::{
 };
 use super::*;
 
+/// Natural (numeric-aware) comparison for filenames so that e.g. `_r2` sorts
+/// before `_r10` instead of lexicographic `_r1, _r10, ..., _r2`.
+fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    let mut ai = a.as_bytes().iter().peekable();
+    let mut bi = b.as_bytes().iter().peekable();
+
+    loop {
+        match (ai.peek(), bi.peek()) {
+            (None, None) => return std::cmp::Ordering::Equal,
+            (None, Some(_)) => return std::cmp::Ordering::Less,
+            (Some(_), None) => return std::cmp::Ordering::Greater,
+            (Some(&&ac), Some(&&bc)) => {
+                if ac.is_ascii_digit() && bc.is_ascii_digit() {
+                    let na = consume_number(&mut ai);
+                    let nb = consume_number(&mut bi);
+                    match na.cmp(&nb) {
+                        std::cmp::Ordering::Equal => continue,
+                        ord => return ord,
+                    }
+                }
+                match ac.cmp(&bc) {
+                    std::cmp::Ordering::Equal => {
+                        ai.next();
+                        bi.next();
+                    }
+                    ord => return ord,
+                }
+            }
+        }
+    }
+}
+
+fn consume_number(iter: &mut std::iter::Peekable<std::slice::Iter<u8>>) -> u64 {
+    let mut n: u64 = 0;
+    while let Some(&&ch) = iter.peek() {
+        if ch.is_ascii_digit() {
+            n = n.saturating_mul(10).saturating_add((ch - b'0') as u64);
+            iter.next();
+        } else {
+            break;
+        }
+    }
+    n
+}
+
 pub(super) fn should_offer_consolidation(app: &App) -> bool {
     if app.running.cancel_flag.load(Ordering::Relaxed) {
         return false;
@@ -60,7 +105,7 @@ pub(super) fn discover_final_outputs(
                 }
             })
             .collect::<Vec<_>>();
-        files.sort_by(|a, b| a.0.cmp(&b.0));
+        files.sort_by(|a, b| natural_cmp(&a.0, &b.0));
         return files;
     }
 
@@ -119,7 +164,7 @@ pub(super) async fn discover_final_outputs_async(
             }
         }
 
-        files.sort_by(|a, b| a.0.cmp(&b.0));
+        files.sort_by(|a, b| natural_cmp(&a.0, &b.0));
         return files;
     }
 
@@ -598,5 +643,61 @@ pub(super) fn handle_consolidation_result(app: &mut App, result: Result<String, 
             app.running.consolidation_active = false;
             maybe_start_diagnostics(app);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::natural_cmp;
+    use std::cmp::Ordering;
+
+    #[test]
+    fn natural_cmp_basic_equal() {
+        assert_eq!(natural_cmp("abc", "abc"), Ordering::Equal);
+    }
+
+    #[test]
+    fn natural_cmp_numeric_ordering() {
+        assert_eq!(natural_cmp("r2", "r10"), Ordering::Less);
+        assert_eq!(natural_cmp("r10", "r2"), Ordering::Greater);
+        assert_eq!(natural_cmp("r10", "r10"), Ordering::Equal);
+    }
+
+    #[test]
+    fn natural_cmp_replica_filenames() {
+        let mut names = vec![
+            "block1_claude_r10_iter1.md",
+            "block1_claude_r2_iter1.md",
+            "block1_claude_r1_iter1.md",
+            "block1_claude_r3_iter1.md",
+        ];
+        names.sort_by(|a, b| natural_cmp(a, b));
+        assert_eq!(
+            names,
+            vec![
+                "block1_claude_r1_iter1.md",
+                "block1_claude_r2_iter1.md",
+                "block1_claude_r3_iter1.md",
+                "block1_claude_r10_iter1.md",
+            ]
+        );
+    }
+
+    #[test]
+    fn natural_cmp_different_blocks_then_replicas() {
+        let mut names = vec![
+            "block2_gpt_r1_iter1.md",
+            "block1_claude_r2_iter1.md",
+            "block1_claude_r1_iter1.md",
+        ];
+        names.sort_by(|a, b| natural_cmp(a, b));
+        assert_eq!(
+            names,
+            vec![
+                "block1_claude_r1_iter1.md",
+                "block1_claude_r2_iter1.md",
+                "block2_gpt_r1_iter1.md",
+            ]
+        );
     }
 }

@@ -242,7 +242,7 @@ Fields vary by mode for options, but every prompt flow includes Prompt, Session 
 | `Tab` / `Shift+Tab` | Cycle focus: Initial Prompt → Session Name → Iterations → Runs → Concurrency → Builder |
 | `a` | Add a new block |
 | `d` | Delete selected block |
-| `e` | Edit selected block (name, agent, prompt, session ID) |
+| `e` | Edit selected block (name, agent, prompt, session ID, replicas) |
 | `c` | Enter connect mode — select a second block to create a connection |
 | `x` | Enter remove-connection mode — pick a connection to delete |
 | `s` | Open session configuration popup — toggle per-session history persistence |
@@ -256,7 +256,7 @@ Fields vary by mode for options, but every prompt flow includes Prompt, Session 
 | `?` | Open help popup (6 tabbed sections; Tab/Shift+Tab to cycle). Only when focus is not on a text field (initial prompt / session name). |
 | `Esc` | Cancel current action / back to home |
 
-Inside the **edit popup**: `Tab` cycles between Name, Agent (use `Left`/`Right`), Prompt (text area), and Session ID fields. `Esc` closes the popup.
+Inside the **edit popup**: `Tab` cycles between Name, Agent (use `Left`/`Right`), Prompt (text area), Session ID, and Replicas (1-32) fields. `Esc` closes the popup. Setting Replicas > 1 spawns that many independent copies of the block at execution time, each with its own provider session.
 
 ### Order Screen (relay with 2+ agents)
 
@@ -312,17 +312,20 @@ output_dir/
       ...
 ```
 
-Pipeline runs produce per-block output files named using the block's name (sanitized) and a unique block id suffix:
+Pipeline runs produce per-block output files named using the block's name (sanitized) and a unique block id suffix. When a block has `replicas > 1`, each replica gets an `_rN` suffix:
 
 ```
 output_dir/
   2026-03-05/
     my_session/
-      session.toml                         # mode = "pipeline", block/connection counts
+      session.toml                         # mode = "pipeline", block/connection counts, total_runtime_tasks
       prompt.md                            # Pipeline-level prompt (shared across blocks)
       pipeline.toml                        # Pipeline definition snapshot (may include [[session_configs]])
       Analyzer_b1_Claude_iter1.md          # Block "Analyzer" (id 1), agent Claude, iteration 1
-      Reviewer_b2_Gemini_iter1.md          # Block "Reviewer" (id 2), agent Gemini, iteration 1
+      Reviewer_b2_Gemini_iter1.md          # Block "Reviewer" (id 2), replicas=1 — no _r suffix
+      Worker_b3_Claude_r1_iter1.md         # Block "Worker" (id 3), replicas=3, replica 1
+      Worker_b3_Claude_r2_iter1.md         # replica 2
+      Worker_b3_Claude_r3_iter1.md         # replica 3
       _errors.log
 ```
 

@@ -20,7 +20,8 @@ type PipelineAgentConfigs = HashMap<String, (ProviderKind, crate::config::Provid
 
 #[derive(Debug, Clone)]
 struct PipelineTaskMetadata {
-    block_id: BlockId,
+    runtime_id: u32,
+    source_block_id: BlockId,
     agent_name: String,
     label: String,
     iteration: u32,
@@ -29,10 +30,99 @@ struct PipelineTaskMetadata {
 struct PipelineMessageContext<'a> {
     def: &'a PipelineDefinition,
     iteration: u32,
-    block_outputs: &'a HashMap<BlockId, String>,
+    block_outputs: &'a HashMap<u32, String>,
     previous_terminal_outputs: &'a str,
     output: &'a OutputManager,
     prompt_context: &'a PromptRuntimeContext,
+    runtime_table: &'a RuntimeReplicaTable,
+}
+
+// ---------------------------------------------------------------------------
+// Runtime Replica Table
+// ---------------------------------------------------------------------------
+
+pub(crate) struct RuntimeReplicaInfo {
+    pub runtime_id: u32,
+    pub source_block_id: BlockId,
+    pub replica_index: u32,
+    pub agent: String,
+    pub display_label: String,
+    pub session_key: String,
+    pub filename_stem: String,
+}
+
+pub(crate) struct RuntimeReplicaTable {
+    pub entries: Vec<RuntimeReplicaInfo>,
+    pub logical_to_runtime: HashMap<BlockId, Vec<u32>>,
+    pub keep_policy: HashMap<(String, String), bool>,
+}
+
+pub(crate) fn build_runtime_table(def: &PipelineDefinition) -> RuntimeReplicaTable {
+    let mut entries = Vec::new();
+    let mut logical_to_runtime: HashMap<BlockId, Vec<u32>> = HashMap::new();
+    let mut keep_policy: HashMap<(String, String), bool> = HashMap::new();
+    let mut next_id: u32 = 0;
+
+    for block in &def.blocks {
+        let base_session_key = block.effective_session_key();
+        let base_keep = def.keep_session_across_iterations(&block.agent, &base_session_key);
+        let block_name_key = if block.name.trim().is_empty() {
+            format!("block{}", block.id)
+        } else {
+            format!(
+                "{}_b{}",
+                OutputManager::sanitize_session_name(&block.name),
+                block.id
+            )
+        };
+        let agent_file_key = OutputManager::sanitize_session_name(&block.agent);
+
+        let mut runtime_ids = Vec::new();
+        for ri in 0..block.replicas {
+            let runtime_id = next_id;
+            next_id += 1;
+
+            let (display_label, session_key, filename_stem) = if block.replicas == 1 {
+                (
+                    block_label(block),
+                    base_session_key.clone(),
+                    format!("{}_{}", block_name_key, agent_file_key),
+                )
+            } else {
+                let ord = ri + 1;
+                (
+                    format!("{} (r{})", block_label(block), ord),
+                    format!("{}_r{}", base_session_key, ord),
+                    format!("{}_{}_r{}", block_name_key, agent_file_key, ord),
+                )
+            };
+
+            keep_policy.insert((block.agent.clone(), session_key.clone()), base_keep);
+
+            entries.push(RuntimeReplicaInfo {
+                runtime_id,
+                source_block_id: block.id,
+                replica_index: ri,
+                agent: block.agent.clone(),
+                display_label,
+                session_key,
+                filename_stem,
+            });
+
+            runtime_ids.push(runtime_id);
+        }
+        logical_to_runtime.insert(block.id, runtime_ids);
+    }
+
+    RuntimeReplicaTable {
+        entries,
+        logical_to_runtime,
+        keep_policy,
+    }
+}
+
+fn replica_filename(info: &RuntimeReplicaInfo, iteration: u32) -> String {
+    format!("{}_iter{}.md", info.filename_stem, iteration)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +136,16 @@ pub struct PipelineBlock {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     pub position: (u16, u16), // grid coordinates (col, row)
+    #[serde(default = "default_one", skip_serializing_if = "is_one")]
+    pub replicas: u32,
+}
+
+fn default_one() -> u32 {
+    1
+}
+
+fn is_one(v: &u32) -> bool {
+    *v == 1
 }
 
 impl PipelineBlock {
@@ -77,6 +177,7 @@ pub struct EffectiveSession {
     pub display_label: String,
     pub block_ids: Vec<BlockId>,
     pub keep_across_iterations: bool,
+    pub total_replicas: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,7 +216,7 @@ impl Default for PipelineDefinition {
 
 impl PipelineDefinition {
     pub fn effective_sessions(&self) -> Vec<EffectiveSession> {
-        let mut map: HashMap<(String, String), (String, Vec<BlockId>)> = HashMap::new();
+        let mut map: HashMap<(String, String), (String, Vec<BlockId>, u32)> = HashMap::new();
         for block in &self.blocks {
             let key = (block.agent.clone(), block.effective_session_key());
             let entry = map.entry(key).or_insert_with(|| {
@@ -126,13 +227,14 @@ impl PipelineDefinition {
                 } else {
                     format!("Block {}", block.id)
                 };
-                (label, Vec::new())
+                (label, Vec::new(), 0)
             });
             entry.1.push(block.id);
+            entry.2 += block.replicas;
         }
         let mut sessions: Vec<EffectiveSession> = map
             .into_iter()
-            .map(|((agent, session_key), (display_label, block_ids))| {
+            .map(|((agent, session_key), (display_label, block_ids, total_replicas))| {
                 let keep = self.keep_session_across_iterations(&agent, &session_key);
                 EffectiveSession {
                     agent,
@@ -140,6 +242,7 @@ impl PipelineDefinition {
                     display_label,
                     block_ids,
                     keep_across_iterations: keep,
+                    total_replicas,
                 }
             })
             .collect();
@@ -405,6 +508,39 @@ pub fn load_pipeline(path: &Path) -> Result<PipelineDefinition, AppError> {
     Ok(def)
 }
 
+pub(crate) fn validate_replicas(def: &PipelineDefinition) -> Result<(), AppError> {
+    for block in &def.blocks {
+        if block.replicas < 1 {
+            return Err(AppError::Config(format!(
+                "Block '{}' has replicas < 1",
+                block.name
+            )));
+        }
+        if block.replicas > 32 {
+            return Err(AppError::Config(format!(
+                "Block '{}' has replicas > 32 (max allowed)",
+                block.name
+            )));
+        }
+    }
+    // Session sharing restriction: blocks with replicas > 1 cannot share session_id
+    for block in &def.blocks {
+        if block.replicas > 1 {
+            if let Some(ref sid) = block.session_id {
+                for other in &def.blocks {
+                    if other.id != block.id && other.session_id.as_deref() == Some(sid) {
+                        return Err(AppError::Config(format!(
+                            "Session '{}' is used by replicated block '{}' and cannot be shared",
+                            sid, block.name
+                        )));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_pipeline(def: &PipelineDefinition) -> Result<(), AppError> {
     // Check duplicate block IDs
     let mut seen = HashSet::new();
@@ -456,6 +592,9 @@ fn validate_pipeline(def: &PipelineDefinition) -> Result<(), AppError> {
             }
         }
     }
+
+    // Replica validation
+    validate_replicas(def)?;
 
     Ok(())
 }
@@ -533,8 +672,9 @@ async fn run_pipeline_with_provider_factory<F>(
 where
     F: Fn(ProviderKind, &crate::config::ProviderConfig) -> Box<dyn provider::Provider>,
 {
-    let total_blocks = def.blocks.len();
-    if total_blocks == 0 {
+    let rt = build_runtime_table(def);
+    let total_tasks = rt.entries.len();
+    if total_tasks == 0 {
         let _ = progress_tx.send(ProgressEvent::AllDone);
         return Ok(());
     }
@@ -545,25 +685,24 @@ where
         max_block_concurrency as usize
     }));
 
-    // Build provider pool: key = (agent_name, session_key)
+    // Build provider pool keyed by (agent, runtime_session_key)
     let mut provider_pool: ProviderPool = HashMap::new();
-
-    for block in &def.blocks {
-        let session_key = block.effective_session_key();
-        let pool_key = (block.agent.clone(), session_key);
-        if let std::collections::hash_map::Entry::Vacant(entry) = provider_pool.entry(pool_key) {
-            if let Some((kind, cfg, _use_cli)) = agent_configs.get(&block.agent) {
+    for entry in &rt.entries {
+        let pool_key = (entry.agent.clone(), entry.session_key.clone());
+        if let std::collections::hash_map::Entry::Vacant(vacant) = provider_pool.entry(pool_key) {
+            if let Some((kind, cfg, _use_cli)) = agent_configs.get(&entry.agent) {
                 let p = provider_factory(*kind, cfg);
-                entry.insert(Arc::new(Mutex::new(p)));
+                vacant.insert(Arc::new(Mutex::new(p)));
             }
         }
     }
 
-    // Build adjacency structures
+    // Build adjacency structures with replica-weighted in-degree
     let mut in_degree: HashMap<BlockId, usize> = def.blocks.iter().map(|b| (b.id, 0)).collect();
     let mut downstream: HashMap<BlockId, Vec<BlockId>> = HashMap::new();
     for conn in &def.connections {
-        *in_degree.entry(conn.to).or_default() += 1;
+        let from_block = def.blocks.iter().find(|b| b.id == conn.from).unwrap();
+        *in_degree.entry(conn.to).or_default() += from_block.replicas as usize;
         downstream.entry(conn.from).or_default().push(conn.to);
     }
 
@@ -577,7 +716,12 @@ where
         // Clear history for sessions configured to reset between iterations
         if iteration > 1 {
             for ((agent, session_key), provider_arc) in &provider_pool {
-                if !def.keep_session_across_iterations(agent, session_key) {
+                let keep = rt
+                    .keep_policy
+                    .get(&(agent.clone(), session_key.clone()))
+                    .copied()
+                    .unwrap_or(true);
+                if !keep {
                     let mut guard = provider_arc.lock().await;
                     guard.clear_history();
                 }
@@ -585,11 +729,12 @@ where
         }
 
         let mut current_in_degree = in_degree.clone();
-        let mut failed_blocks: HashSet<BlockId> = HashSet::new();
-        let mut block_outputs: HashMap<BlockId, String> = HashMap::new();
+        let mut failed_replicas: HashSet<u32> = HashSet::new();
+        let mut failed_logical: HashSet<BlockId> = HashSet::new();
+        let mut replica_outputs: HashMap<u32, String> = HashMap::new();
         let mut completed = 0usize;
 
-        // Seed ready queue with root blocks
+        // Seed ready queue with root blocks (logical IDs)
         let (ready_tx, mut ready_rx) = mpsc::unbounded_channel::<BlockId>();
         let mut roots: Vec<BlockId> = current_in_degree
             .iter()
@@ -601,11 +746,11 @@ where
             let _ = ready_tx.send(id);
         }
 
-        let mut tasks: tokio::task::JoinSet<(BlockId, Result<String, String>)> =
+        let mut tasks: tokio::task::JoinSet<(u32, Result<String, String>)> =
             tokio::task::JoinSet::new();
         let mut task_metadata: HashMap<tokio::task::Id, PipelineTaskMetadata> = HashMap::new();
 
-        while completed < total_blocks {
+        while completed < total_tasks {
             tokio::select! {
                 Some(block_id) = ready_rx.recv() => {
                     if cancel.load(std::sync::atomic::Ordering::Relaxed) {
@@ -614,242 +759,280 @@ where
 
                     let block = match def.blocks.iter().find(|b| b.id == block_id) {
                         Some(b) => b,
-                        None => { completed += 1; continue; }
+                        None => {
+                            let replica_count = rt.logical_to_runtime.get(&block_id)
+                                .map(|v| v.len()).unwrap_or(1);
+                            completed += replica_count;
+                            continue;
+                        }
                     };
-                    let agent_name = block.agent.clone();
-                    let label = block_label(block);
+                    let replica_count = block.replicas as usize;
 
-                    // Check for failed upstream
+                    // Group-aware failure: skip only if ALL replicas of an upstream block failed
                     let failed_upstream: Vec<BlockId> = upstream_of(def, block_id)
                         .into_iter()
-                        .filter(|u| failed_blocks.contains(u))
+                        .filter(|u| failed_logical.contains(u))
                         .collect();
 
                     if !failed_upstream.is_empty() {
-                        let reason = format!("upstream Block {} failed", failed_upstream[0]);
-                        let _ = progress_tx.send(ProgressEvent::BlockSkipped {
-                            block_id,
-                            agent_name,
-                            label,
-                            iteration,
-                            reason,
-                        });
-                        failed_blocks.insert(block_id);
-                        // Signal downstream
+                        let reason = format!("all replicas of upstream Block {} failed", failed_upstream[0]);
+                        if let Some(rids) = rt.logical_to_runtime.get(&block_id) {
+                            for &rid in rids {
+                                let info = &rt.entries[rid as usize];
+                                let _ = progress_tx.send(ProgressEvent::BlockSkipped {
+                                    block_id: rid,
+                                    agent_name: info.agent.clone(),
+                                    label: info.display_label.clone(),
+                                    iteration,
+                                    reason: reason.clone(),
+                                });
+                                failed_replicas.insert(rid);
+                            }
+                        }
+                        failed_logical.insert(block_id);
+                        completed += replica_count;
                         if let Some(children) = downstream.get(&block_id) {
                             for &child in children {
                                 let deg = current_in_degree.get_mut(&child).unwrap();
-                                *deg -= 1;
+                                *deg = deg.saturating_sub(replica_count);
                                 if *deg == 0 {
                                     let _ = ready_tx.send(child);
                                 }
                             }
                         }
-                        completed += 1;
                         continue;
                     }
 
                     let use_cli = agent_configs
-                        .get(&agent_name)
+                        .get(&block.agent)
                         .map(|(_, _, cli)| *cli)
                         .unwrap_or(false);
+
+                    // Build message ONCE (shared by all replicas of this block)
                     let message = build_pipeline_block_message(
                         block,
                         use_cli,
                         &PipelineMessageContext {
                             def,
                             iteration,
-                            block_outputs: &block_outputs,
+                            block_outputs: &replica_outputs,
                             previous_terminal_outputs: &previous_terminal_outputs,
                             output,
                             prompt_context,
+                            runtime_table: &rt,
                         },
                     );
 
-                    // Get provider from pool
-                    let session_key = block.effective_session_key();
-                    let pool_key = (agent_name.clone(), session_key);
-                    let provider_arc = match provider_pool.get(&pool_key) {
-                        Some(p) => p.clone(),
-                        None => {
+                    // Check provider availability (all replicas share the same agent)
+                    let rids = match rt.logical_to_runtime.get(&block_id) {
+                        Some(rids) => rids,
+                        None => { completed += replica_count; continue; }
+                    };
+
+                    if !agent_configs.contains_key(&block.agent) {
+                        for &rid in rids {
+                            let info = &rt.entries[rid as usize];
                             let _ = progress_tx.send(ProgressEvent::BlockError {
-                                block_id,
-                                agent_name,
-                                label: label.clone(),
+                                block_id: rid,
+                                agent_name: info.agent.clone(),
+                                label: info.display_label.clone(),
                                 iteration,
                                 error: "No provider available".into(),
                                 details: None,
                             });
-                            failed_blocks.insert(block_id);
-                            if let Some(children) = downstream.get(&block_id) {
-                                for &child in children {
-                                    let deg = current_in_degree.get_mut(&child).unwrap();
-                                    *deg -= 1;
-                                    if *deg == 0 {
-                                        let _ = ready_tx.send(child);
-                                    }
+                            failed_replicas.insert(rid);
+                        }
+                        failed_logical.insert(block_id);
+                        completed += replica_count;
+                        if let Some(children) = downstream.get(&block_id) {
+                            for &child in children {
+                                let deg = current_in_degree.get_mut(&child).unwrap();
+                                *deg = deg.saturating_sub(replica_count);
+                                if *deg == 0 {
+                                    let _ = ready_tx.send(child);
                                 }
                             }
-                            completed += 1;
-                            continue;
                         }
-                    };
+                        continue;
+                    }
 
-                    let _ = progress_tx.send(ProgressEvent::BlockStarted {
-                        block_id,
-                        agent_name: agent_name.clone(),
-                        label: label.clone(),
-                        iteration,
-                    });
-
-                    let ptx = progress_tx.clone();
-                    let cancel_clone = cancel.clone();
-                    let task_output = output.clone();
-                    let file_key = OutputManager::sanitize_session_name(&agent_name);
-                    let block_name_key = if block.name.trim().is_empty() {
-                        format!("block{}", block_id)
-                    } else {
-                        format!("{}_b{}", OutputManager::sanitize_session_name(&block.name), block_id)
-                    };
-
-                    let task_agent_name = agent_name.clone();
-                    let task_label = label.clone();
-                    let sem_clone = concurrency_sem.clone();
-                    let task_handle = tasks.spawn(async move {
-                        // Lock the provider first so shared-session tasks queue here
-                        // without consuming a semaphore permit. Then acquire the permit
-                        // right before the actual API call to avoid underutilizing
-                        // concurrency when unrelated blocks could run instead.
-                        let mut guard = provider_arc.lock().await;
-                        let _permit = sem_clone.acquire().await.expect("semaphore closed");
-
-                        // Wire live-log channel
-                        let (live_tx, mut live_rx) = mpsc::unbounded_channel::<String>();
-                        guard.set_live_log_sender(Some(live_tx));
-
-                        let bid = block_id;
-                        let an = agent_name.clone();
-                        let it = iteration;
-                        let ptx2 = ptx.clone();
-                        let live_forward = tokio::spawn(async move {
-                            while let Some(line) = live_rx.recv().await {
-                                let _ = ptx2.send(ProgressEvent::BlockLog {
-                                    block_id: bid,
-                                    agent_name: an.clone(),
-                                    iteration: it,
-                                    message: format!("CLI {line}"),
+                    // Spawn one task per replica
+                    for &rid in rids {
+                        let info = &rt.entries[rid as usize];
+                        let pool_key = (info.agent.clone(), info.session_key.clone());
+                        let provider_arc = match provider_pool.get(&pool_key) {
+                            Some(p) => p.clone(),
+                            None => {
+                                let _ = progress_tx.send(ProgressEvent::BlockError {
+                                    block_id: rid,
+                                    agent_name: info.agent.clone(),
+                                    label: info.display_label.clone(),
+                                    iteration,
+                                    error: "No provider available".into(),
+                                    details: None,
                                 });
-                            }
-                        });
-
-                        let result = tokio::select! {
-                            res = crate::execution::send_with_streaming(
-                                &mut **guard,
-                                &message,
-                                &ptx,
-                                {
-                                    let agent_name = agent_name.clone();
-                                    let bid = block_id;
-                                    let it = iteration;
-                                    move |chunk| ProgressEvent::BlockStreamChunk {
-                                        block_id: bid,
-                                        agent_name: agent_name.clone(),
-                                        iteration: it,
-                                        chunk,
+                                failed_replicas.insert(rid);
+                                completed += 1;
+                                if let Some(children) = downstream.get(&block_id) {
+                                    for &child in children {
+                                        let deg = current_in_degree.get_mut(&child).unwrap();
+                                        *deg -= 1;
+                                        if *deg == 0 {
+                                            let _ = ready_tx.send(child);
+                                        }
                                     }
-                                },
-                            ) => Some(res),
-                            _ = wait_for_cancel(&cancel_clone) => None
+                                }
+                                continue;
+                            }
                         };
 
-                        guard.set_live_log_sender(None);
-                        let cancelled = result.is_none();
-                        drop(guard);
-                        finish_live_log_forwarder(live_forward, cancelled).await;
+                        let _ = progress_tx.send(ProgressEvent::BlockStarted {
+                            block_id: rid,
+                            agent_name: info.agent.clone(),
+                            label: info.display_label.clone(),
+                            iteration,
+                        });
 
-                        match result {
-                            None => {
-                                // Cancelled
-                                (block_id, Err("Cancelled".to_string()))
-                            }
-                            Some(Ok(resp)) => {
-                                // Forward debug logs
-                                for log in &resp.debug_logs {
-                                    let _ = ptx.send(ProgressEvent::BlockLog {
-                                        block_id,
-                                        agent_name: agent_name.clone(),
-                                        iteration,
-                                        message: log.clone(),
+                        let ptx = progress_tx.clone();
+                        let cancel_clone = cancel.clone();
+                        let task_output = output.clone();
+                        let task_filename = replica_filename(info, iteration);
+                        let task_agent_name = info.agent.clone();
+                        let task_label = info.display_label.clone();
+                        let message_clone = message.clone();
+                        let sem_clone = concurrency_sem.clone();
+                        let task_handle = tasks.spawn(async move {
+                            let mut guard = provider_arc.lock().await;
+                            let _permit = sem_clone.acquire().await.expect("semaphore closed");
+
+                            let (live_tx, mut live_rx) = mpsc::unbounded_channel::<String>();
+                            guard.set_live_log_sender(Some(live_tx));
+
+                            let bid = rid;
+                            let an = task_agent_name.clone();
+                            let it = iteration;
+                            let ptx2 = ptx.clone();
+                            let live_forward = tokio::spawn(async move {
+                                while let Some(line) = live_rx.recv().await {
+                                    let _ = ptx2.send(ProgressEvent::BlockLog {
+                                        block_id: bid,
+                                        agent_name: an.clone(),
+                                        iteration: it,
+                                        message: format!("CLI {line}"),
                                     });
                                 }
-                                // Write output
-                                let filename = format!("{}_{}_iter{}.md", block_name_key, file_key, iteration);
-                                let path = task_output.run_dir().join(&filename);
-                                if let Err(e) = std::fs::write(&path, &resp.content) {
-                                    let error = format!("Failed to write output: {e}");
+                            });
+
+                            let result = tokio::select! {
+                                res = crate::execution::send_with_streaming(
+                                    &mut **guard,
+                                    &message_clone,
+                                    &ptx,
+                                    {
+                                        let agent_name = task_agent_name.clone();
+                                        let bid = rid;
+                                        let it = iteration;
+                                        move |chunk| ProgressEvent::BlockStreamChunk {
+                                            block_id: bid,
+                                            agent_name: agent_name.clone(),
+                                            iteration: it,
+                                            chunk,
+                                        }
+                                    },
+                                ) => Some(res),
+                                _ = wait_for_cancel(&cancel_clone) => None
+                            };
+
+                            guard.set_live_log_sender(None);
+                            let cancelled = result.is_none();
+                            drop(guard);
+                            finish_live_log_forwarder(live_forward, cancelled).await;
+
+                            match result {
+                                None => (rid, Err("Cancelled".to_string())),
+                                Some(Ok(resp)) => {
+                                    for log in &resp.debug_logs {
+                                        let _ = ptx.send(ProgressEvent::BlockLog {
+                                            block_id: rid,
+                                            agent_name: task_agent_name.clone(),
+                                            iteration,
+                                            message: log.clone(),
+                                        });
+                                    }
+                                    let path = task_output.run_dir().join(&task_filename);
+                                    if let Err(e) = std::fs::write(&path, &resp.content) {
+                                        let error = format!("Failed to write output: {e}");
+                                        let _ = task_output.append_error(&format!(
+                                            "runtime {rid} {task_agent_name} iter{iteration}: {error}"
+                                        ));
+                                        let _ = ptx.send(ProgressEvent::BlockError {
+                                            block_id: rid,
+                                            agent_name: task_agent_name,
+                                            label: task_label,
+                                            iteration,
+                                            error: error.clone(),
+                                            details: Some(error.clone()),
+                                        });
+                                        (rid, Err(error))
+                                    } else {
+                                        let _ = ptx.send(ProgressEvent::BlockFinished {
+                                            block_id: rid,
+                                            agent_name: task_agent_name,
+                                            label: task_label,
+                                            iteration,
+                                        });
+                                        (rid, Ok(resp.content))
+                                    }
+                                }
+                                Some(Err(e)) => {
+                                    let error = e.to_string();
                                     let _ = task_output.append_error(&format!(
-                                        "block {block_id} {agent_name} iter{iteration}: {error}"
+                                        "runtime {rid} {task_agent_name} iter{iteration}: {error}"
                                     ));
                                     let _ = ptx.send(ProgressEvent::BlockError {
-                                        block_id,
-                                        agent_name,
-                                        label,
+                                        block_id: rid,
+                                        agent_name: task_agent_name,
+                                        label: task_label,
                                         iteration,
                                         error: error.clone(),
                                         details: Some(error.clone()),
                                     });
-                                    (block_id, Err(error))
-                                } else {
-                                    let _ = ptx.send(ProgressEvent::BlockFinished {
-                                        block_id,
-                                        agent_name,
-                                        label,
-                                        iteration,
-                                    });
-                                    (block_id, Ok(resp.content))
+                                    (rid, Err(error))
                                 }
                             }
-                            Some(Err(e)) => {
-                                let error = e.to_string();
-                                let _ = task_output.append_error(&format!(
-                                    "block {block_id} {agent_name} iter{iteration}: {error}"
-                                ));
-                                let _ = ptx.send(ProgressEvent::BlockError {
-                                    block_id,
-                                    agent_name,
-                                    label,
-                                    iteration,
-                                    error: error.clone(),
-                                    details: Some(error.clone()),
-                                });
-                                (block_id, Err(error))
-                            }
-                        }
-                    });
-                    task_metadata.insert(
-                        task_handle.id(),
-                        PipelineTaskMetadata {
-                            block_id,
-                            agent_name: task_agent_name,
-                            label: task_label,
-                            iteration,
-                        },
-                    );
+                        });
+                        task_metadata.insert(
+                            task_handle.id(),
+                            PipelineTaskMetadata {
+                                runtime_id: rid,
+                                source_block_id: block_id,
+                                agent_name: info.agent.clone(),
+                                label: info.display_label.clone(),
+                                iteration,
+                            },
+                        );
+                    }
                 }
                 Some(result) = tasks.join_next() => {
                     completed += 1;
                     match result {
-                        Ok((block_id, outcome)) => {
+                        Ok((runtime_id, outcome)) => {
+                            let source_id = rt.entries[runtime_id as usize].source_block_id;
                             match outcome {
                                 Ok(content) => {
-                                    block_outputs.insert(block_id, content);
+                                    replica_outputs.insert(runtime_id, content);
                                 }
                                 Err(_) => {
-                                    failed_blocks.insert(block_id);
+                                    failed_replicas.insert(runtime_id);
+                                    if let Some(rids) = rt.logical_to_runtime.get(&source_id) {
+                                        if rids.iter().all(|r| failed_replicas.contains(r)) {
+                                            failed_logical.insert(source_id);
+                                        }
+                                    }
                                 }
                             }
-                            // Signal downstream
-                            if let Some(children) = downstream.get(&block_id) {
+                            // Decrement downstream by 1 per replica completion
+                            if let Some(children) = downstream.get(&source_id) {
                                 for &child in children {
                                     let deg = current_in_degree.get_mut(&child).unwrap();
                                     *deg -= 1;
@@ -863,7 +1046,7 @@ where
                             let error = format!("Pipeline worker panicked: {join_error}");
                             if let Some(metadata) = task_metadata.get(&join_error.id()).cloned() {
                                 let _ = progress_tx.send(ProgressEvent::BlockError {
-                                    block_id: metadata.block_id,
+                                    block_id: metadata.runtime_id,
                                     agent_name: metadata.agent_name.clone(),
                                     label: metadata.label.clone(),
                                     iteration: metadata.iteration,
@@ -871,14 +1054,19 @@ where
                                     details: Some(error.clone()),
                                 });
                                 let _ = output.append_error(&format!(
-                                    "block {} {} iter{}: {}",
-                                    metadata.block_id,
+                                    "runtime {} {} iter{}: {}",
+                                    metadata.runtime_id,
                                     metadata.agent_name,
                                     metadata.iteration,
                                     error
                                 ));
-                                failed_blocks.insert(metadata.block_id);
-                                if let Some(children) = downstream.get(&metadata.block_id) {
+                                failed_replicas.insert(metadata.runtime_id);
+                                if let Some(rids) = rt.logical_to_runtime.get(&metadata.source_block_id) {
+                                    if rids.iter().all(|r| failed_replicas.contains(r)) {
+                                        failed_logical.insert(metadata.source_block_id);
+                                    }
+                                }
+                                if let Some(children) = downstream.get(&metadata.source_block_id) {
                                     for &child in children {
                                         let deg = current_in_degree.get_mut(&child).unwrap();
                                         *deg -= 1;
@@ -901,15 +1089,27 @@ where
 
         let _ = progress_tx.send(ProgressEvent::IterationComplete { iteration });
 
-        // Collect terminal block outputs for next iteration
+        // Collect labeled terminal outputs for next iteration
         let terminals = terminal_blocks(def);
         previous_terminal_outputs.clear();
         for &tid in &terminals {
-            if let Some(content) = block_outputs.get(&tid) {
-                if !previous_terminal_outputs.is_empty() {
-                    previous_terminal_outputs.push_str("\n\n---\n\n");
+            if let Some(rids) = rt.logical_to_runtime.get(&tid) {
+                let upstream_replicas = def.blocks.iter().find(|b| b.id == tid).map(|b| b.replicas).unwrap_or(1);
+                for &rid in rids {
+                    if let Some(content) = replica_outputs.get(&rid) {
+                        if !previous_terminal_outputs.is_empty() {
+                            previous_terminal_outputs.push_str("\n\n---\n\n");
+                        }
+                        if upstream_replicas > 1 {
+                            let info = &rt.entries[rid as usize];
+                            previous_terminal_outputs.push_str(&format!(
+                                "--- Output from {} ---\n{}", info.display_label, content
+                            ));
+                        } else {
+                            previous_terminal_outputs.push_str(content);
+                        }
+                    }
                 }
-                previous_terminal_outputs.push_str(content);
             }
         }
     }
@@ -920,7 +1120,7 @@ where
 
 fn block_label(block: &PipelineBlock) -> String {
     if block.name.trim().is_empty() {
-        format!("Block {} ({})", block.id, block.agent)
+        format!("Block {}", block.id)
     } else {
         block.name.clone()
     }
@@ -958,29 +1158,14 @@ fn build_pipeline_block_message(
         if use_cli {
             let mut file_refs = String::new();
             for uid in &upstream_ids {
-                if let Some(upstream_block) = context
-                    .def
-                    .blocks
-                    .iter()
-                    .find(|candidate| candidate.id == *uid)
-                {
-                    let upstream_name_key = if upstream_block.name.trim().is_empty() {
-                        format!("block{}", uid)
-                    } else {
-                        format!(
-                            "{}_b{}",
-                            OutputManager::sanitize_session_name(&upstream_block.name),
-                            uid
-                        )
-                    };
-                    let sanitized = OutputManager::sanitize_session_name(&upstream_block.agent);
-                    let filename = format!(
-                        "{}_{}_iter{}.md",
-                        upstream_name_key, sanitized, context.iteration
-                    );
-                    let path = context.output.run_dir().join(&filename);
-                    if path.exists() {
-                        file_refs.push_str(&format!("- {}\n", path.display()));
+                if let Some(rids) = context.runtime_table.logical_to_runtime.get(uid) {
+                    for &rid in rids {
+                        let info = &context.runtime_table.entries[rid as usize];
+                        let filename = replica_filename(info, context.iteration);
+                        let path = context.output.run_dir().join(&filename);
+                        if path.exists() {
+                            file_refs.push_str(&format!("- {}\n", path.display()));
+                        }
                     }
                 }
             }
@@ -990,11 +1175,23 @@ fn build_pipeline_block_message(
         } else {
             let mut upstream_content = String::new();
             for uid in &upstream_ids {
-                if let Some(content) = context.block_outputs.get(uid) {
-                    if !upstream_content.is_empty() {
-                        upstream_content.push_str("\n\n---\n\n");
+                let upstream_block = context.def.blocks.iter().find(|b| b.id == *uid);
+                if let Some(rids) = context.runtime_table.logical_to_runtime.get(uid) {
+                    for &rid in rids {
+                        if let Some(content) = context.block_outputs.get(&rid) {
+                            if !upstream_content.is_empty() {
+                                upstream_content.push_str("\n\n---\n\n");
+                            }
+                            if upstream_block.map(|b| b.replicas).unwrap_or(1) > 1 {
+                                let info = &context.runtime_table.entries[rid as usize];
+                                upstream_content.push_str(&format!(
+                                    "--- Output from {} ---\n{}", info.display_label, content
+                                ));
+                            } else {
+                                upstream_content.push_str(content);
+                            }
+                        }
                     }
-                    upstream_content.push_str(content);
                 }
             }
             format!("{prefix}--- Upstream outputs ---\n{upstream_content}")
@@ -1030,6 +1227,7 @@ mod tests {
             prompt: format!("block {id}"),
             session_id: None,
             position: (col, row),
+            replicas: 1,
         }
     }
 
@@ -1395,6 +1593,7 @@ to = 1
                 prompt: "block prompt".into(),
                 session_id: None,
                 position: (0, 0),
+                replicas: 1,
             }],
             connections: vec![],
             session_configs: Vec::new(),
@@ -1402,6 +1601,7 @@ to = 1
         let context = PromptRuntimeContext::new(def.initial_prompt.clone(), false);
 
         let block_outputs = HashMap::new();
+        let rt = build_runtime_table(&def);
         let message_context = PipelineMessageContext {
             def: &def,
             iteration: 1,
@@ -1409,6 +1609,7 @@ to = 1
             previous_terminal_outputs: "",
             output: &output,
             prompt_context: &context,
+            runtime_table: &rt,
         };
         let cli_message = build_pipeline_block_message(&def.blocks[0], true, &message_context);
         let api_message = build_pipeline_block_message(&def.blocks[0], false, &message_context);
@@ -1432,6 +1633,7 @@ to = 1
                 prompt: String::new(),
                 session_id: None,
                 position: (0, 0),
+                replicas: 1,
             }],
             connections: vec![],
             session_configs: Vec::new(),
@@ -1482,7 +1684,7 @@ to = 1
                     agent_name,
                     error,
                     ..
-                } if *block_id == 1 && agent_name == "Claude" && error.contains("panicked")
+                } if *block_id == 0 && agent_name == "Claude" && error.contains("panicked")
             )
         }));
         assert!(events
@@ -1490,7 +1692,7 @@ to = 1
             .any(|event| matches!(event, ProgressEvent::AllDone)));
 
         let log = std::fs::read_to_string(output.run_dir().join("_errors.log")).expect("log");
-        assert!(log.contains("block 1 Claude iter1"));
+        assert!(log.contains("runtime 0 Claude iter1"));
         assert!(log.contains("pipeline panic"));
     }
 
@@ -1508,6 +1710,7 @@ to = 1
                 prompt: String::new(),
                 session_id: None,
                 position: (0, 0),
+                replicas: 1,
             }],
             connections: vec![],
             session_configs: Vec::new(),
@@ -1560,12 +1763,12 @@ to = 1
                     agent_name,
                     error,
                     ..
-                } if *block_id == 1 && agent_name == "Claude" && error.contains("provider failed")
+                } if *block_id == 0 && agent_name == "Claude" && error.contains("provider failed")
             )
         }));
 
         let log = std::fs::read_to_string(output.run_dir().join("_errors.log")).expect("log");
-        assert!(log.contains("block 1 Claude iter1"));
+        assert!(log.contains("runtime 0 Claude iter1"));
         assert!(log.contains("provider failed"));
     }
 
@@ -1679,6 +1882,7 @@ to = 1
             prompt: String::new(),
             session_id: Some("shared".into()),
             position: (0, 0),
+            replicas: 1,
         };
         assert_eq!(b.effective_session_key(), "shared");
     }
@@ -1702,6 +1906,7 @@ to = 1
                     prompt: String::new(),
                     session_id: Some("shared".into()),
                     position: (0, 0),
+                    replicas: 1,
                 },
                 PipelineBlock {
                     id: 2,
@@ -1710,6 +1915,7 @@ to = 1
                     prompt: String::new(),
                     session_id: Some("shared".into()),
                     position: (1, 0),
+                    replicas: 1,
                 },
             ],
             vec![conn(1, 2)],
@@ -1733,6 +1939,7 @@ to = 1
                     prompt: String::new(),
                     session_id: Some("shared".into()),
                     position: (0, 0),
+                    replicas: 1,
                 },
                 PipelineBlock {
                     id: 2,
@@ -1741,6 +1948,7 @@ to = 1
                     prompt: String::new(),
                     session_id: Some("shared".into()),
                     position: (1, 0),
+                    replicas: 1,
                 },
             ],
             vec![],
@@ -1771,6 +1979,7 @@ to = 1
                     prompt: String::new(),
                     session_id: None,
                     position: (0, 0),
+                    replicas: 1,
                 },
                 PipelineBlock {
                     id: 2,
@@ -1779,6 +1988,7 @@ to = 1
                     prompt: String::new(),
                     session_id: None,
                     position: (1, 0),
+                    replicas: 1,
                 },
             ],
             vec![],
@@ -1800,6 +2010,7 @@ to = 1
                     prompt: String::new(),
                     session_id: None,
                     position: (0, 0),
+                    replicas: 1,
                 },
                 PipelineBlock {
                     id: 2,
@@ -1808,6 +2019,7 @@ to = 1
                     prompt: String::new(),
                     session_id: None,
                     position: (1, 0),
+                    replicas: 1,
                 },
             ],
             vec![],
@@ -2180,6 +2392,7 @@ keep_across_iterations = false
                     prompt: String::new(),
                     session_id: Some("shared".into()),
                     position: (0, 0),
+                    replicas: 1,
                 },
                 PipelineBlock {
                     id: 2,
@@ -2188,6 +2401,7 @@ keep_across_iterations = false
                     prompt: String::new(),
                     session_id: Some("shared".into()),
                     position: (1, 0),
+                    replicas: 1,
                 },
             ],
             vec![conn(1, 2)],

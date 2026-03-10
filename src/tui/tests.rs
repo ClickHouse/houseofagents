@@ -1298,6 +1298,7 @@ fn pipeline_move_selected_block_moves_into_empty_cell() {
         prompt: String::new(),
         session_id: None,
         position: (2, 2),
+        replicas: 1,
     }];
     app.pipeline.pipeline_block_cursor = Some(1);
 
@@ -1318,6 +1319,7 @@ fn pipeline_move_selected_block_swaps_when_target_occupied() {
             prompt: String::new(),
             session_id: None,
             position: (2, 2),
+            replicas: 1,
         },
         pipeline_mod::PipelineBlock {
             id: 2,
@@ -1326,6 +1328,7 @@ fn pipeline_move_selected_block_swaps_when_target_occupied() {
             prompt: String::new(),
             session_id: None,
             position: (3, 2),
+            replicas: 1,
         },
     ];
     app.pipeline.pipeline_block_cursor = Some(1);
@@ -1361,6 +1364,7 @@ fn pipeline_builder_arrow_navigates_shift_arrow_moves_block() {
             prompt: String::new(),
             session_id: None,
             position: (2, 2),
+            replicas: 1,
         },
         pipeline_mod::PipelineBlock {
             id: 2,
@@ -1369,6 +1373,7 @@ fn pipeline_builder_arrow_navigates_shift_arrow_moves_block() {
             prompt: String::new(),
             session_id: None,
             position: (3, 2),
+            replicas: 1,
         },
     ];
     app.pipeline.pipeline_block_cursor = Some(1);
@@ -1508,6 +1513,7 @@ fn pipeline_app_with_block() -> App {
         prompt: String::new(),
         session_id: None,
         position: (0, 0),
+        replicas: 1,
     });
     app.pipeline.pipeline_block_cursor = Some(1);
     app.pipeline.pipeline_next_id = 2;
@@ -1759,4 +1765,64 @@ fn error_dismisses_before_help() {
     handle_key(&mut app, key(KeyCode::Char('a')));
     assert!(app.error_modal.is_none());
     assert!(app.help_popup.active);
+}
+
+#[test]
+fn pipeline_step_labels_expands_replicas() {
+    use crate::execution::pipeline::{PipelineBlock, PipelineDefinition};
+    let def = PipelineDefinition {
+        initial_prompt: "go".into(),
+        iterations: 1,
+        blocks: vec![
+            PipelineBlock {
+                id: 1,
+                name: "Writer".into(),
+                agent: "Claude".into(),
+                prompt: String::new(),
+                session_id: None,
+                position: (0, 0),
+                replicas: 3,
+            },
+            PipelineBlock {
+                id: 2,
+                name: "Reviewer".into(),
+                agent: "GPT".into(),
+                prompt: String::new(),
+                session_id: None,
+                position: (1, 0),
+                replicas: 1,
+            },
+        ],
+        connections: vec![],
+        session_configs: vec![],
+    };
+    let labels = pipeline_step_labels(&def);
+    assert_eq!(labels.len(), 4); // 3 replicas + 1
+    assert_eq!(labels[0], "Writer (r1) (Claude)");
+    assert_eq!(labels[1], "Writer (r2) (Claude)");
+    assert_eq!(labels[2], "Writer (r3) (Claude)");
+    assert_eq!(labels[3], "Reviewer (GPT)");
+}
+
+#[test]
+fn pipeline_step_labels_unnamed_blocks_no_agent_duplication() {
+    use crate::execution::pipeline::{PipelineBlock, PipelineDefinition};
+    let def = PipelineDefinition {
+        initial_prompt: "go".into(),
+        iterations: 1,
+        blocks: vec![PipelineBlock {
+            id: 5,
+            name: String::new(),
+            agent: "Claude".into(),
+            prompt: String::new(),
+            session_id: None,
+            position: (0, 0),
+            replicas: 1,
+        }],
+        connections: vec![],
+        session_configs: vec![],
+    };
+    let labels = pipeline_step_labels(&def);
+    assert_eq!(labels.len(), 1);
+    assert_eq!(labels[0], "Block 5 (Claude)");
 }

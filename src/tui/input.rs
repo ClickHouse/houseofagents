@@ -413,6 +413,10 @@ pub(super) fn handle_pipeline_paste(app: &mut App, text: &str) {
                     app.pipeline.pipeline_edit_session_buf.len();
             }
             PipelineEditField::Agent => {}
+            PipelineEditField::Replicas => {
+                let clean: String = text.chars().filter(|c| c.is_ascii_digit()).collect();
+                app.pipeline.pipeline_edit_replicas_buf.push_str(&clean);
+            }
         }
     } else if let Some(PipelineDialogMode::Save) = app.pipeline.pipeline_file_dialog {
         app.pipeline.pipeline_file_input.push_str(text);
@@ -739,6 +743,7 @@ pub(super) fn handle_pipeline_builder_key(app: &mut App, key: KeyEvent) {
                     prompt: String::new(),
                     session_id: None,
                     position: pos,
+                    replicas: 1,
                 });
             app.pipeline.pipeline_block_cursor = Some(id);
             pipeline_ensure_visible(app);
@@ -793,6 +798,8 @@ pub(super) fn handle_pipeline_builder_key(app: &mut App, key: KeyEvent) {
                         block.session_id.clone().unwrap_or_default();
                     app.pipeline.pipeline_edit_session_cursor =
                         app.pipeline.pipeline_edit_session_buf.len();
+                    app.pipeline.pipeline_edit_replicas_buf =
+                        block.replicas.to_string();
                 }
             }
         }
@@ -1085,14 +1092,16 @@ pub(super) fn handle_pipeline_edit_key(app: &mut App, key: KeyEvent) {
                 PipelineEditField::Name => PipelineEditField::Agent,
                 PipelineEditField::Agent => PipelineEditField::Prompt,
                 PipelineEditField::Prompt => PipelineEditField::SessionId,
-                PipelineEditField::SessionId => PipelineEditField::Name,
+                PipelineEditField::SessionId => PipelineEditField::Replicas,
+                PipelineEditField::Replicas => PipelineEditField::Name,
             };
         }
         KeyCode::Enter => {
             match app.pipeline.pipeline_edit_field {
                 PipelineEditField::Name
                 | PipelineEditField::Agent
-                | PipelineEditField::SessionId => {
+                | PipelineEditField::SessionId
+                | PipelineEditField::Replicas => {
                     // Confirm and save
                     if let Some(sel) = app.pipeline.pipeline_block_cursor {
                         if let Some(block) = app
@@ -1116,6 +1125,12 @@ pub(super) fn handle_pipeline_edit_key(app: &mut App, key: KeyEvent) {
                             } else {
                                 Some(app.pipeline.pipeline_edit_session_buf.clone())
                             };
+                            block.replicas = app
+                                .pipeline
+                                .pipeline_edit_replicas_buf
+                                .parse::<u32>()
+                                .unwrap_or(1)
+                                .clamp(1, 32);
                         }
                     }
                     app.pipeline.pipeline_def.normalize_session_configs();
@@ -1175,6 +1190,39 @@ pub(super) fn handle_pipeline_edit_key(app: &mut App, key: KeyEvent) {
                     app.pipeline.pipeline_edit_session_buf.pop();
                     app.pipeline.pipeline_edit_session_cursor =
                         app.pipeline.pipeline_edit_session_buf.len();
+                }
+                _ => {}
+            },
+            PipelineEditField::Replicas => match key.code {
+                KeyCode::Char(c) if c.is_ascii_digit() => {
+                    app.pipeline.pipeline_edit_replicas_buf.push(c);
+                    sync_pipeline_edit_replicas_buf(app);
+                }
+                KeyCode::Backspace => {
+                    app.pipeline.pipeline_edit_replicas_buf.pop();
+                    if app.pipeline.pipeline_edit_replicas_buf.is_empty() {
+                        // Keep showing empty, will default to 1 on save
+                    } else {
+                        sync_pipeline_edit_replicas_buf(app);
+                    }
+                }
+                KeyCode::Up | KeyCode::Char('+') => {
+                    let cur: u32 = app
+                        .pipeline
+                        .pipeline_edit_replicas_buf
+                        .parse()
+                        .unwrap_or(1);
+                    let next = (cur + 1).min(32);
+                    app.pipeline.pipeline_edit_replicas_buf = next.to_string();
+                }
+                KeyCode::Down | KeyCode::Char('-') => {
+                    let cur: u32 = app
+                        .pipeline
+                        .pipeline_edit_replicas_buf
+                        .parse()
+                        .unwrap_or(1);
+                    let next = cur.saturating_sub(1).max(1);
+                    app.pipeline.pipeline_edit_replicas_buf = next.to_string();
                 }
                 _ => {}
             },
@@ -2375,6 +2423,16 @@ pub(super) fn sync_pipeline_concurrency_buf(app: &mut App) {
             .min(99);
     }
     app.pipeline.pipeline_concurrency_buf = app.pipeline.pipeline_concurrency.to_string();
+}
+
+fn sync_pipeline_edit_replicas_buf(app: &mut App) {
+    let v: u32 = app
+        .pipeline
+        .pipeline_edit_replicas_buf
+        .parse()
+        .unwrap_or(1)
+        .clamp(1, 32);
+    app.pipeline.pipeline_edit_replicas_buf = v.to_string();
 }
 
 pub(super) fn effective_concurrency(runs: u32, concurrency: u32) -> u32 {

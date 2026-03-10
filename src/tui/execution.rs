@@ -37,6 +37,12 @@ pub(super) fn start_pipeline_execution(app: &mut App) {
         return;
     }
 
+    // Replica validation
+    if let Err(e) = pipeline_mod::validate_replicas(&app.pipeline.pipeline_def) {
+        app.error_modal = Some(e.to_string());
+        return;
+    }
+
     // Check agent availability per block
     let avail_agents: std::collections::HashMap<String, bool> = app
         .available_agents()
@@ -96,25 +102,22 @@ pub(super) fn start_pipeline_execution(app: &mut App) {
         }
     }
 
-    app.running.block_rows = app
-        .pipeline
-        .pipeline_def
-        .blocks
+    // Pre-seed block rows from runtime replica table so IDs match the execution engine
+    let rt = crate::execution::pipeline::build_runtime_table(&app.pipeline.pipeline_def);
+    app.running.block_rows = rt
+        .entries
         .iter()
-        .map(|block| {
+        .map(|info| {
             let provider = agent_configs
-                .get(&block.agent)
+                .get(&info.agent)
                 .map(|(k, _, _)| *k)
                 .unwrap_or(ProviderKind::Anthropic);
-            let label = if block.name.trim().is_empty() {
-                format!("Block {} ({})", block.id, block.agent)
-            } else {
-                block.name.clone()
-            };
             crate::app::BlockStatusRow {
-                block_id: block.id,
-                label,
-                agent_name: block.agent.clone(),
+                block_id: info.runtime_id,
+                source_block_id: info.source_block_id,
+                replica_index: info.replica_index,
+                label: info.display_label.clone(),
+                agent_name: info.agent.clone(),
                 provider,
                 status: crate::app::AgentRowStatus::Pending,
                 iteration: 0,
@@ -171,6 +174,7 @@ pub(super) fn start_pipeline_execution(app: &mut App) {
         app.pipeline.pipeline_def.blocks.len(),
         app.pipeline.pipeline_def.connections.len(),
         iterations,
+        rt.entries.len(),
         app.pipeline
             .pipeline_save_path
             .as_ref()
@@ -247,15 +251,10 @@ pub(super) fn resolve_selected_agent_configs(
 }
 
 pub(super) fn pipeline_step_labels(def: &pipeline_mod::PipelineDefinition) -> Vec<String> {
-    def.blocks
+    let rt = pipeline_mod::build_runtime_table(def);
+    rt.entries
         .iter()
-        .map(|block| {
-            if block.name.trim().is_empty() {
-                format!("Block {} ({})", block.id, block.agent)
-            } else {
-                format!("{} ({})", block.name, block.agent)
-            }
-        })
+        .map(|info| format_block_step_label(info.runtime_id, &info.display_label, &info.agent))
         .collect()
 }
 
@@ -594,10 +593,12 @@ pub(super) fn start_multi_pipeline_execution(
                             Some(format!("Failed to write prompt: {e}")),
                         );
                     }
+                    let run_rt = crate::execution::pipeline::build_runtime_table(&pipeline_def);
                     if let Err(e) = output.write_pipeline_session_info(
                         pipeline_def.blocks.len(),
                         pipeline_def.connections.len(),
                         iterations,
+                        run_rt.entries.len(),
                         pipeline_source.as_deref(),
                     ) {
                         let _ = output.append_error(&format!("Failed to write session info: {e}"));

@@ -194,10 +194,7 @@ fn draw_main_panel(f: &mut Frame, app: &App, area: Rect) {
         f.render_widget(error_para, log_chunks[1]);
     } else if let Some(target) = app.preview_target() {
         let preview_text = app.stream_buffer(target).map(|b| b.text()).unwrap_or("");
-        let target_label = match target {
-            crate::app::StreamTarget::Agent(name) => name.clone(),
-            crate::app::StreamTarget::Block(id) => format!("Block {id}"),
-        };
+        let target_label = resolve_stream_target_label(app, target);
 
         if app.show_activity_log() {
             let log_chunks = Layout::default()
@@ -446,13 +443,27 @@ fn draw_pipeline_dag(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(dag_block, area);
 
     let block_style_fn = |block_id: BlockId| -> (Color, BorderType) {
-        let row = app.block_rows().iter().find(|r| r.block_id == block_id);
-        let color = match row.map(|r| &r.status) {
-            Some(AgentRowStatus::Running) => Color::Yellow,
-            Some(AgentRowStatus::Finished) => Color::Green,
-            Some(AgentRowStatus::Error(_)) => Color::Red,
-            Some(AgentRowStatus::Skipped(_)) => Color::Gray,
-            _ => Color::DarkGray,
+        // Aggregate status across all replicas of this logical block
+        let replicas: Vec<_> = app.block_rows().iter()
+            .filter(|r| r.source_block_id == block_id)
+            .collect();
+        if replicas.is_empty() {
+            return (Color::DarkGray, BorderType::Plain);
+        }
+        let any_running = replicas.iter().any(|r| matches!(r.status, AgentRowStatus::Running));
+        let any_error = replicas.iter().any(|r| matches!(r.status, AgentRowStatus::Error(_)));
+        let all_finished = replicas.iter().all(|r| matches!(r.status, AgentRowStatus::Finished));
+        let all_skipped = replicas.iter().all(|r| matches!(r.status, AgentRowStatus::Skipped(_)));
+        let color = if any_running {
+            Color::Yellow
+        } else if all_finished {
+            Color::Green
+        } else if any_error {
+            Color::Red
+        } else if all_skipped {
+            Color::Gray
+        } else {
+            Color::DarkGray
         };
         (color, BorderType::Plain)
     };
@@ -1102,13 +1113,26 @@ fn spinner_frame() -> char {
     frames[idx]
 }
 
+fn resolve_stream_target_label(app: &App, target: &crate::app::StreamTarget) -> String {
+    match target {
+        crate::app::StreamTarget::Agent(name) => name.clone(),
+        crate::app::StreamTarget::Block(id) => app
+            .running
+            .block_rows
+            .iter()
+            .find(|r| r.block_id == *id)
+            .map(|r| r.label.clone())
+            .unwrap_or_else(|| format!("Block {id}")),
+    }
+}
+
 fn compute_total_steps(app: &App) -> usize {
     let agents = app.selected_agents.len();
     match app.selected_mode {
         crate::execution::ExecutionMode::Relay => agents * app.prompt.iterations as usize,
         crate::execution::ExecutionMode::Swarm => agents * app.prompt.iterations as usize,
         crate::execution::ExecutionMode::Pipeline => {
-            app.pipeline.pipeline_def.blocks.len() * app.pipeline.pipeline_def.iterations as usize
+            app.running.block_rows.len() * app.pipeline.pipeline_def.iterations as usize
         }
     }
 }
@@ -1386,20 +1410,20 @@ mod tests {
                 ProgressEvent::BlockStarted {
                     block_id: 1,
                     agent_name: "Claude".into(),
-                    label: "Block 1 (Claude)".into(),
+                    label: "Block 1".into(),
                     iteration: 1,
                 },
                 ProgressEvent::BlockStarted {
                     block_id: 2,
                     agent_name: "OpenAI".into(),
-                    label: "Block 2 (OpenAI)".into(),
+                    label: "Block 2".into(),
                     iteration: 1,
                 },
             ],
         );
         let s = current_status(&a);
-        assert!(s.contains("Block 1 (Claude)"));
-        assert!(s.contains("Block 2 (OpenAI)"));
+        assert!(s.contains("Block 1"));
+        assert!(s.contains("Block 2"));
         assert!(s.contains("thinking"));
     }
 
@@ -1414,26 +1438,26 @@ mod tests {
                 ProgressEvent::BlockStarted {
                     block_id: 1,
                     agent_name: "Claude".into(),
-                    label: "Block 1 (Claude)".into(),
+                    label: "Block 1".into(),
                     iteration: 1,
                 },
                 ProgressEvent::BlockFinished {
                     block_id: 1,
                     agent_name: "Claude".into(),
-                    label: "Block 1 (Claude)".into(),
+                    label: "Block 1".into(),
                     iteration: 1,
                 },
                 ProgressEvent::BlockStarted {
                     block_id: 2,
                     agent_name: "OpenAI".into(),
-                    label: "Block 2 (OpenAI)".into(),
+                    label: "Block 2".into(),
                     iteration: 1,
                 },
             ],
         );
         let s = current_status(&a);
         assert!(!s.contains("Block 1"));
-        assert!(s.contains("Block 2 (OpenAI)"));
+        assert!(s.contains("Block 2"));
     }
 
     #[test]
@@ -1446,7 +1470,7 @@ mod tests {
             vec![ProgressEvent::BlockFinished {
                 block_id: 1,
                 agent_name: "Claude".into(),
-                label: "Block 1 (Claude)".into(),
+                label: "Block 1".into(),
                 iteration: 1,
             }],
         );
@@ -1545,7 +1569,7 @@ mod tests {
             vec![ProgressEvent::BlockStarted {
                 block_id: 1,
                 agent_name: "Claude".into(),
-                label: "Block 1 (Claude)".into(),
+                label: "Block 1".into(),
                 iteration: 1,
             }],
         );
@@ -1559,5 +1583,30 @@ mod tests {
             !joined.contains("thinking"),
             "expected no thinking in: {joined}"
         );
+    }
+
+    #[test]
+    fn resolve_stream_target_label_uses_block_row_label() {
+        let mut a = app();
+        a.running.block_rows.push(crate::app::BlockStatusRow {
+            block_id: 0,
+            source_block_id: 1,
+            replica_index: 0,
+            label: "Writer (r1)".into(),
+            agent_name: "Claude".into(),
+            provider: ProviderKind::Anthropic,
+            status: crate::app::AgentRowStatus::Running,
+            iteration: 1,
+            last_log: String::new(),
+        });
+        let target = crate::app::StreamTarget::Block(0);
+        assert_eq!(resolve_stream_target_label(&a, &target), "Writer (r1)");
+    }
+
+    #[test]
+    fn resolve_stream_target_label_falls_back_for_unknown_id() {
+        let a = app();
+        let target = crate::app::StreamTarget::Block(99);
+        assert_eq!(resolve_stream_target_label(&a, &target), "Block 99");
     }
 }

@@ -479,6 +479,7 @@ impl OutputManager {
         block_count: usize,
         connection_count: usize,
         iterations: u32,
+        total_runtime_tasks: usize,
         pipeline_source: Option<&str>,
     ) -> Result<(), AppError> {
         let mut root = toml::map::Map::new();
@@ -489,6 +490,10 @@ impl OutputManager {
             Value::Integer(connection_count as i64),
         );
         root.insert("iterations".into(), Value::Integer(iterations as i64));
+        root.insert(
+            "total_runtime_tasks".into(),
+            Value::Integer(total_runtime_tasks as i64),
+        );
         if let Some(src) = pipeline_source {
             root.insert("pipeline_source".into(), Value::String(src.to_string()));
         }
@@ -848,7 +853,7 @@ mod tests {
     fn read_agent_session_info_rejects_pipeline_shape_without_agents() {
         let base = tempdir().expect("tempdir");
         let mgr = OutputManager::new(base.path(), Some("pipeline")).expect("new");
-        mgr.write_pipeline_session_info(1, 0, 1, None)
+        mgr.write_pipeline_session_info(1, 0, 1, 1, None)
             .expect("write");
 
         let err = OutputManager::read_agent_session_info(mgr.run_dir()).expect_err("should fail");

@@ -356,10 +356,15 @@ fn draw_canvas(f: &mut Frame, app: &App, area: Rect) {
             Color::DarkGray
         };
 
-        let title = if block.name.is_empty() {
-            format!(" {} ", block.agent)
+        let base_title = if block.name.is_empty() {
+            block.agent.clone()
         } else {
-            format!(" {} ", block.name)
+            block.name.clone()
+        };
+        let title = if block.replicas > 1 {
+            format!(" {} \u{00d7}{} ", base_title, block.replicas)
+        } else {
+            format!(" {} ", base_title)
         };
         let block_widget = Block::default()
             .title(title)
@@ -909,10 +914,15 @@ pub(crate) fn render_dag_readonly(
         let block_area = Rect::new(rx as u16, ry as u16, BLOCK_W, BLOCK_H);
 
         let (border_color, border_type) = block_style_fn(block.id);
-        let title = if block.name.is_empty() {
-            format!(" {} ", block.agent)
+        let base_title = if block.name.is_empty() {
+            block.agent.clone()
         } else {
-            format!(" {} ", block.name)
+            block.name.clone()
+        };
+        let title = if block.replicas > 1 {
+            format!(" {} \u{00d7}{} ", base_title, block.replicas)
+        } else {
+            format!(" {} ", base_title)
         };
         let block_widget = Block::default()
             .title(title)
@@ -1057,15 +1067,17 @@ fn draw_edit_popup(f: &mut Frame, app: &App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2), // Name
-            Constraint::Length(1), // spacer
-            Constraint::Length(2), // Provider
-            Constraint::Length(1), // spacer
-            Constraint::Min(6),    // Prompt
-            Constraint::Length(1), // spacer
-            Constraint::Length(2), // Session ID
-            Constraint::Length(1), // spacer
-            Constraint::Length(1), // hint
+            Constraint::Length(2), // Name          [0]
+            Constraint::Length(1), // spacer        [1]
+            Constraint::Length(2), // Provider      [2]
+            Constraint::Length(1), // spacer        [3]
+            Constraint::Min(6),    // Prompt        [4]
+            Constraint::Length(1), // spacer        [5]
+            Constraint::Length(2), // Session ID    [6]
+            Constraint::Length(1), // spacer        [7]
+            Constraint::Length(2), // Replicas      [8]
+            Constraint::Length(1), // spacer        [9]
+            Constraint::Length(1), // hint          [10]
         ])
         .split(inner);
 
@@ -1174,10 +1186,26 @@ fn draw_edit_popup(f: &mut Frame, app: &App, area: Rect) {
     ]);
     f.render_widget(Paragraph::new(sess_line), chunks[6]);
 
+    // Replicas
+    let rep_focus = app.pipeline.pipeline_edit_field == PipelineEditField::Replicas;
+    let rep_style = if rep_focus {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let rep_line = Line::from(vec![
+        Span::styled("Replicas: ", Style::default().fg(Color::White)),
+        Span::styled("[", rep_style),
+        Span::raw(&app.pipeline.pipeline_edit_replicas_buf),
+        Span::styled("]", rep_style),
+        Span::styled(" (1-32)", Style::default().fg(Color::DarkGray)),
+    ]);
+    f.render_widget(Paragraph::new(rep_line), chunks[8]);
+
     // Hint
     let hint = Paragraph::new("  Tab: next  Enter: save  Esc: back")
         .style(Style::default().fg(Color::DarkGray));
-    f.render_widget(hint, chunks[8]);
+    f.render_widget(hint, chunks[10]);
 }
 
 fn draw_file_dialog(f: &mut Frame, app: &App, area: Rect) {
@@ -1298,11 +1326,15 @@ fn draw_session_config_popup(f: &mut Frame, app: &App, area: Rect) {
             Style::default().add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!("{:<20}", "Session"),
+            format!("{:<17}", "Session"),
             Style::default().add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            "Keep",
+            format!("{:<6}", "Keep"),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "\u{00d7}N",
             Style::default().add_modifier(Modifier::BOLD),
         ),
     ]);
@@ -1332,11 +1364,16 @@ fn draw_session_config_popup(f: &mut Frame, app: &App, area: Rect) {
         let is_selected = si == cursor;
 
         let agent_col = truncate_chars(&session.agent, 14);
-        let label_col = truncate_chars(&session.display_label, 19);
+        let label_col = truncate_chars(&session.display_label, 16);
         let keep_col = if session.keep_across_iterations {
             "[x]"
         } else {
             "[ ]"
+        };
+        let replicas_col = if session.total_replicas > 1 {
+            format!("\u{00d7}{}", session.total_replicas)
+        } else {
+            String::new()
         };
 
         let style = if is_selected {
@@ -1349,15 +1386,16 @@ fn draw_session_config_popup(f: &mut Frame, app: &App, area: Rect) {
 
         let row = Line::from(vec![
             Span::styled(format!("{:<15}", agent_col), style),
-            Span::styled(format!("{:<20}", label_col), style),
+            Span::styled(format!("{:<17}", label_col), style),
             Span::styled(
-                keep_col.to_string(),
+                format!("{:<6}", keep_col),
                 if session.keep_across_iterations {
                     style.fg(if is_selected { Color::Black } else { Color::Green })
                 } else {
                     style.fg(if is_selected { Color::Black } else { Color::Red })
                 },
             ),
+            Span::styled(replicas_col, style),
         ]);
 
         let row_y = inner.y + 1 + vi as u16; // +1 for header
@@ -1393,6 +1431,7 @@ mod routing_tests {
             prompt: String::new(),
             session_id: None,
             position: (col, row),
+            replicas: 1,
         }
     }
 
