@@ -93,6 +93,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     if app.pipeline.pipeline_file_dialog.is_some() {
         draw_file_dialog(f, app, area);
     }
+    if app.pipeline.pipeline_show_session_config {
+        draw_session_config_popup(f, app, area);
+    }
     if let Some(ref msg) = app.error_modal {
         draw_error_modal(f, msg);
     }
@@ -162,6 +165,7 @@ fn draw_prompt_area(f: &mut Frame, app: &App, area: Rect) {
 
     let has_overlay = app.pipeline.pipeline_show_edit
         || app.pipeline.pipeline_file_dialog.is_some()
+        || app.pipeline.pipeline_show_session_config
         || app.error_modal.is_some();
     if prompt_focus && !has_overlay && inner.width > 0 && inner.height > 0 {
         let visible_row = cursor_row.saturating_sub(scroll_y as usize);
@@ -580,19 +584,11 @@ fn assign_ports(
         incoming.entry(conn.to).or_default().push(ci);
     }
 
-    // Symmetric offset sequence: 0, -1, +1, -2, +2, ...
+    // Linear offset sequence centered at 0 so ports follow spatial order:
+    // n=1: [0], n=2: [-1, 0], n=3: [-1, 0, 1], n=4: [-2, -1, 0, 1]
     let offset_seq = |n: usize| -> Vec<i16> {
-        let mut offsets = Vec::with_capacity(n);
-        offsets.push(0);
-        let mut d = 1i16;
-        while offsets.len() < n {
-            offsets.push(-d);
-            if offsets.len() < n {
-                offsets.push(d);
-            }
-            d += 1;
-        }
-        offsets
+        let half = n as i16 / 2;
+        (0..n as i16).map(|i| i - half).collect()
     };
 
     let max_off = (BLOCK_H as i16 / 2).saturating_sub(1).max(1);
@@ -678,16 +674,43 @@ fn route_wire(
         }
     }
 
-    // Case B: Forward different row (or blocked same-row forward)
-    // Case C: Backward or same column
-    // Both use 5-segment U-route with monotonic lane/tier separation.
+    // ── shared lane offsets for non-straight routes ──
     let gap = (CELL_W as i16 - BLOCK_W as i16).max(2);
     let side_lane = ((lane % gap as usize) as i16) * 2 + 1;
     let side_clamp = gap - 1;
-    let tier = lane as i16;
-    // Keep the horizontal corridor in row gaps (between block rows) for all tiers.
-    // Advancing by CELL_H preserves the same in-gap offset and avoids cutting through blocks.
-    let hy = fr.max(tr) as i16 * CELL_H as i16 + BLOCK_H as i16 + 1 + tier * CELL_H as i16;
+
+    // Case B: Forward different row — prefer a direct 3-segment L-path
+    //   Exit-L:  exit → short right into source-column gap → vertical to target row → horizontal to entry
+    //   Entry-L: exit → horizontal on source row → vertical in target-column gap → short right to entry
+    if fc < tc && fr != tr {
+        let target_row_clear = (fc + 1..tc).all(|c| !grid_occ.contains(&(c, tr)));
+        if target_row_clear {
+            let v1 = ex + side_lane.min(side_clamp);
+            return vec![
+                WireSeg { x1: ex, y1: ey, x2: v1, y2: ey },
+                WireSeg { x1: v1, y1: ey, x2: v1, y2: ny },
+                WireSeg { x1: v1, y1: ny, x2: nx, y2: ny },
+            ];
+        }
+        let source_row_clear = (fc + 1..tc).all(|c| !grid_occ.contains(&(c, fr)));
+        if source_row_clear {
+            let v2 = nx - side_lane.min(side_clamp);
+            return vec![
+                WireSeg { x1: ex, y1: ey, x2: v2, y2: ey },
+                WireSeg { x1: v2, y1: ey, x2: v2, y2: ny },
+                WireSeg { x1: v2, y1: ny, x2: nx, y2: ny },
+            ];
+        }
+    }
+
+    // Case C: Backward, same column, or fully blocked forward — 5-segment U-route.
+    // Forward: route through the inter-row gap nearest to the higher row (between rows).
+    // Backward/same-col: route below both rows to avoid crossing forward wires.
+    let hy = if fc < tc {
+        fr.min(tr) as i16 * CELL_H as i16 + BLOCK_H as i16 + 1
+    } else {
+        fr.max(tr) as i16 * CELL_H as i16 + BLOCK_H as i16 + 1
+    };
     let v1 = ex + side_lane.min(side_clamp);
     let v2 = nx - side_lane.min(side_clamp);
 
@@ -990,7 +1013,7 @@ fn draw_help_bar(f: &mut Frame, app: &App, area: Rect) {
     } else if app.pipeline.pipeline_removing_conn {
         "j/k: cycle | Enter: remove | Esc: cancel"
     } else {
-        "Arrows/hjkl: select | Shift+Arrows/HJKL: move block | Ctrl+Arrows: scroll | a: add | d: delete | e: edit | c: connect | x: disconnect | Ctrl+S: save | Ctrl+L: load | F5: run | ?: help | Esc: back"
+        "Arrows/hjkl: select | Shift+Arrows/HJKL: move block | Ctrl+Arrows: scroll | a: add | d: delete | e: edit | c: connect | x: disconnect | s: sessions | Ctrl+S: save | Ctrl+L: load | F5: run | ?: help | Esc: back"
     };
     let help_p = Paragraph::new(help)
         .style(Style::default().fg(Color::DarkGray))
@@ -1210,6 +1233,120 @@ fn draw_file_dialog(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+fn draw_session_config_popup(f: &mut Frame, app: &App, area: Rect) {
+    let popup = centered_rect(55, 50, area);
+    f.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .title(" Session Config ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    if inner.width < 10 || inner.height < 3 {
+        return;
+    }
+
+    let sessions = app.pipeline.pipeline_def.effective_sessions();
+
+    if sessions.is_empty() {
+        // Empty state
+        let msg = Paragraph::new("No sessions defined")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(ratatui::layout::Alignment::Center);
+        let cy = inner.y + inner.height / 2;
+        f.render_widget(msg, Rect::new(inner.x, cy, inner.width, 1));
+
+        if inner.height > 2 {
+            let hint = Paragraph::new("Add blocks to the pipeline")
+                .style(Style::default().fg(Color::DarkGray))
+                .alignment(ratatui::layout::Alignment::Center);
+            f.render_widget(hint, Rect::new(inner.x, cy + 1, inner.width, 1));
+        }
+
+        let footer = Paragraph::new("Esc: close")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(ratatui::layout::Alignment::Center);
+        let fy = inner.y + inner.height.saturating_sub(1);
+        f.render_widget(footer, Rect::new(inner.x, fy, inner.width, 1));
+        return;
+    }
+
+    // Header
+    let header = Line::from(vec![
+        Span::styled(
+            format!("{:<15}", "Agent"),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("{:<20}", "Session"),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "Keep",
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+    ]);
+    f.render_widget(Paragraph::new(header), Rect::new(inner.x, inner.y, inner.width, 1));
+
+    // Footer
+    let footer = Paragraph::new("j/k: navigate | Space/Enter: toggle | Esc: close")
+        .style(Style::default().fg(Color::DarkGray))
+        .alignment(ratatui::layout::Alignment::Center);
+    let footer_y = inner.y + inner.height.saturating_sub(1);
+    f.render_widget(footer, Rect::new(inner.x, footer_y, inner.width, 1));
+
+    // Rows
+    let visible_rows = inner.height.saturating_sub(2) as usize; // minus header and footer
+    if visible_rows == 0 {
+        return;
+    }
+
+    let cursor = app
+        .pipeline
+        .pipeline_session_config_cursor
+        .min(sessions.len().saturating_sub(1));
+    let scroll_offset = cursor.saturating_sub(visible_rows.saturating_sub(1));
+
+    for (vi, si) in (scroll_offset..sessions.len()).take(visible_rows).enumerate() {
+        let session = &sessions[si];
+        let is_selected = si == cursor;
+
+        let agent_col = truncate_chars(&session.agent, 14);
+        let label_col = truncate_chars(&session.display_label, 19);
+        let keep_col = if session.keep_across_iterations {
+            "[x]"
+        } else {
+            "[ ]"
+        };
+
+        let style = if is_selected {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+        } else {
+            Style::default()
+        };
+
+        let row = Line::from(vec![
+            Span::styled(format!("{:<15}", agent_col), style),
+            Span::styled(format!("{:<20}", label_col), style),
+            Span::styled(
+                keep_col.to_string(),
+                if session.keep_across_iterations {
+                    style.fg(if is_selected { Color::Black } else { Color::Green })
+                } else {
+                    style.fg(if is_selected { Color::Black } else { Color::Red })
+                },
+            ),
+        ]);
+
+        let row_y = inner.y + 1 + vi as u16; // +1 for header
+        f.render_widget(Paragraph::new(row), Rect::new(inner.x, row_y, inner.width, 1));
+    }
+}
+
 fn draw_error_modal(f: &mut Frame, message: &str) {
     let area = centered_rect(60, 20, f.area());
     f.render_widget(Clear, area);
@@ -1309,7 +1446,8 @@ mod routing_tests {
         let blocks = vec![block_at(1, 0, 0), block_at(2, 2, 2)];
         let occ = grid_occupancy(&blocks);
         let segs = route_wire((0, 0), (2, 2), &occ, 0, 0, 0);
-        assert_eq!(segs.len(), 5, "forward different row = 5 segments");
+        // Unobstructed forward different-row uses a 3-segment L-path
+        assert_eq!(segs.len(), 3, "forward different row (clear) = 3-segment L-path");
         no_seg_hits_block(&segs, &blocks);
     }
 

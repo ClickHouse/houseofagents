@@ -370,6 +370,9 @@ pub(super) fn handle_prompt_key(app: &mut App, key: KeyEvent) {
 // ---------------------------------------------------------------------------
 
 pub(super) fn handle_pipeline_paste(app: &mut App, text: &str) {
+    if app.pipeline.pipeline_show_session_config {
+        return;
+    }
     if app.pipeline.pipeline_show_edit {
         match app.pipeline.pipeline_edit_field {
             PipelineEditField::Name => {
@@ -445,13 +448,17 @@ pub(super) fn handle_pipeline_paste(app: &mut App, text: &str) {
 }
 
 pub(super) fn handle_pipeline_key(app: &mut App, key: KeyEvent) {
-    // Dispatch priority: edit popup > file dialog > remove-conn > connect mode > normal
+    // Dispatch priority: edit popup > file dialog > session config > remove-conn > connect mode > normal
     if app.pipeline.pipeline_show_edit {
         handle_pipeline_edit_key(app, key);
         return;
     }
     if app.pipeline.pipeline_file_dialog.is_some() {
         handle_pipeline_dialog_key(app, key);
+        return;
+    }
+    if app.pipeline.pipeline_show_session_config {
+        handle_pipeline_session_config_key(app, key);
         return;
     }
     if app.pipeline.pipeline_removing_conn {
@@ -675,6 +682,19 @@ pub(super) fn handle_pipeline_key(app: &mut App, key: KeyEvent) {
 
 pub(super) fn handle_pipeline_builder_key(app: &mut App, key: KeyEvent) {
     match key.code {
+        KeyCode::Char('s') => {
+            app.pipeline.pipeline_def.normalize_session_configs();
+            let sessions = app.pipeline.pipeline_def.effective_sessions();
+            app.pipeline.pipeline_show_session_config = true;
+            if !sessions.is_empty() {
+                app.pipeline.pipeline_session_config_cursor = app
+                    .pipeline
+                    .pipeline_session_config_cursor
+                    .min(sessions.len() - 1);
+            } else {
+                app.pipeline.pipeline_session_config_cursor = 0;
+            }
+        }
         KeyCode::Char('a') => {
             let pos = pipeline_mod::next_free_position(&app.pipeline.pipeline_def);
             let id = app.pipeline.pipeline_next_id;
@@ -713,6 +733,7 @@ pub(super) fn handle_pipeline_builder_key(app: &mut App, key: KeyEvent) {
                     .pipeline_def
                     .connections
                     .retain(|c| c.from != sel && c.to != sel);
+                app.pipeline.pipeline_def.normalize_session_configs();
                 if app.pipeline.pipeline_def.blocks.is_empty() {
                     app.pipeline.pipeline_block_cursor = None;
                 } else {
@@ -896,6 +917,55 @@ pub(super) fn pipeline_move_selected_block(app: &mut App, dx: i16, dy: i16) {
     app.pipeline.pipeline_def.blocks[sel_idx].position = next_pos;
 }
 
+fn handle_pipeline_session_config_key(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => {
+            app.pipeline.pipeline_show_session_config = false;
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.pipeline.pipeline_session_config_cursor =
+                app.pipeline.pipeline_session_config_cursor.saturating_sub(1);
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            let sessions = app.pipeline.pipeline_def.effective_sessions();
+            if !sessions.is_empty() {
+                app.pipeline.pipeline_session_config_cursor = (app
+                    .pipeline
+                    .pipeline_session_config_cursor
+                    + 1)
+                .min(sessions.len() - 1);
+            }
+        }
+        KeyCode::Char(' ') | KeyCode::Enter => {
+            let sessions = app.pipeline.pipeline_def.effective_sessions();
+            if sessions.is_empty() {
+                return;
+            }
+            let cursor = app
+                .pipeline
+                .pipeline_session_config_cursor
+                .min(sessions.len() - 1);
+            let session = &sessions[cursor];
+            let new_keep = !session.keep_across_iterations;
+            app.pipeline.pipeline_def.set_keep_session_across_iterations(
+                &session.agent,
+                &session.session_key,
+                new_keep,
+            );
+            app.pipeline.pipeline_def.normalize_session_configs();
+            // Re-clamp cursor
+            let sessions = app.pipeline.pipeline_def.effective_sessions();
+            if !sessions.is_empty() {
+                app.pipeline.pipeline_session_config_cursor = app
+                    .pipeline
+                    .pipeline_session_config_cursor
+                    .min(sessions.len() - 1);
+            }
+        }
+        _ => {}
+    }
+}
+
 pub(super) fn pipeline_spatial_nav(app: &mut App, axis: NavAxis, negative: bool) {
     let Some(sel_id) = app.pipeline.pipeline_block_cursor else {
         // Select first block if none selected
@@ -1024,6 +1094,7 @@ pub(super) fn handle_pipeline_edit_key(app: &mut App, key: KeyEvent) {
                             };
                         }
                     }
+                    app.pipeline.pipeline_def.normalize_session_configs();
                     app.pipeline.pipeline_show_edit = false;
                 }
                 PipelineEditField::Prompt => {

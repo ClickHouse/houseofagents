@@ -39,7 +39,7 @@ Each agent can run in API mode or CLI mode (`use_cli = true`). Mix and match fre
 - **Multiple runs** — launch N independent copies of the same setup in parallel with bounded concurrency
 - **Resume runs** — pick up where you left off in relay or swarm sessions
 - **Forward Prompt** — relay mode option to include the original prompt in every handoff
-- **Keep Session** — toggle per-provider conversation history persistence across iterations (on by default; turn off to clear provider memory between iterations while preserving inter-agent handoff context)
+- **Keep Session** — toggle per-provider conversation history persistence across iterations (on by default; turn off to clear provider memory between iterations while preserving inter-agent handoff context). Pipeline mode has its own per-session configuration popup in the Builder screen (`s`)
 - **Consolidation** — merge multi-agent output within a run or across multiple runs (any configured agent can consolidate)
 - **Diagnostics** — optional post-run analysis pass that writes `errors.md`
 - **Config editor** — add/remove/rename agents, edit settings, timeouts, and models live with a popup (`e`)
@@ -244,6 +244,7 @@ Fields vary by mode for options, but every prompt flow includes Prompt, Session 
 | `e` | Edit selected block (name, agent, prompt, session ID) |
 | `c` | Enter connect mode — select a second block to create a connection |
 | `x` | Enter remove-connection mode — pick a connection to delete |
+| `s` | Open session configuration popup — toggle per-session history persistence |
 | `Arrow keys` / `h j k l` | Navigate/select blocks spatially without moving |
 | `Shift+Arrow keys` / `Shift+H J K L` | Move selected block (swap with occupied target cell, otherwise move) |
 | `Ctrl+Arrow keys` | Scroll the builder canvas |
@@ -317,7 +318,7 @@ output_dir/
     my_session/
       session.toml                         # mode = "pipeline", block/connection counts
       prompt.md                            # Pipeline-level prompt (shared across blocks)
-      pipeline.toml                        # Pipeline definition snapshot
+      pipeline.toml                        # Pipeline definition snapshot (may include [[session_configs]])
       Analyzer_b1_Claude_iter1.md          # Block "Analyzer" (id 1), agent Claude, iteration 1
       Reviewer_b2_Gemini_iter1.md          # Block "Reviewer" (id 2), agent Gemini, iteration 1
       _errors.log
@@ -355,7 +356,7 @@ Legacy directories (`YYYYMMDD_HHMMSS_NNN[_session]` and `YYYY-MM-DD/HH-MM-SS[_se
   - Batch roots are excluded from resume lookup; resume is currently single-run only
   - Note: resuming a `keep_session = true` run across app restarts does not restore provider conversation history — providers are recreated fresh, though inter-agent handoff context is preserved
 - **Forward Prompt** (toggle with `Space` on Prompt screen) — relay mode only; when enabled, downstream agents receive the original prompt alongside the previous agent's output, preventing context loss in the handoff chain
-- **Keep Session** (toggle with `Space` on Prompt screen) — on by default; controls whether providers retain their conversation history across iterations. When turned off, each provider's history is cleared before every iteration after the first, so agents treat each round as a fresh conversation. Inter-agent handoff context (relay's previous output, swarm's round outputs) is always preserved regardless of this setting. Pipeline mode is unaffected
+- **Keep Session** (toggle with `Space` on Prompt screen) — on by default; controls whether providers retain their conversation history across iterations. When turned off, each provider's history is cleared before every iteration after the first, so agents treat each round as a fresh conversation. Inter-agent handoff context (relay's previous output, swarm's round outputs) is always preserved regardless of this setting. Pipeline mode has its own per-session session configuration popup accessible via `s` in the Builder screen — each effective session (shared or isolated) can independently toggle whether provider history persists across iterations. Non-default settings are stored in `pipeline.toml` as `[[session_configs]]` entries
 - **Consolidation**
   - Single-run: offered after non-cancelled swarm/pipeline runs with 2+ final outputs
   - Batch: first offers per-run consolidation, then optional cross-run consolidation across successful runs

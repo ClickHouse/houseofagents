@@ -179,6 +179,9 @@ pub(super) fn start_pipeline_execution(app: &mut App) {
     ) {
         let _ = output.append_error(&format!("Failed to write session info: {e}"));
     }
+    // Normalize session configs before snapshotting
+    app.pipeline.pipeline_def.normalize_session_configs();
+
     // Serialize pipeline definition
     match toml::to_string_pretty(&app.pipeline.pipeline_def) {
         Ok(toml_str) => {
@@ -529,6 +532,7 @@ pub(super) fn start_multi_pipeline_execution(
 
     let config = app.config.clone();
     let cli_timeout = app.effective_cli_timeout_seconds();
+    app.pipeline.pipeline_def.normalize_session_configs();
     let pipeline_def = app.pipeline.pipeline_def.clone();
     let prompt_context = PromptRuntimeContext::new(
         pipeline_def.initial_prompt.clone(),

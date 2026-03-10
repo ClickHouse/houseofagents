@@ -276,6 +276,8 @@ pub(crate) struct PipelineState {
     pub(crate) pipeline_file_list: Vec<String>,
     pub(crate) pipeline_file_cursor: usize,
     pub(crate) pipeline_save_path: Option<PathBuf>,
+    pub(crate) pipeline_show_session_config: bool,
+    pub(crate) pipeline_session_config_cursor: usize,
 }
 
 pub(crate) struct PendingSingleExecution {
@@ -1135,6 +1137,8 @@ impl PipelineState {
             pipeline_file_list: Vec::new(),
             pipeline_file_cursor: 0,
             pipeline_save_path: None,
+            pipeline_show_session_config: false,
+            pipeline_session_config_cursor: 0,
         }
     }
 }
@@ -1311,6 +1315,8 @@ mod tests {
         app.pipeline.pipeline_file_list = vec!["one".into()];
         app.pipeline.pipeline_file_cursor = 1;
         app.pipeline.pipeline_save_path = Some(PathBuf::from("pipeline.toml"));
+        app.pipeline.pipeline_show_session_config = true;
+        app.pipeline.pipeline_session_config_cursor = 2;
 
         app.reset_to_home();
 
@@ -1391,6 +1397,8 @@ mod tests {
         assert!(app.pipeline.pipeline_file_list.is_empty());
         assert_eq!(app.pipeline.pipeline_file_cursor, 0);
         assert!(app.pipeline.pipeline_save_path.is_none());
+        assert!(!app.pipeline.pipeline_show_session_config);
+        assert_eq!(app.pipeline.pipeline_session_config_cursor, 0);
     }
 
     #[test]

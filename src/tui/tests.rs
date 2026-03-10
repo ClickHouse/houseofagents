@@ -1493,3 +1493,137 @@ fn find_latest_compatible_run_skips_grouped_batch() {
         Some(good)
     );
 }
+
+// -- Session config popup tests --
+
+fn pipeline_app_with_block() -> App {
+    use crate::execution::pipeline::PipelineBlock;
+    let mut app = test_app();
+    app.screen = Screen::Pipeline;
+    app.pipeline.pipeline_focus = PipelineFocus::Builder;
+    app.pipeline.pipeline_def.blocks.push(PipelineBlock {
+        id: 1,
+        name: "B1".into(),
+        agent: "Claude".into(),
+        prompt: String::new(),
+        session_id: None,
+        position: (0, 0),
+    });
+    app.pipeline.pipeline_block_cursor = Some(1);
+    app.pipeline.pipeline_next_id = 2;
+    app
+}
+
+#[test]
+fn session_config_popup_opens_with_s_in_builder() {
+    let mut app = pipeline_app_with_block();
+    assert!(!app.pipeline.pipeline_show_session_config);
+    handle_key(&mut app, key(KeyCode::Char('s')));
+    assert!(app.pipeline.pipeline_show_session_config);
+}
+
+#[test]
+fn session_config_popup_does_not_open_outside_builder() {
+    let mut app = pipeline_app_with_block();
+    app.pipeline.pipeline_focus = PipelineFocus::InitialPrompt;
+    handle_key(&mut app, key(KeyCode::Char('s')));
+    assert!(!app.pipeline.pipeline_show_session_config);
+}
+
+#[test]
+fn session_config_popup_closes_with_esc() {
+    let mut app = pipeline_app_with_block();
+    handle_key(&mut app, key(KeyCode::Char('s')));
+    assert!(app.pipeline.pipeline_show_session_config);
+    handle_key(&mut app, key(KeyCode::Esc));
+    assert!(!app.pipeline.pipeline_show_session_config);
+}
+
+#[test]
+fn session_config_popup_toggle_sets_false() {
+    let mut app = pipeline_app_with_block();
+    handle_key(&mut app, key(KeyCode::Char('s')));
+    // Default is true (keep_across_iterations), toggle to false
+    handle_key(&mut app, key(KeyCode::Char(' ')));
+    let sessions = app.pipeline.pipeline_def.effective_sessions();
+    assert!(!sessions.is_empty());
+    let first = &sessions[0];
+    assert!(
+        !app.pipeline
+            .pipeline_def
+            .keep_session_across_iterations(&first.agent, &first.session_key)
+    );
+}
+
+#[test]
+fn session_config_popup_toggle_back_to_true() {
+    let mut app = pipeline_app_with_block();
+    handle_key(&mut app, key(KeyCode::Char('s')));
+    // Toggle off then back on
+    handle_key(&mut app, key(KeyCode::Char(' ')));
+    handle_key(&mut app, key(KeyCode::Char(' ')));
+    let sessions = app.pipeline.pipeline_def.effective_sessions();
+    let first = &sessions[0];
+    assert!(
+        app.pipeline
+            .pipeline_def
+            .keep_session_across_iterations(&first.agent, &first.session_key)
+    );
+}
+
+#[test]
+fn session_config_cursor_clamps() {
+    let mut app = pipeline_app_with_block();
+    handle_key(&mut app, key(KeyCode::Char('s')));
+    // Only 1 session — cursor should clamp to 0
+    handle_key(&mut app, key(KeyCode::Char('j')));
+    assert_eq!(app.pipeline.pipeline_session_config_cursor, 0);
+    handle_key(&mut app, key(KeyCode::Char('k')));
+    assert_eq!(app.pipeline.pipeline_session_config_cursor, 0);
+}
+
+#[test]
+fn session_config_paste_ignored() {
+    let mut app = pipeline_app_with_block();
+    handle_key(&mut app, key(KeyCode::Char('s')));
+    assert!(app.pipeline.pipeline_show_session_config);
+    // Paste via handle_paste should be swallowed inside session config popup
+    handle_paste(&mut app, "some pasted text");
+    // Popup still open, no state changed, no crash
+    assert!(app.pipeline.pipeline_show_session_config);
+    assert!(app.pipeline.pipeline_def.blocks[0].prompt.is_empty());
+}
+
+#[test]
+fn session_config_normalizes_on_block_delete() {
+    let mut app = pipeline_app_with_block();
+    // Set keep=false for block 1's session
+    app.pipeline
+        .pipeline_def
+        .set_keep_session_across_iterations("Claude", "__block_1", false);
+    assert_eq!(app.pipeline.pipeline_def.session_configs.len(), 1);
+    // Delete the block via 'd' key
+    handle_key(&mut app, key(KeyCode::Char('d')));
+    // Session config should be cleaned up immediately
+    assert!(app.pipeline.pipeline_def.session_configs.is_empty());
+}
+
+#[test]
+fn session_config_normalizes_on_edit_confirm() {
+    let mut app = pipeline_app_with_block();
+    // Set keep=false for block 1's session
+    app.pipeline
+        .pipeline_def
+        .set_keep_session_across_iterations("Claude", "__block_1", false);
+    assert_eq!(app.pipeline.pipeline_def.session_configs.len(), 1);
+    // Open edit dialog
+    handle_key(&mut app, key(KeyCode::Char('e')));
+    assert!(app.pipeline.pipeline_show_edit);
+    // Change the session_id field (which changes the session_key)
+    app.pipeline.pipeline_edit_session_buf = "shared".to_string();
+    // Confirm edit via Enter (on Name field by default)
+    handle_key(&mut app, key(KeyCode::Enter));
+    assert!(!app.pipeline.pipeline_show_edit);
+    // Old __block_1 config should be cleaned up since the session key changed
+    assert!(app.pipeline.pipeline_def.session_configs.is_empty());
+}

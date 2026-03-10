@@ -48,10 +48,35 @@ pub struct PipelineBlock {
     pub position: (u16, u16), // grid coordinates (col, row)
 }
 
+impl PipelineBlock {
+    pub fn effective_session_key(&self) -> String {
+        self.session_id
+            .clone()
+            .unwrap_or_else(|| format!("__block_{}", self.id))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PipelineConnection {
     pub from: BlockId,
     pub to: BlockId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionConfig {
+    pub agent: String,
+    pub session_key: String,
+    #[serde(default = "default_keep_across_iterations")]
+    pub keep_across_iterations: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectiveSession {
+    pub agent: String,
+    pub session_key: String,
+    pub display_label: String,
+    pub block_ids: Vec<BlockId>,
+    pub keep_across_iterations: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,10 +89,16 @@ pub struct PipelineDefinition {
     pub blocks: Vec<PipelineBlock>,
     #[serde(default)]
     pub connections: Vec<PipelineConnection>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub session_configs: Vec<SessionConfig>,
 }
 
 fn default_iterations() -> u32 {
     1
+}
+
+fn default_keep_across_iterations() -> bool {
+    true
 }
 
 impl Default for PipelineDefinition {
@@ -77,7 +108,118 @@ impl Default for PipelineDefinition {
             iterations: 1,
             blocks: Vec::new(),
             connections: Vec::new(),
+            session_configs: Vec::new(),
         }
+    }
+}
+
+impl PipelineDefinition {
+    pub fn effective_sessions(&self) -> Vec<EffectiveSession> {
+        let mut map: HashMap<(String, String), (String, Vec<BlockId>)> = HashMap::new();
+        for block in &self.blocks {
+            let key = (block.agent.clone(), block.effective_session_key());
+            let entry = map.entry(key).or_insert_with(|| {
+                let label = if block.session_id.is_some() {
+                    block.session_id.clone().unwrap()
+                } else if !block.name.is_empty() {
+                    block.name.clone()
+                } else {
+                    format!("Block {}", block.id)
+                };
+                (label, Vec::new())
+            });
+            entry.1.push(block.id);
+        }
+        let mut sessions: Vec<EffectiveSession> = map
+            .into_iter()
+            .map(|((agent, session_key), (display_label, block_ids))| {
+                let keep = self.keep_session_across_iterations(&agent, &session_key);
+                EffectiveSession {
+                    agent,
+                    session_key,
+                    display_label,
+                    block_ids,
+                    keep_across_iterations: keep,
+                }
+            })
+            .collect();
+        sessions.sort_by(|a, b| (&a.agent, &a.session_key).cmp(&(&b.agent, &b.session_key)));
+
+        // Disambiguate rows where agent + display_label would look identical
+        let mut label_counts: HashMap<(String, String), usize> = HashMap::new();
+        for s in &sessions {
+            *label_counts
+                .entry((s.agent.clone(), s.display_label.clone()))
+                .or_default() += 1;
+        }
+        for s in &mut sessions {
+            if label_counts
+                .get(&(s.agent.clone(), s.display_label.clone()))
+                .copied()
+                .unwrap_or(0)
+                > 1
+            {
+                let ids: Vec<String> = s.block_ids.iter().map(|id| id.to_string()).collect();
+                // Prefix with block IDs so truncation never hides the distinguishing part
+                s.display_label = format!("#{}: {}", ids.join(","), s.display_label);
+            }
+        }
+
+        sessions
+    }
+
+    pub fn keep_session_across_iterations(&self, agent: &str, session_key: &str) -> bool {
+        self.session_configs
+            .iter()
+            .find(|c| c.agent == agent && c.session_key == session_key)
+            .map(|c| c.keep_across_iterations)
+            .unwrap_or(true)
+    }
+
+    pub fn set_keep_session_across_iterations(
+        &mut self,
+        agent: &str,
+        session_key: &str,
+        keep: bool,
+    ) {
+        if keep {
+            // Remove explicit override (true is the default)
+            self.session_configs
+                .retain(|c| !(c.agent == agent && c.session_key == session_key));
+        } else if let Some(existing) = self
+            .session_configs
+            .iter_mut()
+            .find(|c| c.agent == agent && c.session_key == session_key)
+        {
+            existing.keep_across_iterations = false;
+        } else {
+            self.session_configs.push(SessionConfig {
+                agent: agent.to_string(),
+                session_key: session_key.to_string(),
+                keep_across_iterations: false,
+            });
+        }
+    }
+
+    pub fn normalize_session_configs(&mut self) {
+        // Collect valid effective session keys
+        let valid: HashSet<(String, String)> = self
+            .blocks
+            .iter()
+            .map(|b| (b.agent.clone(), b.effective_session_key()))
+            .collect();
+
+        // Drop stale rows and rows with keep=true (default)
+        self.session_configs
+            .retain(|c| !c.keep_across_iterations && valid.contains(&(c.agent.clone(), c.session_key.clone())));
+
+        // Sort for stability
+        self.session_configs
+            .sort_by(|a, b| (&a.agent, &a.session_key).cmp(&(&b.agent, &b.session_key)));
+
+        // Deduplicate
+        self.session_configs
+            .dedup_by(|a, b| a.agent == b.agent && a.session_key == b.session_key);
     }
 }
 
@@ -246,7 +388,9 @@ pub fn ensure_pipelines_dir() -> io::Result<PathBuf> {
 }
 
 pub fn save_pipeline(def: &PipelineDefinition, path: &Path) -> Result<(), AppError> {
-    let content = toml::to_string_pretty(def)
+    let mut normalized = def.clone();
+    normalized.normalize_session_configs();
+    let content = toml::to_string_pretty(&normalized)
         .map_err(|e| AppError::Config(format!("Failed to serialize pipeline: {e}")))?;
     std::fs::write(path, content)?;
     Ok(())
@@ -254,8 +398,9 @@ pub fn save_pipeline(def: &PipelineDefinition, path: &Path) -> Result<(), AppErr
 
 pub fn load_pipeline(path: &Path) -> Result<PipelineDefinition, AppError> {
     let content = std::fs::read_to_string(path)?;
-    let def: PipelineDefinition = toml::from_str(&content)
+    let mut def: PipelineDefinition = toml::from_str(&content)
         .map_err(|e| AppError::Config(format!("Failed to parse pipeline: {e}")))?;
+    def.normalize_session_configs();
     validate_pipeline(&def)?;
     Ok(def)
 }
@@ -298,6 +443,19 @@ fn validate_pipeline(def: &PipelineDefinition) -> Result<(), AppError> {
     // Check for cycles
     topological_layers(def)
         .map_err(|_| AppError::Config("Pipeline contains a cycle".to_string()))?;
+
+    // Check for duplicate session config entries
+    {
+        let mut seen_configs = HashSet::new();
+        for cfg in &def.session_configs {
+            if !seen_configs.insert((&cfg.agent, &cfg.session_key)) {
+                return Err(AppError::Config(format!(
+                    "Duplicate session config for ({}, {})",
+                    cfg.agent, cfg.session_key
+                )));
+            }
+        }
+    }
 
     Ok(())
 }
@@ -391,10 +549,7 @@ where
     let mut provider_pool: ProviderPool = HashMap::new();
 
     for block in &def.blocks {
-        let session_key = block
-            .session_id
-            .clone()
-            .unwrap_or_else(|| format!("__block_{}", block.id));
+        let session_key = block.effective_session_key();
         let pool_key = (block.agent.clone(), session_key);
         if let std::collections::hash_map::Entry::Vacant(entry) = provider_pool.entry(pool_key) {
             if let Some((kind, cfg, _use_cli)) = agent_configs.get(&block.agent) {
@@ -417,6 +572,16 @@ where
     for iteration in 1..=def.iterations {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             break;
+        }
+
+        // Clear history for sessions configured to reset between iterations
+        if iteration > 1 {
+            for ((agent, session_key), provider_arc) in &provider_pool {
+                if !def.keep_session_across_iterations(agent, session_key) {
+                    let mut guard = provider_arc.lock().await;
+                    guard.clear_history();
+                }
+            }
         }
 
         let mut current_in_degree = in_degree.clone();
@@ -502,10 +667,7 @@ where
                     );
 
                     // Get provider from pool
-                    let session_key = block
-                        .session_id
-                        .clone()
-                        .unwrap_or_else(|| format!("__block_{}", block.id));
+                    let session_key = block.effective_session_key();
                     let pool_key = (agent_name.clone(), session_key);
                     let provider_arc = match provider_pool.get(&pool_key) {
                         Some(p) => p.clone(),
@@ -856,7 +1018,7 @@ mod tests {
     use crate::output::OutputManager;
     use crate::provider::ProviderKind;
     use std::collections::HashMap;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
     use std::sync::{Arc, Mutex};
     use tokio::sync::mpsc;
 
@@ -884,6 +1046,7 @@ mod tests {
             iterations: 1,
             blocks,
             connections,
+            session_configs: Vec::new(),
         }
     }
 
@@ -1234,6 +1397,7 @@ to = 1
                 position: (0, 0),
             }],
             connections: vec![],
+            session_configs: Vec::new(),
         };
         let context = PromptRuntimeContext::new(def.initial_prompt.clone(), false);
 
@@ -1270,6 +1434,7 @@ to = 1
                 position: (0, 0),
             }],
             connections: vec![],
+            session_configs: Vec::new(),
         };
         let agent_configs = HashMap::from([(
             "Claude".to_string(),
@@ -1345,6 +1510,7 @@ to = 1
                 position: (0, 0),
             }],
             connections: vec![],
+            session_configs: Vec::new(),
         };
         let agent_configs = HashMap::from([(
             "Claude".to_string(),
@@ -1500,5 +1666,577 @@ to = 1
             .count();
         assert_eq!(finished_count, 3);
         assert_eq!(peak.load(Ordering::SeqCst), 1);
+    }
+
+    // -- effective_session_key --
+
+    #[test]
+    fn effective_session_key_returns_explicit_session_id() {
+        let b = PipelineBlock {
+            id: 1,
+            name: "B".into(),
+            agent: "Claude".into(),
+            prompt: String::new(),
+            session_id: Some("shared".into()),
+            position: (0, 0),
+        };
+        assert_eq!(b.effective_session_key(), "shared");
+    }
+
+    #[test]
+    fn effective_session_key_falls_back_to_block_id() {
+        let b = block(5, 0, 0);
+        assert_eq!(b.effective_session_key(), "__block_5");
+    }
+
+    // -- effective_sessions --
+
+    #[test]
+    fn effective_sessions_groups_shared_sessions() {
+        let mut def = def_with(
+            vec![
+                PipelineBlock {
+                    id: 1,
+                    name: "A".into(),
+                    agent: "Claude".into(),
+                    prompt: String::new(),
+                    session_id: Some("shared".into()),
+                    position: (0, 0),
+                },
+                PipelineBlock {
+                    id: 2,
+                    name: "B".into(),
+                    agent: "Claude".into(),
+                    prompt: String::new(),
+                    session_id: Some("shared".into()),
+                    position: (1, 0),
+                },
+            ],
+            vec![conn(1, 2)],
+        );
+        def.session_configs = Vec::new();
+        let sessions = def.effective_sessions();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_key, "shared");
+        assert!(sessions[0].block_ids.contains(&1));
+        assert!(sessions[0].block_ids.contains(&2));
+    }
+
+    #[test]
+    fn effective_sessions_separates_different_agents_same_session() {
+        let mut def = def_with(
+            vec![
+                PipelineBlock {
+                    id: 1,
+                    name: "A".into(),
+                    agent: "Claude".into(),
+                    prompt: String::new(),
+                    session_id: Some("shared".into()),
+                    position: (0, 0),
+                },
+                PipelineBlock {
+                    id: 2,
+                    name: "B".into(),
+                    agent: "GPT".into(),
+                    prompt: String::new(),
+                    session_id: Some("shared".into()),
+                    position: (1, 0),
+                },
+            ],
+            vec![],
+        );
+        def.session_configs = Vec::new();
+        let sessions = def.effective_sessions();
+        assert_eq!(sessions.len(), 2);
+    }
+
+    #[test]
+    fn effective_sessions_isolated_blocks_get_separate_rows() {
+        let def = def_with(
+            vec![block(1, 0, 0), block(2, 1, 0), block(3, 2, 0)],
+            vec![],
+        );
+        let sessions = def.effective_sessions();
+        assert_eq!(sessions.len(), 3);
+    }
+
+    #[test]
+    fn effective_sessions_sorted_by_agent_then_key() {
+        let mut def = def_with(
+            vec![
+                PipelineBlock {
+                    id: 1,
+                    name: "Z".into(),
+                    agent: "GPT".into(),
+                    prompt: String::new(),
+                    session_id: None,
+                    position: (0, 0),
+                },
+                PipelineBlock {
+                    id: 2,
+                    name: "A".into(),
+                    agent: "Claude".into(),
+                    prompt: String::new(),
+                    session_id: None,
+                    position: (1, 0),
+                },
+            ],
+            vec![],
+        );
+        def.session_configs = Vec::new();
+        let sessions = def.effective_sessions();
+        assert_eq!(sessions[0].agent, "Claude");
+        assert_eq!(sessions[1].agent, "GPT");
+    }
+
+    #[test]
+    fn effective_sessions_disambiguates_identical_labels() {
+        let def = def_with(
+            vec![
+                PipelineBlock {
+                    id: 1,
+                    name: "Worker".into(),
+                    agent: "Claude".into(),
+                    prompt: String::new(),
+                    session_id: None,
+                    position: (0, 0),
+                },
+                PipelineBlock {
+                    id: 2,
+                    name: "Worker".into(),
+                    agent: "Claude".into(),
+                    prompt: String::new(),
+                    session_id: None,
+                    position: (1, 0),
+                },
+            ],
+            vec![],
+        );
+        let sessions = def.effective_sessions();
+        assert_eq!(sessions.len(), 2);
+        // Both have same agent+name, so labels must be disambiguated with block IDs
+        assert_ne!(sessions[0].display_label, sessions[1].display_label);
+        assert!(sessions[0].display_label.contains("Worker"));
+        assert!(sessions[1].display_label.contains("Worker"));
+        // Each label is prefixed with #id so truncation never hides the distinguishing part
+        assert!(
+            sessions[0].display_label.starts_with('#'),
+            "label should be prefixed with block ID: {}",
+            sessions[0].display_label
+        );
+    }
+
+    // -- keep_session_across_iterations --
+
+    #[test]
+    fn keep_session_defaults_to_true() {
+        let def = def_with(vec![block(1, 0, 0)], vec![]);
+        assert!(def.keep_session_across_iterations("Claude", "__block_1"));
+    }
+
+    #[test]
+    fn set_keep_false_adds_explicit_entry() {
+        let mut def = def_with(vec![block(1, 0, 0)], vec![]);
+        def.set_keep_session_across_iterations("Claude", "__block_1", false);
+        assert!(!def.keep_session_across_iterations("Claude", "__block_1"));
+        assert_eq!(def.session_configs.len(), 1);
+    }
+
+    #[test]
+    fn toggle_back_to_true_removes_explicit_entry() {
+        let mut def = def_with(vec![block(1, 0, 0)], vec![]);
+        def.set_keep_session_across_iterations("Claude", "__block_1", false);
+        assert_eq!(def.session_configs.len(), 1);
+        def.set_keep_session_across_iterations("Claude", "__block_1", true);
+        assert!(def.session_configs.is_empty());
+        assert!(def.keep_session_across_iterations("Claude", "__block_1"));
+    }
+
+    // -- normalize_session_configs --
+
+    #[test]
+    fn normalize_drops_stale_rows() {
+        let mut def = def_with(vec![block(1, 0, 0)], vec![]);
+        def.session_configs.push(SessionConfig {
+            agent: "Claude".into(),
+            session_key: "nonexistent".into(),
+            keep_across_iterations: false,
+        });
+        def.normalize_session_configs();
+        assert!(def.session_configs.is_empty());
+    }
+
+    #[test]
+    fn normalize_drops_true_rows() {
+        let mut def = def_with(vec![block(1, 0, 0)], vec![]);
+        def.session_configs.push(SessionConfig {
+            agent: "Claude".into(),
+            session_key: "__block_1".into(),
+            keep_across_iterations: true,
+        });
+        def.normalize_session_configs();
+        assert!(def.session_configs.is_empty());
+    }
+
+    #[test]
+    fn normalize_keeps_valid_false_rows() {
+        let mut def = def_with(vec![block(1, 0, 0)], vec![]);
+        def.session_configs.push(SessionConfig {
+            agent: "Claude".into(),
+            session_key: "__block_1".into(),
+            keep_across_iterations: false,
+        });
+        def.normalize_session_configs();
+        assert_eq!(def.session_configs.len(), 1);
+    }
+
+    // -- serde --
+
+    #[test]
+    fn old_toml_without_session_configs_loads_empty() {
+        let toml_str = r#"
+initial_prompt = "test"
+iterations = 1
+
+[[blocks]]
+id = 1
+name = "B"
+agent = "Claude"
+prompt = ""
+position = [0, 0]
+"#;
+        let def: PipelineDefinition = toml::from_str(toml_str).unwrap();
+        assert!(def.session_configs.is_empty());
+    }
+
+    #[test]
+    fn session_config_missing_keep_defaults_to_true() {
+        let toml_str = r#"
+initial_prompt = "test"
+iterations = 1
+
+[[blocks]]
+id = 1
+name = "B"
+agent = "Claude"
+prompt = ""
+position = [0, 0]
+
+[[session_configs]]
+agent = "Claude"
+session_key = "__block_1"
+"#;
+        let def: PipelineDefinition = toml::from_str(toml_str).unwrap();
+        assert_eq!(def.session_configs.len(), 1);
+        assert!(def.session_configs[0].keep_across_iterations);
+    }
+
+    #[test]
+    fn save_load_roundtrip_preserves_false_session_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_session.toml");
+        let mut def = def_with(vec![block(1, 0, 0)], vec![]);
+        def.set_keep_session_across_iterations("Claude", "__block_1", false);
+        save_pipeline(&def, &path).unwrap();
+        let loaded = load_pipeline(&path).unwrap();
+        assert!(!loaded.keep_session_across_iterations("Claude", "__block_1"));
+    }
+
+    #[test]
+    fn load_deduplicates_session_configs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dup.toml");
+        let toml_str = r#"
+initial_prompt = "test"
+iterations = 1
+
+[[blocks]]
+id = 1
+name = "B"
+agent = "Claude"
+prompt = ""
+position = [0, 0]
+
+[[session_configs]]
+agent = "Claude"
+session_key = "__block_1"
+keep_across_iterations = false
+
+[[session_configs]]
+agent = "Claude"
+session_key = "__block_1"
+keep_across_iterations = false
+"#;
+        std::fs::write(&path, toml_str).unwrap();
+        // Normalization deduplicates before validation
+        let loaded = load_pipeline(&path).unwrap();
+        assert_eq!(loaded.session_configs.len(), 1);
+        assert!(!loaded.keep_session_across_iterations("Claude", "__block_1"));
+    }
+
+    // -- execution: clear_history --
+
+    struct ClearCountProvider {
+        kind: ProviderKind,
+        responses: std::sync::Mutex<
+            VecDeque<Result<crate::provider::CompletionResponse, AppError>>,
+        >,
+        clear_count: Arc<AtomicUsize>,
+    }
+
+    impl crate::provider::Provider for ClearCountProvider {
+        fn kind(&self) -> ProviderKind {
+            self.kind
+        }
+
+        fn clear_history(&mut self) {
+            self.clear_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        fn send(&mut self, _message: &str) -> crate::provider::SendFuture<'_> {
+            Box::pin(async {
+                self.responses
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or_else(|| {
+                        Ok(crate::provider::CompletionResponse {
+                            content: "response".to_string(),
+                            debug_logs: Vec::new(),
+                        })
+                    })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn iteration_clears_non_keep_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = OutputManager::new(dir.path(), Some("clear-test")).unwrap();
+        let mut def = def_with(vec![block(1, 0, 0)], vec![]);
+        def.iterations = 2;
+        def.set_keep_session_across_iterations("Claude", "__block_1", false);
+
+        let agent_configs = HashMap::from([(
+            "Claude".to_string(),
+            (
+                ProviderKind::Anthropic,
+                ProviderConfig {
+                    api_key: String::new(),
+                    model: "test".to_string(),
+                    reasoning_effort: None,
+                    thinking_effort: None,
+                    use_cli: false,
+                    cli_print_mode: true,
+                    extra_cli_args: String::new(),
+                },
+                false,
+            ),
+        )]);
+        let context = PromptRuntimeContext::new(def.initial_prompt.clone(), false);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let clear_count = Arc::new(AtomicUsize::new(0));
+        let cc = clear_count.clone();
+
+        run_pipeline_with_provider_factory(
+            &def,
+            0,
+            agent_configs,
+            &context,
+            &output,
+            tx,
+            cancel,
+            move |_kind, _cfg| {
+                Box::new(ClearCountProvider {
+                    kind: ProviderKind::Anthropic,
+                    responses: std::sync::Mutex::new(VecDeque::new()),
+                    clear_count: cc.clone(),
+                })
+            },
+        )
+        .await
+        .unwrap();
+
+        // Should have cleared once before iteration 2
+        assert_eq!(clear_count.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn single_iteration_never_clears() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = OutputManager::new(dir.path(), Some("no-clear")).unwrap();
+        let mut def = def_with(vec![block(1, 0, 0)], vec![]);
+        def.iterations = 1;
+        def.set_keep_session_across_iterations("Claude", "__block_1", false);
+
+        let agent_configs = HashMap::from([(
+            "Claude".to_string(),
+            (
+                ProviderKind::Anthropic,
+                ProviderConfig {
+                    api_key: String::new(),
+                    model: "test".to_string(),
+                    reasoning_effort: None,
+                    thinking_effort: None,
+                    use_cli: false,
+                    cli_print_mode: true,
+                    extra_cli_args: String::new(),
+                },
+                false,
+            ),
+        )]);
+        let context = PromptRuntimeContext::new(def.initial_prompt.clone(), false);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let clear_count = Arc::new(AtomicUsize::new(0));
+        let cc = clear_count.clone();
+
+        run_pipeline_with_provider_factory(
+            &def,
+            0,
+            agent_configs,
+            &context,
+            &output,
+            tx,
+            cancel,
+            move |_kind, _cfg| {
+                Box::new(ClearCountProvider {
+                    kind: ProviderKind::Anthropic,
+                    responses: std::sync::Mutex::new(VecDeque::new()),
+                    clear_count: cc.clone(),
+                })
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(clear_count.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn all_keep_sessions_never_clear() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = OutputManager::new(dir.path(), Some("keep-all")).unwrap();
+        let mut def = def_with(vec![block(1, 0, 0)], vec![]);
+        def.iterations = 2;
+        // Default is keep=true, so no explicit config needed
+
+        let agent_configs = HashMap::from([(
+            "Claude".to_string(),
+            (
+                ProviderKind::Anthropic,
+                ProviderConfig {
+                    api_key: String::new(),
+                    model: "test".to_string(),
+                    reasoning_effort: None,
+                    thinking_effort: None,
+                    use_cli: false,
+                    cli_print_mode: true,
+                    extra_cli_args: String::new(),
+                },
+                false,
+            ),
+        )]);
+        let context = PromptRuntimeContext::new(def.initial_prompt.clone(), false);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let clear_count = Arc::new(AtomicUsize::new(0));
+        let cc = clear_count.clone();
+
+        run_pipeline_with_provider_factory(
+            &def,
+            0,
+            agent_configs,
+            &context,
+            &output,
+            tx,
+            cancel,
+            move |_kind, _cfg| {
+                Box::new(ClearCountProvider {
+                    kind: ProviderKind::Anthropic,
+                    responses: std::sync::Mutex::new(VecDeque::new()),
+                    clear_count: cc.clone(),
+                })
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(clear_count.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn shared_session_clears_once_per_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = OutputManager::new(dir.path(), Some("shared-clear")).unwrap();
+        let mut def = def_with(
+            vec![
+                PipelineBlock {
+                    id: 1,
+                    name: "A".into(),
+                    agent: "Claude".into(),
+                    prompt: String::new(),
+                    session_id: Some("shared".into()),
+                    position: (0, 0),
+                },
+                PipelineBlock {
+                    id: 2,
+                    name: "B".into(),
+                    agent: "Claude".into(),
+                    prompt: String::new(),
+                    session_id: Some("shared".into()),
+                    position: (1, 0),
+                },
+            ],
+            vec![conn(1, 2)],
+        );
+        def.iterations = 2;
+        def.set_keep_session_across_iterations("Claude", "shared", false);
+
+        let agent_configs = HashMap::from([(
+            "Claude".to_string(),
+            (
+                ProviderKind::Anthropic,
+                ProviderConfig {
+                    api_key: String::new(),
+                    model: "test".to_string(),
+                    reasoning_effort: None,
+                    thinking_effort: None,
+                    use_cli: false,
+                    cli_print_mode: true,
+                    extra_cli_args: String::new(),
+                },
+                false,
+            ),
+        )]);
+        let context = PromptRuntimeContext::new(def.initial_prompt.clone(), false);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let clear_count = Arc::new(AtomicUsize::new(0));
+        let cc = clear_count.clone();
+
+        run_pipeline_with_provider_factory(
+            &def,
+            0,
+            agent_configs,
+            &context,
+            &output,
+            tx,
+            cancel,
+            move |_kind, _cfg| {
+                Box::new(ClearCountProvider {
+                    kind: ProviderKind::Anthropic,
+                    responses: std::sync::Mutex::new(VecDeque::new()),
+                    clear_count: cc.clone(),
+                })
+            },
+        )
+        .await
+        .unwrap();
+
+        // Two blocks share one provider, cleared once before iteration 2
+        assert_eq!(clear_count.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 }
