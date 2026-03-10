@@ -72,6 +72,8 @@ pub fn draw(f: &mut Frame, app: &App) {
         Span::raw(": grab/release  "),
         Span::styled("Enter", Style::default().fg(Color::Yellow)),
         Span::raw(": start (cursor can be first)  "),
+        Span::styled("Ctrl+E", Style::default().fg(Color::Yellow)),
+        Span::raw(": analyze  "),
         Span::styled("?", Style::default().fg(Color::Yellow)),
         Span::raw(": help  "),
         Span::styled("Esc", Style::default().fg(Color::Yellow)),
@@ -83,5 +85,8 @@ pub fn draw(f: &mut Frame, app: &App) {
     // Help popup overlay
     if app.help_popup.active {
         help::draw_help_overlay(f, &app.help_popup, help::order_help_lines(), " Relay Order ");
+    }
+    if app.setup_analysis.active {
+        help::draw_setup_analysis_popup(f, &app.setup_analysis);
     }
 }

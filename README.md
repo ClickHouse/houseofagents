@@ -230,6 +230,7 @@ Anthropic `thinking_effort = "max"` is rejected in API mode. In CLI mode, House 
 | `Tab` / `Shift+Tab` | Cycle input fields forward / backward |
 | `Space` | Toggle focused option (Resume / Forward Prompt / Keep Session) |
 | `Enter` / `F5` | Start run |
+| `Ctrl+E` | Analyze setup — sends current configuration to `diagnostic_provider` for a plain-language explanation |
 | `?` | Open help (unavailable while editing text fields: prompt, session name) |
 | `Esc` | Back |
 
@@ -253,6 +254,7 @@ Fields vary by mode for options, but every prompt flow includes Prompt, Session 
 | `↑`/`+` `↓`/`-` | Increment / decrement iterations, runs, or concurrency on the focused numeric field |
 | `Ctrl+S` | Save pipeline (always prompts for filename, prefills current name) |
 | `Ctrl+L` | Load pipeline from file |
+| `Ctrl+E` | Analyze setup — sends current pipeline to `diagnostic_provider` for a plain-language explanation |
 | `F5` | Validate and run the pipeline |
 | `?` | Open help popup (6 tabbed sections; Tab/Shift+Tab to cycle). Only when focus is not on a text field (initial prompt / session name). |
 | `Esc` | Cancel current action / back to home |
@@ -266,6 +268,7 @@ Inside the **edit popup**: `Tab` cycles between Name, Agent (use `Left`/`Right`)
 | `j` / `k` | Move cursor |
 | `Space` | Grab / reorder agent |
 | `Enter` | Confirm and start |
+| `Ctrl+E` | Analyze setup — sends current configuration to `diagnostic_provider` for a plain-language explanation |
 | `?` | Open help |
 | `Esc` | Back to prompt |
 
@@ -380,4 +383,5 @@ Legacy directories (`YYYYMMDD_HHMMSS_NNN[_session]` and `YYYY-MM-DD/HH-MM-SS[_se
 - **Consolidation**
   - Single-run: offered after non-cancelled swarm/pipeline runs with 2+ final outputs
   - Batch: first offers per-run consolidation, then optional cross-run consolidation across successful runs
+- **Setup Analysis** — press `Ctrl+E` on the Prompt, Order, or Pipeline screen to send the current run configuration to the `diagnostic_provider` for a plain-language explanation of what the run will do. Requires `diagnostic_provider` to be set in config. The popup shows loading state, then a scrollable analysis result (scroll with `j`/`k`/arrows/PgUp/PgDn, close with `Esc`/`q`). Pre-flight checks catch invalid setups locally before making the provider call. Errors are shown inside the popup itself.
 - **Diagnostics** — when `diagnostic_provider` is set to an agent name, a final analysis pass writes `errors.md`

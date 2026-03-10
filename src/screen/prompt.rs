@@ -354,6 +354,8 @@ pub fn draw(f: &mut Frame, app: &App) {
                 Span::raw(": next field  "),
                 Span::styled("Enter/F5", Style::default().fg(Color::Yellow)),
                 Span::raw(": run  "),
+                Span::styled("Ctrl+E", Style::default().fg(Color::Yellow)),
+                Span::raw(": analyze  "),
                 Span::styled("?", Style::default().fg(Color::Yellow)),
                 Span::raw(": help  "),
                 Span::styled("Esc", Style::default().fg(Color::Yellow)),
@@ -366,6 +368,8 @@ pub fn draw(f: &mut Frame, app: &App) {
                 Span::raw(": next field  "),
                 Span::styled("Enter/F5", Style::default().fg(Color::Yellow)),
                 Span::raw(": run  "),
+                Span::styled("Ctrl+E", Style::default().fg(Color::Yellow)),
+                Span::raw(": analyze  "),
                 Span::styled("Esc", Style::default().fg(Color::Yellow)),
                 Span::raw(": back"),
             ]
@@ -382,6 +386,9 @@ pub fn draw(f: &mut Frame, app: &App) {
             _ => (help::prompt_swarm_help_lines(), " Swarm Setup "),
         };
         help::draw_help_overlay(f, &app.help_popup, lines, title);
+    }
+    if app.setup_analysis.active {
+        help::draw_setup_analysis_popup(f, &app.setup_analysis);
     }
 }
 

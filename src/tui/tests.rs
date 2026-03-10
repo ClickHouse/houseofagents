@@ -4,6 +4,7 @@ use super::execution::*;
 use super::input::*;
 use super::results::*;
 use super::resume::*;
+use super::setup_analysis::*;
 use super::text_edit::*;
 use super::*;
 use crate::config::AppConfig;
@@ -2120,4 +2121,489 @@ fn terminal_sweep_cancelled_marks_leftover_as_error() {
         RunStepStatus::Error,
         "queued C should become Error on cancel"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Setup Analysis Tests
+// ---------------------------------------------------------------------------
+
+fn setup_analysis_app_with_diag() -> App {
+    let agents = vec![
+        test_agent("Claude", ProviderKind::Anthropic, "claude-opus-4-6", false, None),
+        test_agent("OpenAI", ProviderKind::OpenAI, "gpt-4o", false, None),
+    ];
+    let mut config = test_config();
+    config.agents = agents;
+    config.diagnostic_provider = Some("Claude".into());
+    let mut app = App::new(config);
+    app.selected_agents = vec!["Claude".into(), "OpenAI".into()];
+    app.selected_mode = ExecutionMode::Relay;
+    app.prompt.prompt_text = "Analyze this codebase".into();
+    app
+}
+
+#[test]
+fn setup_analysis_prompt_relay_from_prompt_screen() {
+    let mut app = setup_analysis_app_with_diag();
+    app.screen = Screen::Prompt;
+    let prompt = build_setup_analysis_prompt(&app);
+    assert!(prompt.contains("Mode: Relay"));
+    assert!(prompt.contains("Claude"));
+    assert!(prompt.contains("OpenAI"));
+    assert!(prompt.contains("Forward Prompt"));
+    assert!(prompt.contains("Keep Session"));
+    assert!(prompt.contains("Iterations:"));
+    assert!(prompt.contains("order can still be changed"));
+}
+
+#[test]
+fn setup_analysis_prompt_relay_from_order_screen() {
+    let mut app = setup_analysis_app_with_diag();
+    app.screen = Screen::Order;
+    app.order_cursor = 1;
+    let prompt = build_setup_analysis_prompt(&app);
+    assert!(prompt.contains("Mode: Relay"));
+    assert!(prompt.contains("Effective execution order"));
+    assert!(prompt.contains("Pressing Enter will start execution"));
+    assert!(!prompt.contains("order can still be changed"));
+}
+
+#[test]
+fn setup_analysis_prompt_swarm() {
+    let mut app = setup_analysis_app_with_diag();
+    app.selected_mode = ExecutionMode::Swarm;
+    app.screen = Screen::Prompt;
+    let prompt = build_setup_analysis_prompt(&app);
+    assert!(prompt.contains("Mode: Swarm"));
+    assert!(prompt.contains("Claude"));
+    assert!(prompt.contains("OpenAI"));
+    assert!(prompt.contains("Iterations (rounds):"));
+}
+
+#[test]
+fn setup_analysis_prompt_pipeline() {
+    let mut app = setup_analysis_app_with_diag();
+    app.selected_mode = ExecutionMode::Pipeline;
+    app.screen = Screen::Pipeline;
+
+    use crate::execution::pipeline::{PipelineBlock, PipelineConnection};
+    app.pipeline.pipeline_def.initial_prompt = "Research topic".into();
+    app.pipeline.pipeline_def.blocks = vec![
+        PipelineBlock {
+            id: 1,
+            name: "Research".into(),
+            agent: "Claude".into(),
+            prompt: "Do research".into(),
+            session_id: None,
+            position: (0, 0),
+            replicas: 1,
+        },
+        PipelineBlock {
+            id: 2,
+            name: "Analyze".into(),
+            agent: "OpenAI".into(),
+            prompt: "Analyze results".into(),
+            session_id: Some("shared-1".into()),
+            position: (1, 0),
+            replicas: 1,
+        },
+    ];
+    app.pipeline.pipeline_def.connections =
+        vec![PipelineConnection { from: 1, to: 2 }];
+
+    let prompt = build_setup_analysis_prompt(&app);
+    assert!(prompt.contains("Mode: Pipeline"));
+    assert!(prompt.contains("Research"));
+    assert!(prompt.contains("Analyze"));
+    assert!(prompt.contains("1 \"Research\" -> 2 \"Analyze\""));
+    assert!(prompt.contains("Root blocks"));
+    assert!(prompt.contains("Terminal blocks"));
+    assert!(prompt.contains("Layer 1"));
+    assert!(prompt.contains("Layer 2"));
+    assert!(prompt.contains("session: shared-1"));
+}
+
+#[test]
+fn setup_analysis_prompt_pipeline_with_replicas() {
+    let mut app = setup_analysis_app_with_diag();
+    app.selected_mode = ExecutionMode::Pipeline;
+    app.screen = Screen::Pipeline;
+
+    use crate::execution::pipeline::PipelineBlock;
+    app.pipeline.pipeline_def.initial_prompt = "test".into();
+    app.pipeline.pipeline_def.blocks = vec![PipelineBlock {
+        id: 1,
+        name: "Worker".into(),
+        agent: "Claude".into(),
+        prompt: "work".into(),
+        session_id: None,
+        position: (0, 0),
+        replicas: 3,
+    }];
+
+    let prompt = build_setup_analysis_prompt(&app);
+    assert!(prompt.contains("replicas: 3"));
+    assert!(prompt.contains("Runtime blocks"));
+}
+
+#[test]
+fn setup_analysis_prompt_multi_run() {
+    let mut app = setup_analysis_app_with_diag();
+    app.screen = Screen::Prompt;
+    app.prompt.runs = 5;
+    app.prompt.concurrency = 2;
+    let prompt = build_setup_analysis_prompt(&app);
+    assert!(prompt.contains("Multi-run: 5 independent runs"));
+    assert!(prompt.contains("concurrency 2"));
+}
+
+// --- Popup key handling tests ---
+
+#[test]
+fn setup_analysis_scroll_j_k() {
+    let mut app = test_app();
+    app.setup_analysis.active = true;
+    app.setup_analysis.content = "line1\nline2\nline3".into();
+
+    handle_key(&mut app, key(KeyCode::Char('j')));
+    assert_eq!(app.setup_analysis.scroll, 1);
+
+    handle_key(&mut app, key(KeyCode::Char('k')));
+    assert_eq!(app.setup_analysis.scroll, 0);
+}
+
+#[test]
+fn setup_analysis_esc_closes() {
+    let mut app = test_app();
+    app.setup_analysis.active = true;
+    app.setup_analysis.content = "test".into();
+
+    handle_key(&mut app, key(KeyCode::Esc));
+    assert!(!app.setup_analysis.active);
+}
+
+#[test]
+fn setup_analysis_q_closes() {
+    let mut app = test_app();
+    app.setup_analysis.active = true;
+    app.setup_analysis.content = "test".into();
+
+    handle_key(&mut app, key(KeyCode::Char('q')));
+    assert!(!app.setup_analysis.active);
+}
+
+#[test]
+fn setup_analysis_loading_blocks_scroll() {
+    let mut app = test_app();
+    app.setup_analysis.active = true;
+    app.setup_analysis.loading = true;
+
+    handle_key(&mut app, key(KeyCode::Char('j')));
+    assert_eq!(app.setup_analysis.scroll, 0);
+}
+
+#[test]
+fn setup_analysis_home_end() {
+    let mut app = test_app();
+    app.setup_analysis.active = true;
+    app.setup_analysis.content = "test".into();
+    app.setup_analysis.scroll = 5;
+
+    handle_key(&mut app, key(KeyCode::Home));
+    assert_eq!(app.setup_analysis.scroll, 0);
+
+    handle_key(&mut app, key(KeyCode::End));
+    assert_eq!(app.setup_analysis.scroll, u16::MAX);
+}
+
+#[test]
+fn setup_analysis_paste_blocked() {
+    let mut app = test_app();
+    app.setup_analysis.active = true;
+    app.setup_analysis.content = "test".into();
+    app.screen = Screen::Prompt;
+    app.prompt.prompt_focus = PromptFocus::Text;
+
+    let original = app.prompt.prompt_text.clone();
+    handle_paste(&mut app, "injected");
+    assert_eq!(app.prompt.prompt_text, original);
+}
+
+// --- Error path tests ---
+
+#[test]
+fn setup_analysis_no_diagnostic_provider() {
+    let mut app = test_app();
+    app.screen = Screen::Prompt;
+    start_setup_analysis(&mut app);
+    assert!(app.setup_analysis.active);
+    assert!(!app.setup_analysis.loading);
+    assert!(app.setup_analysis.content.contains("No diagnostic_provider"));
+}
+
+#[test]
+fn setup_analysis_missing_agent() {
+    let mut config = test_config();
+    config.diagnostic_provider = Some("NonExistent".into());
+    let mut app = App::new(config);
+    app.screen = Screen::Prompt;
+    start_setup_analysis(&mut app);
+    assert!(app.setup_analysis.active);
+    assert!(app.setup_analysis.content.contains("NonExistent"));
+    assert!(app.setup_analysis.content.contains("not configured"));
+}
+
+#[test]
+fn setup_analysis_empty_prompt_without_resume() {
+    let agents = vec![test_agent(
+        "Claude",
+        ProviderKind::Anthropic,
+        "claude-opus-4-6",
+        false,
+        None,
+    )];
+    let mut config = test_config();
+    config.agents = agents;
+    config.diagnostic_provider = Some("Claude".into());
+    let mut app = App::new(config);
+    app.screen = Screen::Prompt;
+    app.prompt.prompt_text.clear();
+    app.prompt.resume_previous = false;
+    start_setup_analysis(&mut app);
+    assert!(app.setup_analysis.active);
+    assert!(app.setup_analysis.content.contains("Enter a prompt first"));
+}
+
+#[test]
+fn setup_analysis_relay_agent_invalid_runtime() {
+    // CLI-mode agent with CLI not installed should be caught
+    let agents = vec![
+        test_agent("Claude", ProviderKind::Anthropic, "claude-opus-4-6", false, None),
+        test_agent("CliAgent", ProviderKind::OpenAI, "gpt-4", true, None),
+    ];
+    let mut config = test_config();
+    config.agents = agents;
+    config.diagnostic_provider = Some("Claude".into());
+    let mut app = App::new(config);
+    app.cli_available.insert(ProviderKind::OpenAI, false);
+    app.selected_agents = vec!["Claude".into(), "CliAgent".into()];
+    app.selected_mode = ExecutionMode::Relay;
+    app.screen = Screen::Prompt;
+    app.prompt.prompt_text = "test".into();
+    start_setup_analysis(&mut app);
+    assert!(app.setup_analysis.active);
+    assert!(app.setup_analysis.content.contains("CLI is not installed"));
+}
+
+#[test]
+fn setup_analysis_pipeline_agent_invalid_runtime() {
+    // Pipeline block with CLI-mode agent that has no CLI installed
+    let agents = vec![
+        test_agent("Claude", ProviderKind::Anthropic, "claude-opus-4-6", false, None),
+        test_agent("CliAgent", ProviderKind::OpenAI, "gpt-4", true, None),
+    ];
+    let mut config = test_config();
+    config.agents = agents;
+    config.diagnostic_provider = Some("Claude".into());
+    let mut app = App::new(config);
+    app.cli_available.insert(ProviderKind::OpenAI, false);
+    app.screen = Screen::Pipeline;
+
+    use crate::execution::pipeline::PipelineBlock;
+    app.pipeline.pipeline_def.initial_prompt = "test".into();
+    app.pipeline.pipeline_def.blocks = vec![PipelineBlock {
+        id: 1,
+        name: "A".into(),
+        agent: "CliAgent".into(),
+        prompt: "test".into(),
+        session_id: None,
+        position: (0, 0),
+        replicas: 1,
+    }];
+    start_setup_analysis(&mut app);
+    assert!(app.setup_analysis.active);
+    assert!(app.setup_analysis.content.contains("CLI is not installed"));
+}
+
+#[test]
+fn setup_analysis_empty_pipeline() {
+    let agents = vec![test_agent(
+        "Claude",
+        ProviderKind::Anthropic,
+        "claude-opus-4-6",
+        false,
+        None,
+    )];
+    let mut config = test_config();
+    config.agents = agents;
+    config.diagnostic_provider = Some("Claude".into());
+    let mut app = App::new(config);
+    app.screen = Screen::Pipeline;
+    start_setup_analysis(&mut app);
+    assert!(app.setup_analysis.active);
+    assert!(app.setup_analysis.content.contains("no blocks"));
+}
+
+#[test]
+fn setup_analysis_invalid_pipeline() {
+    let agents = vec![test_agent(
+        "Claude",
+        ProviderKind::Anthropic,
+        "claude-opus-4-6",
+        false,
+        None,
+    )];
+    let mut config = test_config();
+    config.agents = agents;
+    config.diagnostic_provider = Some("Claude".into());
+    let mut app = App::new(config);
+    app.screen = Screen::Pipeline;
+
+    use crate::execution::pipeline::{PipelineBlock, PipelineConnection};
+    app.pipeline.pipeline_def.initial_prompt = "test".into();
+    app.pipeline.pipeline_def.blocks = vec![PipelineBlock {
+        id: 1,
+        name: "A".into(),
+        agent: "Claude".into(),
+        prompt: "test".into(),
+        session_id: None,
+        position: (0, 0),
+        replicas: 1,
+    }];
+    // Self-edge
+    app.pipeline.pipeline_def.connections = vec![PipelineConnection { from: 1, to: 1 }];
+    start_setup_analysis(&mut app);
+    assert!(app.setup_analysis.active);
+    assert!(app.setup_analysis.content.contains("validation failed"));
+}
+
+#[test]
+fn setup_analysis_empty_pipeline_initial_prompt() {
+    let agents = vec![test_agent(
+        "Claude",
+        ProviderKind::Anthropic,
+        "claude-opus-4-6",
+        false,
+        None,
+    )];
+    let mut config = test_config();
+    config.agents = agents;
+    config.diagnostic_provider = Some("Claude".into());
+    let mut app = App::new(config);
+    app.screen = Screen::Pipeline;
+
+    use crate::execution::pipeline::PipelineBlock;
+    app.pipeline.pipeline_def.blocks = vec![PipelineBlock {
+        id: 1,
+        name: "A".into(),
+        agent: "Claude".into(),
+        prompt: "test".into(),
+        session_id: None,
+        position: (0, 0),
+        replicas: 1,
+    }];
+    app.pipeline.pipeline_def.initial_prompt.clear();
+    start_setup_analysis(&mut app);
+    assert!(app.setup_analysis.active);
+    assert!(app.setup_analysis.content.contains("initial prompt"));
+}
+
+#[test]
+fn setup_analysis_pipeline_unavailable_agent() {
+    let agents = vec![test_agent(
+        "Claude",
+        ProviderKind::Anthropic,
+        "claude-opus-4-6",
+        false,
+        None,
+    )];
+    let mut config = test_config();
+    config.agents = agents;
+    config.diagnostic_provider = Some("Claude".into());
+    let mut app = App::new(config);
+    app.screen = Screen::Pipeline;
+
+    use crate::execution::pipeline::PipelineBlock;
+    app.pipeline.pipeline_def.initial_prompt = "test".into();
+    app.pipeline.pipeline_def.blocks = vec![PipelineBlock {
+        id: 1,
+        name: "A".into(),
+        agent: "MissingAgent".into(),
+        prompt: "test".into(),
+        session_id: None,
+        position: (0, 0),
+        replicas: 1,
+    }];
+    start_setup_analysis(&mut app);
+    assert!(app.setup_analysis.active);
+    assert!(app.setup_analysis.content.contains("not found"));
+}
+
+// --- Input precedence tests ---
+
+#[tokio::test]
+async fn ctrl_e_from_prompt_text_focus_opens_popup() {
+    let mut app = setup_analysis_app_with_diag();
+    app.screen = Screen::Prompt;
+    app.prompt.prompt_focus = PromptFocus::Text;
+
+    let key = KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL);
+    handle_key(&mut app, key);
+    // Should open popup (loading), not insert 'e' into text
+    assert!(app.setup_analysis.active || !app.setup_analysis.content.is_empty());
+    assert!(!app.prompt.prompt_text.contains('e') || app.prompt.prompt_text == "Analyze this codebase");
+}
+
+#[test]
+fn ctrl_e_from_pipeline_session_name_focus_opens_popup() {
+    let agents = vec![test_agent(
+        "Claude",
+        ProviderKind::Anthropic,
+        "claude-opus-4-6",
+        false,
+        None,
+    )];
+    let mut config = test_config();
+    config.agents = agents;
+    config.diagnostic_provider = Some("Claude".into());
+    let mut app = App::new(config);
+    app.screen = Screen::Pipeline;
+    app.pipeline.pipeline_focus = PipelineFocus::SessionName;
+
+    let key = KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL);
+    handle_key(&mut app, key);
+    // Should open popup (error about empty pipeline), not insert 'e' into session name
+    assert!(app.setup_analysis.active);
+    assert!(app.pipeline.pipeline_session_name.is_empty());
+}
+
+// --- Result handler tests ---
+
+#[test]
+fn setup_analysis_result_ok() {
+    let mut app = test_app();
+    app.setup_analysis.open_loading();
+    handle_setup_analysis_result(&mut app, Ok("Analysis done".into()));
+    assert!(!app.setup_analysis.loading);
+    assert_eq!(app.setup_analysis.content, "Analysis done");
+}
+
+#[test]
+fn setup_analysis_result_err() {
+    let mut app = test_app();
+    app.setup_analysis.open_loading();
+    handle_setup_analysis_result(&mut app, Err("timeout".into()));
+    assert!(!app.setup_analysis.loading);
+    assert!(app.setup_analysis.content.contains("Analysis failed"));
+    assert!(app.setup_analysis.content.contains("timeout"));
+}
+
+#[test]
+fn setup_analysis_result_after_close_discards() {
+    let mut app = test_app();
+    app.setup_analysis.open_loading();
+    app.setup_analysis.close(); // User pressed Esc
+    handle_setup_analysis_result(&mut app, Ok("Late result".into()));
+    assert!(!app.setup_analysis.active);
+    assert!(app.setup_analysis.content.is_empty());
 }

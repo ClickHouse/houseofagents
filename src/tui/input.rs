@@ -30,6 +30,12 @@ pub(super) fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
+    // Setup analysis popup handling
+    if app.setup_analysis.active {
+        handle_setup_analysis_key(app, key);
+        return;
+    }
+
     // Edit popup handling
     if app.edit_popup.show_edit_popup {
         handle_edit_popup_key(app, key);
@@ -53,6 +59,10 @@ pub(super) fn handle_paste(app: &mut App, text: &str) {
     }
 
     if app.help_popup.active {
+        return;
+    }
+
+    if app.setup_analysis.active {
         return;
     }
 
@@ -186,6 +196,36 @@ pub(super) fn handle_help_popup_key(app: &mut App, key: KeyEvent) {
     }
 }
 
+fn handle_setup_analysis_key(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.setup_analysis.close();
+        }
+        _ if app.setup_analysis.loading => {
+            // While loading: only Esc/q to close (handled above)
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.setup_analysis.scroll = app.setup_analysis.scroll.saturating_sub(1);
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.setup_analysis.scroll = app.setup_analysis.scroll.saturating_add(1);
+        }
+        KeyCode::PageUp => {
+            app.setup_analysis.scroll = app.setup_analysis.scroll.saturating_sub(8);
+        }
+        KeyCode::PageDown => {
+            app.setup_analysis.scroll = app.setup_analysis.scroll.saturating_add(8);
+        }
+        KeyCode::Home => {
+            app.setup_analysis.scroll = 0;
+        }
+        KeyCode::End => {
+            app.setup_analysis.scroll = u16::MAX;
+        }
+        _ => {}
+    }
+}
+
 pub(super) fn handle_prompt_key(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Esc => {
@@ -293,6 +333,9 @@ pub(super) fn handle_prompt_key(app: &mut App, key: KeyEvent) {
             } else {
                 start_execution(app);
             }
+        }
+        KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            super::setup_analysis::start_setup_analysis(app);
         }
         _ => match app.prompt.prompt_focus {
             PromptFocus::Text => handle_prompt_text_key(app, key),
@@ -625,6 +668,9 @@ pub(super) fn handle_pipeline_key(app: &mut App, key: KeyEvent) {
         // F5: run
         KeyCode::F(5) => {
             start_pipeline_execution(app);
+        }
+        KeyCode::Char('e') if ctrl => {
+            super::setup_analysis::start_setup_analysis(app);
         }
         _ => match app.pipeline.pipeline_focus {
             PipelineFocus::InitialPrompt => {
@@ -1601,6 +1647,9 @@ pub(super) fn handle_order_key(app: &mut App, key: KeyEvent) {
             }
             app.order_grabbed = None;
             start_execution(app);
+        }
+        KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            super::setup_analysis::start_setup_analysis(app);
         }
         _ => {}
     }

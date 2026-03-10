@@ -103,6 +103,46 @@ impl StreamBuffer {
     }
 }
 
+pub(crate) struct SetupAnalysisState {
+    pub active: bool,
+    pub loading: bool,
+    pub content: String,
+    pub scroll: u16,
+    pub rx: Option<mpsc::UnboundedReceiver<Result<String, String>>>,
+}
+
+impl SetupAnalysisState {
+    pub fn new() -> Self {
+        Self {
+            active: false,
+            loading: false,
+            content: String::new(),
+            scroll: 0,
+            rx: None,
+        }
+    }
+    pub fn open_loading(&mut self) {
+        self.active = true;
+        self.loading = true;
+        self.content.clear();
+        self.scroll = 0;
+    }
+    /// Show a local message directly. Opens popup without LLM call.
+    pub fn show_message(&mut self, msg: String) {
+        self.active = true;
+        self.loading = false;
+        self.content = msg;
+        self.scroll = 0;
+    }
+    pub fn close(&mut self) {
+        self.active = false;
+        self.loading = false;
+        self.content.clear();
+        self.scroll = 0;
+        self.rx = None;
+    }
+}
+
 pub(crate) struct HelpPopupState {
     pub active: bool,
     pub scroll: u16,
@@ -171,6 +211,9 @@ pub struct App {
 
     // Help popup
     pub(crate) help_popup: HelpPopupState,
+
+    // Setup analysis popup
+    pub(crate) setup_analysis: SetupAnalysisState,
 
     // Error modal
     pub(crate) error_modal: Option<String>,
@@ -521,6 +564,7 @@ impl App {
             pipeline: PipelineState::new(),
             cli_available,
             help_popup: HelpPopupState::new(),
+            setup_analysis: SetupAnalysisState::new(),
             error_modal: None,
         }
     }
@@ -632,6 +676,7 @@ impl App {
         self.running.reset_to_home();
         self.pipeline = PipelineState::new();
         self.help_popup = HelpPopupState::new();
+        self.setup_analysis.close();
     }
 
     pub fn record_progress(&mut self, event: ProgressEvent) {
@@ -1376,6 +1421,8 @@ mod tests {
         app.help_popup.open(6);
         app.help_popup.tab = 3;
         app.help_popup.scroll = 15;
+        app.setup_analysis.active = true;
+        app.setup_analysis.content = "test".into();
 
         app.reset_to_home();
 
@@ -1461,6 +1508,8 @@ mod tests {
         assert!(!app.help_popup.active);
         assert_eq!(app.help_popup.tab, 0);
         assert_eq!(app.help_popup.scroll, 0);
+        assert!(!app.setup_analysis.active);
+        assert!(app.setup_analysis.content.is_empty());
     }
 
     #[test]

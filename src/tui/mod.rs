@@ -4,6 +4,7 @@ mod execution;
 mod input;
 mod results;
 mod resume;
+mod setup_analysis;
 mod text_edit;
 
 #[cfg(test)]
@@ -123,6 +124,15 @@ pub async fn run(app: &mut App) -> anyhow::Result<()> {
                 }
             } => {
                 diagnostics::handle_diagnostic_result(app, diagnostic_result);
+            }
+            Some(analysis_result) = async {
+                if let Some(ref mut rx) = app.setup_analysis.rx {
+                    rx.recv().await
+                } else {
+                    std::future::pending::<Option<Result<String, String>>>().await
+                }
+            } => {
+                setup_analysis::handle_setup_analysis_result(app, analysis_result);
             }
             Some(results_result) = async {
                 if let Some(ref mut rx) = app.results.results_load_rx {

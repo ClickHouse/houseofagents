@@ -1,10 +1,11 @@
 use super::centered_rect;
-use crate::app::HelpPopupState;
+use crate::app::{HelpPopupState, SetupAnalysisState};
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
+use super::results::render_markdown;
 use std::sync::LazyLock;
 
 pub const PIPELINE_TAB_COUNT: usize = 6;
@@ -125,7 +126,9 @@ pub fn prompt_relay_help_lines() -> &'static [Line<'static>] {
                 Span::styled("Space", k),
                 Span::raw(": toggle option  "),
                 Span::styled("Enter/F5", k),
-                Span::raw(": run"),
+                Span::raw(": run  "),
+                Span::styled("Ctrl+E", k),
+                Span::raw(": analyze setup"),
             ]),
         ]
     });
@@ -175,7 +178,9 @@ pub fn prompt_swarm_help_lines() -> &'static [Line<'static>] {
                 Span::styled("Space", k),
                 Span::raw(": toggle option  "),
                 Span::styled("Enter/F5", k),
-                Span::raw(": run"),
+                Span::raw(": run  "),
+                Span::styled("Ctrl+E", k),
+                Span::raw(": analyze setup"),
             ]),
         ]
     });
@@ -211,6 +216,11 @@ pub fn order_help_lines() -> &'static [Line<'static>] {
             Line::from("  The order determines the sequence of handoffs:"),
             Line::from("  Agent 1's output goes to Agent 2, Agent 2's to"),
             Line::from("  Agent 3, and so on in a ring."),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("  Ctrl+E", k),
+                Span::raw(": Analyze setup — sends config to diagnostic_provider"),
+            ]),
             Line::from(""),
         ]
     });
@@ -377,6 +387,10 @@ pub fn pipeline_help_lines(tab: usize) -> &'static [Line<'static>] {
                     Span::styled("  Ctrl+L", k),
                     Span::raw(": Load a previously saved pipeline definition."),
                 ]),
+                Line::from(vec![
+                    Span::styled("  Ctrl+E", k),
+                    Span::raw(": Analyze setup — sends config to diagnostic_provider."),
+                ]),
                 Line::from(""),
             ],
         ]
@@ -455,6 +469,82 @@ pub fn draw_help_overlay(f: &mut Frame, state: &HelpPopupState, lines: &[Line<'_
     hints.push(Span::raw(": close"));
 
     f.render_widget(Paragraph::new(Line::from(hints)), sections[1]);
+}
+
+// ---------------------------------------------------------------------------
+// Setup analysis popup
+// ---------------------------------------------------------------------------
+
+pub fn draw_setup_analysis_popup(f: &mut Frame, state: &SetupAnalysisState) {
+    let area = centered_rect(70, 70, f.area());
+    let block = Block::default()
+        .title(" Setup Analysis ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+
+    f.render_widget(ratatui::widgets::Clear, area);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(inner);
+
+    if state.loading {
+        let loading = Paragraph::new("Analyzing setup...")
+            .style(Style::default().fg(Color::Yellow));
+        f.render_widget(loading, sections[0]);
+        let hint = Paragraph::new(Line::from(vec![
+            Span::styled("Esc/q", Style::default().fg(Color::Yellow)),
+            Span::raw(": close"),
+        ]));
+        f.render_widget(hint, sections[1]);
+        return;
+    }
+
+    let content_height = sections[0].height as usize;
+    let content_width = sections[0].width as usize;
+    let rendered = render_markdown(&state.content);
+    let lines = rendered.lines;
+
+    let visual_lines: usize = if content_width > 0 {
+        lines
+            .iter()
+            .map(|line| {
+                let w = line.width();
+                if w <= content_width {
+                    1
+                } else {
+                    w.div_ceil(content_width)
+                }
+            })
+            .sum()
+    } else {
+        lines.len()
+    };
+    let max_scroll = visual_lines.saturating_sub(content_height);
+    let scroll = (state.scroll as usize).min(max_scroll) as u16;
+
+    let text = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .scroll((scroll, 0));
+    f.render_widget(text, sections[0]);
+
+    let hints = Line::from(vec![
+        Span::styled(
+            "j/k, arrows, PgUp/PgDn",
+            Style::default().fg(Color::Yellow),
+        ),
+        Span::raw(": scroll  "),
+        Span::styled("Esc/q", Style::default().fg(Color::Yellow)),
+        Span::raw(": close"),
+    ]);
+    f.render_widget(Paragraph::new(hints), sections[1]);
 }
 
 // ---------------------------------------------------------------------------

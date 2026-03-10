@@ -224,7 +224,7 @@ struct MarkdownState {
     item_prefix_needed: bool,
 }
 
-fn render_markdown(markdown: &str) -> Text<'static> {
+pub(crate) fn render_markdown(markdown: &str) -> Text<'static> {
     let mut state = MarkdownState::default();
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut current: Vec<Span<'static>> = Vec::new();

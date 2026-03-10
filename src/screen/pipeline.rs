@@ -112,6 +112,9 @@ pub fn draw(f: &mut Frame, app: &App) {
         );
         help::draw_help_overlay(f, &app.help_popup, help::pipeline_help_lines(tab), &title);
     }
+    if app.setup_analysis.active {
+        help::draw_setup_analysis_popup(f, &app.setup_analysis);
+    }
     if let Some(ref msg) = app.error_modal {
         draw_error_modal(f, msg);
     }
@@ -184,7 +187,8 @@ fn draw_prompt_area(f: &mut Frame, app: &App, area: Rect) {
         || app.pipeline.pipeline_show_session_config
         || app.pipeline.pipeline_show_loop_edit
         || app.error_modal.is_some()
-        || app.help_popup.active;
+        || app.help_popup.active
+        || app.setup_analysis.active;
     if prompt_focus && !has_overlay && inner.width > 0 && inner.height > 0 {
         let visible_row = cursor_row.saturating_sub(scroll_y as usize);
         let x = inner.x + (cursor_col.min(inner.width.saturating_sub(1) as usize) as u16);
@@ -1262,9 +1266,9 @@ fn draw_help_bar(f: &mut Frame, app: &App, area: Rect) {
         app.pipeline.pipeline_focus,
         PipelineFocus::InitialPrompt | PipelineFocus::SessionName
     ) {
-        "Tab: next field | F5: run | Esc: back"
+        "Tab: next field | F5: run | Ctrl+E: analyze | Esc: back"
     } else {
-        "Arrows/hjkl: select | Shift+Arrows/HJKL: move block | Ctrl+Arrows: scroll | a: add | d: delete | e: edit | c: connect | x: disconnect | o: loop | s: sessions | Ctrl+S: save | Ctrl+L: load | F5: run | ?: help | Esc: back"
+        "Arrows/hjkl: select | Shift+Arrows/HJKL: move block | Ctrl+Arrows: scroll | a: add | d: delete | e: edit | c: connect | x: disconnect | o: loop | s: sessions | Ctrl+S: save | Ctrl+L: load | Ctrl+E: analyze | F5: run | ?: help | Esc: back"
     };
     let help_p = Paragraph::new(help)
         .style(Style::default().fg(Color::DarkGray))
