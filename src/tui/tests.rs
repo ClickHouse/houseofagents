@@ -1627,3 +1627,136 @@ fn session_config_normalizes_on_edit_confirm() {
     // Old __block_1 config should be cleaned up since the session key changed
     assert!(app.pipeline.pipeline_def.session_configs.is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// Help popup tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn help_opens_on_home() {
+    let mut app = test_app();
+    app.screen = Screen::Home;
+    handle_key(&mut app, key(KeyCode::Char('?')));
+    assert!(app.help_popup.active);
+    assert_eq!(app.help_popup.tab_count, 1);
+}
+
+#[test]
+fn help_opens_on_prompt_non_text() {
+    let mut app = test_app();
+    app.screen = Screen::Prompt;
+    app.prompt.prompt_focus = PromptFocus::Iterations;
+    handle_key(&mut app, key(KeyCode::Char('?')));
+    assert!(app.help_popup.active);
+    assert_eq!(app.help_popup.tab_count, 1);
+}
+
+#[test]
+fn help_blocked_on_prompt_session_name() {
+    let mut app = test_app();
+    app.screen = Screen::Prompt;
+    app.prompt.prompt_focus = PromptFocus::SessionName;
+    handle_key(&mut app, key(KeyCode::Char('?')));
+    assert!(!app.help_popup.active);
+    assert!(app.prompt.session_name.contains('?'));
+}
+
+#[test]
+fn help_blocked_on_prompt_text() {
+    let mut app = test_app();
+    app.screen = Screen::Prompt;
+    app.prompt.prompt_focus = PromptFocus::Text;
+    handle_key(&mut app, key(KeyCode::Char('?')));
+    assert!(!app.help_popup.active);
+    assert!(app.prompt.prompt_text.contains('?'));
+}
+
+#[test]
+fn help_opens_on_order() {
+    let mut app = test_app();
+    app.screen = Screen::Order;
+    app.selected_agents = vec!["A".into(), "B".into()];
+    handle_key(&mut app, key(KeyCode::Char('?')));
+    assert!(app.help_popup.active);
+    assert_eq!(app.help_popup.tab_count, 1);
+}
+
+#[test]
+fn help_opens_on_pipeline() {
+    let mut app = test_app();
+    app.screen = Screen::Pipeline;
+    app.pipeline.pipeline_focus = PipelineFocus::Builder;
+    handle_key(&mut app, key(KeyCode::Char('?')));
+    assert!(app.help_popup.active);
+    assert_eq!(app.help_popup.tab_count, 6);
+}
+
+#[test]
+fn help_blocked_on_pipeline_initial_prompt() {
+    let mut app = test_app();
+    app.screen = Screen::Pipeline;
+    app.pipeline.pipeline_focus = PipelineFocus::InitialPrompt;
+    handle_key(&mut app, key(KeyCode::Char('?')));
+    assert!(!app.help_popup.active);
+    assert!(app.pipeline.pipeline_def.initial_prompt.contains('?'));
+}
+
+#[test]
+fn help_blocked_on_pipeline_session_name() {
+    let mut app = test_app();
+    app.screen = Screen::Pipeline;
+    app.pipeline.pipeline_focus = PipelineFocus::SessionName;
+    handle_key(&mut app, key(KeyCode::Char('?')));
+    assert!(!app.help_popup.active);
+    assert!(app.pipeline.pipeline_session_name.contains('?'));
+}
+
+#[test]
+fn help_tab_wraps_forward() {
+    let mut app = test_app();
+    app.help_popup.open(6);
+    app.help_popup.tab = 5;
+    app.help_popup.scroll = 10;
+    handle_key(&mut app, key(KeyCode::Tab));
+    assert_eq!(app.help_popup.tab, 0);
+    assert_eq!(app.help_popup.scroll, 0);
+}
+
+#[test]
+fn help_tab_wraps_backward() {
+    let mut app = test_app();
+    app.help_popup.open(6);
+    app.help_popup.tab = 0;
+    handle_key(&mut app, KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+    assert_eq!(app.help_popup.tab, 5);
+    assert_eq!(app.help_popup.scroll, 0);
+}
+
+#[test]
+fn help_tab_noop_single() {
+    let mut app = test_app();
+    app.help_popup.open(1);
+    handle_key(&mut app, key(KeyCode::Tab));
+    assert_eq!(app.help_popup.tab, 0);
+}
+
+#[test]
+fn help_scroll_resets_on_tab_change() {
+    let mut app = test_app();
+    app.help_popup.open(6);
+    app.help_popup.scroll = 20;
+    app.help_popup.tab = 2;
+    handle_key(&mut app, key(KeyCode::Tab));
+    assert_eq!(app.help_popup.tab, 3);
+    assert_eq!(app.help_popup.scroll, 0);
+}
+
+#[test]
+fn error_dismisses_before_help() {
+    let mut app = test_app();
+    app.error_modal = Some("test error".into());
+    app.help_popup.open(1);
+    handle_key(&mut app, key(KeyCode::Char('a')));
+    assert!(app.error_modal.is_none());
+    assert!(app.help_popup.active);
+}

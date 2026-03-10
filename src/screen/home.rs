@@ -1,4 +1,5 @@
 use super::centered_rect;
+use super::help;
 use crate::app::{App, EditPopupSection, HomeSection};
 use crate::execution::ExecutionMode;
 use crate::provider::ProviderKind;
@@ -55,19 +56,19 @@ pub fn draw(f: &mut Frame, app: &App) {
     .block(Block::default().borders(Borders::TOP));
     f.render_widget(help, chunks[2]);
 
-    // Error modal overlay
-    if let Some(ref err) = app.error_modal {
-        draw_error_modal(f, err);
-    }
-
-    // Help popup overlay
-    if app.show_help_popup {
-        draw_help_popup(f, app);
-    }
-
     // Edit popup overlay
     if app.edit_popup.show_edit_popup {
         draw_edit_popup(f, app);
+    }
+
+    // Help popup overlay
+    if app.help_popup.active {
+        help::draw_help_overlay(f, &app.help_popup, help::home_help_lines(), " Execution Modes ");
+    }
+
+    // Error modal overlay (always topmost)
+    if let Some(ref err) = app.error_modal {
+        draw_error_modal(f, err);
     }
 }
 
@@ -172,101 +173,6 @@ fn draw_error_modal(f: &mut Frame, message: &str) {
         .block(block);
     f.render_widget(ratatui::widgets::Clear, area);
     f.render_widget(text, area);
-}
-
-fn help_lines() -> &'static [Line<'static>] {
-    use std::sync::LazyLock;
-    static LINES: LazyLock<Vec<Line<'static>>> = LazyLock::new(|| {
-        vec![
-            Line::from(Span::styled(
-                "Relay",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from(""),
-            Line::from("  Agents run one after another in sequence. Each agent"),
-            Line::from("  receives the previous agent's full output and builds"),
-            Line::from("  on it. Over multiple iterations the baton passes around"),
-            Line::from("  the ring, progressively refining the result."),
-            Line::from(""),
-            Line::from("  Best for: deep refinement, iterative improvement,"),
-            Line::from("  tasks where each step should build on the last."),
-            Line::from(""),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Swarm",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from(""),
-            Line::from("  All agents run in parallel each round. After a round"),
-            Line::from("  completes, every agent receives all other agents'"),
-            Line::from("  outputs and produces an updated analysis. This repeats"),
-            Line::from("  for the configured number of iterations."),
-            Line::from(""),
-            Line::from("  Best for: multi-perspective analysis, debates,"),
-            Line::from("  cross-checking, consensus-building."),
-            Line::from(""),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Pipeline",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from(""),
-            Line::from("  Build a custom DAG of agent blocks with explicit connections."),
-            Line::from("  Each block has its own provider, prompt, and optional session ID."),
-            Line::from("  Blocks execute as soon as their dependencies are satisfied,"),
-            Line::from("  maximizing parallelism. Root blocks receive the initial prompt;"),
-            Line::from("  on subsequent iterations they receive terminal block outputs."),
-            Line::from(""),
-            Line::from("  Best for: complex multi-step pipelines, hierarchical analysis,"),
-            Line::from("  workflows requiring specific agent ordering and data flow."),
-            Line::from(""),
-        ]
-    });
-    &LINES
-}
-
-fn draw_help_popup(f: &mut Frame, app: &App) {
-    let area = centered_rect(70, 70, f.area());
-    let block = Block::default()
-        .title(" Execution Modes ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
-
-    f.render_widget(ratatui::widgets::Clear, area);
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
-    if inner.width == 0 || inner.height == 0 {
-        return;
-    }
-
-    let sections = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(1)])
-        .split(inner);
-
-    let content_height = sections[0].height as usize;
-    let max_scroll = help_lines().len().saturating_sub(content_height);
-    let scroll = (app.help_popup_scroll as usize).min(max_scroll) as u16;
-
-    let text = Paragraph::new(help_lines().to_vec())
-        .wrap(Wrap { trim: false })
-        .scroll((scroll, 0));
-    f.render_widget(text, sections[0]);
-
-    let help = Paragraph::new(Line::from(vec![
-        Span::styled("j/k, arrows, PgUp/PgDn", Style::default().fg(Color::Yellow)),
-        Span::raw(": scroll  "),
-        Span::styled("Esc/q/?", Style::default().fg(Color::Yellow)),
-        Span::raw(": close"),
-    ]));
-    f.render_widget(help, sections[1]);
 }
 
 fn draw_edit_popup(f: &mut Frame, app: &App) {
@@ -803,18 +709,6 @@ fn mask_key(key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn help_lines_contains_mode_headers() {
-        let joined = help_lines()
-            .iter()
-            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(joined.contains("Relay"));
-        assert!(joined.contains("Swarm"));
-        assert!(joined.contains("Pipeline"));
-    }
 
     #[test]
     fn cli_dependent_style_for_cli_mode_is_default() {

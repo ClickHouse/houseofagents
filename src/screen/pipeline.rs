@@ -2,6 +2,7 @@ use crate::app::{App, PipelineDialogMode, PipelineEditField, PipelineFocus};
 use crate::execution::pipeline::BlockId;
 use crate::execution::truncate_chars;
 use crate::screen::centered_rect;
+use crate::screen::help;
 use crate::screen::prompt::{char_wrap_text, prompt_cursor_layout};
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -96,6 +97,17 @@ pub fn draw(f: &mut Frame, app: &App) {
     if app.pipeline.pipeline_show_session_config {
         draw_session_config_popup(f, app, area);
     }
+    if app.help_popup.active {
+        let tab = app.help_popup.tab;
+        let name = help::PIPELINE_TAB_NAMES[tab];
+        let title = format!(
+            " Pipeline Builder — {} ({}/{}) — Tab: next section ",
+            name,
+            tab + 1,
+            help::PIPELINE_TAB_COUNT,
+        );
+        help::draw_help_overlay(f, &app.help_popup, help::pipeline_help_lines(tab), &title);
+    }
     if let Some(ref msg) = app.error_modal {
         draw_error_modal(f, msg);
     }
@@ -166,7 +178,8 @@ fn draw_prompt_area(f: &mut Frame, app: &App, area: Rect) {
     let has_overlay = app.pipeline.pipeline_show_edit
         || app.pipeline.pipeline_file_dialog.is_some()
         || app.pipeline.pipeline_show_session_config
-        || app.error_modal.is_some();
+        || app.error_modal.is_some()
+        || app.help_popup.active;
     if prompt_focus && !has_overlay && inner.width > 0 && inner.height > 0 {
         let visible_row = cursor_row.saturating_sub(scroll_y as usize);
         let x = inner.x + (cursor_col.min(inner.width.saturating_sub(1) as usize) as u16);
@@ -1012,6 +1025,11 @@ fn draw_help_bar(f: &mut Frame, app: &App, area: Rect) {
         "Arrows: navigate | Enter: connect | Esc: cancel"
     } else if app.pipeline.pipeline_removing_conn {
         "j/k: cycle | Enter: remove | Esc: cancel"
+    } else if matches!(
+        app.pipeline.pipeline_focus,
+        PipelineFocus::InitialPrompt | PipelineFocus::SessionName
+    ) {
+        "Tab: next field | F5: run | Esc: back"
     } else {
         "Arrows/hjkl: select | Shift+Arrows/HJKL: move block | Ctrl+Arrows: scroll | a: add | d: delete | e: edit | c: connect | x: disconnect | s: sessions | Ctrl+S: save | Ctrl+L: load | F5: run | ?: help | Esc: back"
     };

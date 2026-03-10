@@ -1,3 +1,4 @@
+use super::help;
 use crate::app::{App, PromptFocus};
 use crate::execution::ExecutionMode;
 use ratatui::layout::{Constraint, Direction, Layout};
@@ -303,6 +304,8 @@ pub fn draw(f: &mut Frame, app: &App) {
                 Span::raw(": next field  "),
                 Span::styled("Enter/F5", Style::default().fg(Color::Yellow)),
                 Span::raw(": run  "),
+                Span::styled("?", Style::default().fg(Color::Yellow)),
+                Span::raw(": help  "),
                 Span::styled("Esc", Style::default().fg(Color::Yellow)),
                 Span::raw(": back"),
             ]
@@ -320,7 +323,9 @@ pub fn draw(f: &mut Frame, app: &App) {
                 Span::styled("Tab", Style::default().fg(Color::Yellow)),
                 Span::raw(": next field  "),
                 Span::styled("Enter/F5", Style::default().fg(Color::Yellow)),
-                Span::raw(": run"),
+                Span::raw(": run  "),
+                Span::styled("?", Style::default().fg(Color::Yellow)),
+                Span::raw(": help"),
             ]
         }
         PromptFocus::Text => {
@@ -349,11 +354,13 @@ pub fn draw(f: &mut Frame, app: &App) {
                 Span::raw(": next field  "),
                 Span::styled("Enter/F5", Style::default().fg(Color::Yellow)),
                 Span::raw(": run  "),
+                Span::styled("?", Style::default().fg(Color::Yellow)),
+                Span::raw(": help  "),
                 Span::styled("Esc", Style::default().fg(Color::Yellow)),
                 Span::raw(": back"),
             ]
         }
-        _ => {
+        PromptFocus::SessionName => {
             vec![
                 Span::styled("Tab", Style::default().fg(Color::Yellow)),
                 Span::raw(": next field  "),
@@ -364,8 +371,18 @@ pub fn draw(f: &mut Frame, app: &App) {
             ]
         }
     };
-    let help = Paragraph::new(Line::from(help_spans)).block(Block::default().borders(Borders::TOP));
-    f.render_widget(help, chunks[6]);
+    let help_bar =
+        Paragraph::new(Line::from(help_spans)).block(Block::default().borders(Borders::TOP));
+    f.render_widget(help_bar, chunks[6]);
+
+    // Help popup overlay
+    if app.help_popup.active {
+        let (lines, title) = match app.selected_mode {
+            ExecutionMode::Relay => (help::prompt_relay_help_lines(), " Relay Setup "),
+            _ => (help::prompt_swarm_help_lines(), " Swarm Setup "),
+        };
+        help::draw_help_overlay(f, &app.help_popup, lines, title);
+    }
 }
 
 /// Character-wrap text into visual lines matching `prompt_cursor_layout` wrapping.

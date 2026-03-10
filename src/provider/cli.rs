@@ -529,11 +529,14 @@ impl Provider for CliProvider {
                     args
                 }
                 ProviderKind::OpenAI => {
-                    let mut args = if self.session_id.is_some() {
-                        vec!["exec".to_string(), "resume".to_string()]
-                    } else {
-                        vec!["exec".to_string()]
-                    };
+                    let mut args = vec!["exec".to_string()];
+                    if let Ok(cwd) = std::env::current_dir() {
+                        args.push("-C".to_string());
+                        args.push(cwd.display().to_string());
+                    }
+                    if self.session_id.is_some() {
+                        args.push("resume".to_string());
+                    }
                     if let Some(effort) = self.reasoning_effort.as_deref() {
                         args.push("-c".to_string());
                         args.push(format!("model_reasoning_effort=\"{effort}\""));

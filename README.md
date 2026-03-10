@@ -230,6 +230,7 @@ Anthropic `thinking_effort = "max"` is rejected in API mode. In CLI mode, House 
 | `Tab` / `Shift+Tab` | Cycle input fields forward / backward |
 | `Space` | Toggle focused option (Resume / Forward Prompt / Keep Session) |
 | `Enter` / `F5` | Start run |
+| `?` | Open help (unavailable while editing text fields: prompt, session name) |
 | `Esc` | Back |
 
 Fields vary by mode for options, but every prompt flow includes Prompt, Session Name, Iterations, Runs, and Concurrency.
@@ -252,7 +253,7 @@ Fields vary by mode for options, but every prompt flow includes Prompt, Session 
 | `Ctrl+S` | Save pipeline (always prompts for filename, prefills current name) |
 | `Ctrl+L` | Load pipeline from file |
 | `F5` | Validate and run the pipeline |
-| `?` | Open help popup |
+| `?` | Open help popup (6 tabbed sections; Tab/Shift+Tab to cycle). Only when focus is not on a text field (initial prompt / session name). |
 | `Esc` | Cancel current action / back to home |
 
 Inside the **edit popup**: `Tab` cycles between Name, Agent (use `Left`/`Right`), Prompt (text area), and Session ID fields. `Esc` closes the popup.
@@ -264,6 +265,7 @@ Inside the **edit popup**: `Tab` cycles between Name, Agent (use `Left`/`Right`)
 | `j` / `k` | Move cursor |
 | `Space` | Grab / reorder agent |
 | `Enter` | Confirm and start |
+| `?` | Open help |
 | `Esc` | Back to prompt |
 
 ### Running Screen

@@ -25,7 +25,7 @@ pub(super) fn handle_key(app: &mut App, key: KeyEvent) {
     }
 
     // Help popup has dedicated scroll + close handling
-    if app.show_help_popup {
+    if app.help_popup.active {
         handle_help_popup_key(app, key);
         return;
     }
@@ -52,7 +52,7 @@ pub(super) fn handle_paste(app: &mut App, text: &str) {
         return;
     }
 
-    if app.show_help_popup {
+    if app.help_popup.active {
         return;
     }
 
@@ -74,8 +74,7 @@ pub(super) fn handle_home_key(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Char('q') => app.should_quit = true,
         KeyCode::Char('?') => {
-            app.show_help_popup = true;
-            app.help_popup_scroll = 0;
+            app.help_popup.open(1);
         }
         KeyCode::Char('e') => {
             app.edit_popup.show_edit_popup = true;
@@ -151,25 +150,37 @@ pub(super) fn handle_home_key(app: &mut App, key: KeyEvent) {
 pub(super) fn handle_help_popup_key(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => {
-            app.show_help_popup = false;
+            app.help_popup.close();
         }
         KeyCode::Up | KeyCode::Char('k') => {
-            app.help_popup_scroll = app.help_popup_scroll.saturating_sub(1);
+            app.help_popup.scroll = app.help_popup.scroll.saturating_sub(1);
         }
         KeyCode::Down | KeyCode::Char('j') => {
-            app.help_popup_scroll = app.help_popup_scroll.saturating_add(1);
+            app.help_popup.scroll = app.help_popup.scroll.saturating_add(1);
         }
         KeyCode::PageUp => {
-            app.help_popup_scroll = app.help_popup_scroll.saturating_sub(8);
+            app.help_popup.scroll = app.help_popup.scroll.saturating_sub(8);
         }
         KeyCode::PageDown => {
-            app.help_popup_scroll = app.help_popup_scroll.saturating_add(8);
+            app.help_popup.scroll = app.help_popup.scroll.saturating_add(8);
         }
         KeyCode::Home => {
-            app.help_popup_scroll = 0;
+            app.help_popup.scroll = 0;
         }
         KeyCode::End => {
-            app.help_popup_scroll = u16::MAX;
+            app.help_popup.scroll = u16::MAX;
+        }
+        KeyCode::Tab => {
+            app.help_popup.tab = (app.help_popup.tab + 1) % app.help_popup.tab_count;
+            app.help_popup.scroll = 0;
+        }
+        KeyCode::BackTab => {
+            app.help_popup.tab = app
+                .help_popup
+                .tab
+                .checked_sub(1)
+                .unwrap_or(app.help_popup.tab_count - 1);
+            app.help_popup.scroll = 0;
         }
         _ => {}
     }
@@ -236,6 +247,14 @@ pub(super) fn handle_prompt_key(app: &mut App, key: KeyEvent) {
                 (PromptFocus::KeepSession, ExecutionMode::Relay) => PromptFocus::ForwardPrompt,
                 (PromptFocus::KeepSession, _) => PromptFocus::Resume,
             };
+        }
+        KeyCode::Char('?')
+            if !matches!(
+                app.prompt.prompt_focus,
+                PromptFocus::Text | PromptFocus::SessionName
+            ) =>
+        {
+            app.help_popup.open(1);
         }
         KeyCode::Char(' ') if app.prompt.prompt_focus == PromptFocus::Resume => {
             if !resume_allowed_in_prompt(app) {
@@ -544,9 +563,14 @@ pub(super) fn handle_pipeline_key(app: &mut App, key: KeyEvent) {
                 PipelineFocus::Builder => PipelineFocus::Concurrency,
             };
         }
-        KeyCode::Char('?') if !ctrl => {
-            app.show_help_popup = true;
-            app.help_popup_scroll = 0;
+        KeyCode::Char('?')
+            if !ctrl
+                && !matches!(
+                    app.pipeline.pipeline_focus,
+                    PipelineFocus::InitialPrompt | PipelineFocus::SessionName
+                ) =>
+        {
+            app.help_popup.open(6);
         }
         // Ctrl+S: save — always open dialog, prefill with current name
         KeyCode::Char('s') if ctrl => {
@@ -1277,6 +1301,9 @@ pub(super) fn handle_order_key(app: &mut App, key: KeyEvent) {
         KeyCode::Esc => {
             app.screen = Screen::Prompt;
             app.order_grabbed = None;
+        }
+        KeyCode::Char('?') => {
+            app.help_popup.open(1);
         }
         KeyCode::Up | KeyCode::Char('k') => app.move_order_up(),
         KeyCode::Down | KeyCode::Char('j') => app.move_order_down(),

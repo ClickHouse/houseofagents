@@ -1,3 +1,4 @@
+use super::help;
 use crate::app::App;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
@@ -64,16 +65,23 @@ pub fn draw(f: &mut Frame, app: &App) {
     f.render_widget(list, chunks[1]);
 
     // Help bar
-    let help = Paragraph::new(Line::from(vec![
+    let help_bar = Paragraph::new(Line::from(vec![
         Span::styled("j/k", Style::default().fg(Color::Yellow)),
         Span::raw(": move  "),
         Span::styled("Space", Style::default().fg(Color::Yellow)),
         Span::raw(": grab/release  "),
         Span::styled("Enter", Style::default().fg(Color::Yellow)),
         Span::raw(": start (cursor can be first)  "),
+        Span::styled("?", Style::default().fg(Color::Yellow)),
+        Span::raw(": help  "),
         Span::styled("Esc", Style::default().fg(Color::Yellow)),
         Span::raw(": back"),
     ]))
     .block(Block::default().borders(Borders::TOP));
-    f.render_widget(help, chunks[2]);
+    f.render_widget(help_bar, chunks[2]);
+
+    // Help popup overlay
+    if app.help_popup.active {
+        help::draw_help_overlay(f, &app.help_popup, help::order_help_lines(), " Relay Order ");
+    }
 }

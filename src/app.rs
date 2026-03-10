@@ -101,6 +101,33 @@ impl StreamBuffer {
     }
 }
 
+pub(crate) struct HelpPopupState {
+    pub active: bool,
+    pub scroll: u16,
+    pub tab: usize,
+    pub tab_count: usize,
+}
+
+impl HelpPopupState {
+    pub fn new() -> Self {
+        Self {
+            active: false,
+            scroll: 0,
+            tab: 0,
+            tab_count: 1,
+        }
+    }
+    pub fn open(&mut self, tab_count: usize) {
+        self.active = true;
+        self.scroll = 0;
+        self.tab = 0;
+        self.tab_count = tab_count.max(1);
+    }
+    pub fn close(&mut self) {
+        self.active = false;
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Screen {
     Home,
@@ -141,8 +168,7 @@ pub struct App {
     pub(crate) cli_available: HashMap<ProviderKind, bool>,
 
     // Help popup
-    pub(crate) show_help_popup: bool,
-    pub(crate) help_popup_scroll: u16,
+    pub(crate) help_popup: HelpPopupState,
 
     // Error modal
     pub(crate) error_modal: Option<String>,
@@ -476,8 +502,7 @@ impl App {
             edit_popup: EditPopupState::new(),
             pipeline: PipelineState::new(),
             cli_available,
-            show_help_popup: false,
-            help_popup_scroll: 0,
+            help_popup: HelpPopupState::new(),
             error_modal: None,
         }
     }
@@ -588,6 +613,7 @@ impl App {
         self.results.reset_to_home();
         self.running.reset_to_home();
         self.pipeline = PipelineState::new();
+        self.help_popup = HelpPopupState::new();
     }
 
     pub fn record_progress(&mut self, event: ProgressEvent) {
@@ -1317,6 +1343,9 @@ mod tests {
         app.pipeline.pipeline_save_path = Some(PathBuf::from("pipeline.toml"));
         app.pipeline.pipeline_show_session_config = true;
         app.pipeline.pipeline_session_config_cursor = 2;
+        app.help_popup.open(6);
+        app.help_popup.tab = 3;
+        app.help_popup.scroll = 15;
 
         app.reset_to_home();
 
@@ -1399,6 +1428,9 @@ mod tests {
         assert!(app.pipeline.pipeline_save_path.is_none());
         assert!(!app.pipeline.pipeline_show_session_config);
         assert_eq!(app.pipeline.pipeline_session_config_cursor, 0);
+        assert!(!app.help_popup.active);
+        assert_eq!(app.help_popup.tab, 0);
+        assert_eq!(app.help_popup.scroll, 0);
     }
 
     #[test]
@@ -1604,5 +1636,25 @@ mod tests {
         let agents = app.available_agents();
         let gemini = agents.iter().find(|(a, _)| a.name == "Gemini").unwrap();
         assert!(gemini.1);
+    }
+
+    #[test]
+    fn help_popup_open_close() {
+        let mut s = HelpPopupState::new();
+        assert!(!s.active);
+        s.open(6);
+        assert!(s.active);
+        assert_eq!(s.tab_count, 6);
+        assert_eq!(s.tab, 0);
+        assert_eq!(s.scroll, 0);
+        s.close();
+        assert!(!s.active);
+    }
+
+    #[test]
+    fn help_popup_open_clamps_zero_tab_count() {
+        let mut s = HelpPopupState::new();
+        s.open(0);
+        assert_eq!(s.tab_count, 1);
     }
 }
