@@ -7,11 +7,11 @@ use toml::Value;
 
 const ADJECTIVES: &[&str] = &[
     "swift", "bold", "calm", "dark", "keen", "warm", "pure", "vast", "wild", "soft", "deep",
-    "pale", "thin", "cool", "fair", "grey", "high", "late", "lean", "long", "loud", "near",
-    "open", "rare", "rich", "slow", "tall", "true", "wide", "worn", "blue", "cold", "firm",
-    "flat", "full", "glad", "gold", "hard", "iron", "jade", "kind", "live", "mint", "neat",
-    "pine", "real", "safe", "tame", "trim", "used", "wiry", "aged", "bent", "busy", "even",
-    "fine", "free", "good", "hazy", "iced",
+    "pale", "thin", "cool", "fair", "grey", "high", "late", "lean", "long", "loud", "near", "open",
+    "rare", "rich", "slow", "tall", "true", "wide", "worn", "blue", "cold", "firm", "flat", "full",
+    "glad", "gold", "hard", "iron", "jade", "kind", "live", "mint", "neat", "pine", "real", "safe",
+    "tame", "trim", "used", "wiry", "aged", "bent", "busy", "even", "fine", "free", "good", "hazy",
+    "iced",
 ];
 
 const NOUNS: &[&str] = &[
@@ -420,10 +420,7 @@ impl OutputManager {
             ),
         );
         root.insert("iterations".into(), Value::Integer(iterations as i64));
-        root.insert(
-            "keep_session".into(),
-            Value::Boolean(keep_session),
-        );
+        root.insert("keep_session".into(), Value::Boolean(keep_session));
 
         let mut model_table = toml::map::Map::new();
         for (agent_name, model) in models {
@@ -921,8 +918,8 @@ mod tests {
         let base = tempdir().expect("tempdir");
         let now = Local.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap();
         std::fs::create_dir_all(base.path().join("2026-01-01/my_session")).expect("mkdir");
-        let err = OutputManager::new_impl(base.path(), Some("my_session"), now)
-            .expect_err("should fail");
+        let err =
+            OutputManager::new_impl(base.path(), Some("my_session"), now).expect_err("should fail");
         assert!(err.to_string().contains("already exists"));
     }
 
@@ -1068,14 +1065,12 @@ mod tests {
         let found = OutputManager::find_latest_session_run(base.path(), "alpha")
             .expect("find")
             .expect("some");
-        assert!(
-            found
-                .file_name()
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .ends_with("_alpha")
-        );
+        assert!(found
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .ends_with("_alpha"));
     }
 
     #[test]

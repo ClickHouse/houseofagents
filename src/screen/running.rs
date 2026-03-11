@@ -59,7 +59,7 @@ fn draw_relay(f: &mut Frame, app: &App) {
             Constraint::Length(3), // Title
             Constraint::Length(3), // Gauge
             Constraint::Length(3), // Chain
-            Constraint::Min(0),   // Main panel
+            Constraint::Min(0),    // Main panel
             Constraint::Length(3), // Help
         ])
         .split(f.area());
@@ -78,7 +78,7 @@ fn draw_swarm(f: &mut Frame, app: &App) {
             Constraint::Length(3), // Title
             Constraint::Length(3), // Gauge
             Constraint::Length(5), // Round + cards
-            Constraint::Min(0),   // Main panel
+            Constraint::Min(0),    // Main panel
             Constraint::Length(3), // Help
         ])
         .split(f.area());
@@ -97,7 +97,7 @@ fn draw_pipeline_running(f: &mut Frame, app: &App) {
             Constraint::Length(3),  // Title
             Constraint::Length(3),  // Gauge
             Constraint::Length(12), // Mini DAG
-            Constraint::Min(0),    // Main panel
+            Constraint::Min(0),     // Main panel
             Constraint::Length(3),  // Help
         ])
         .split(f.area());
@@ -320,10 +320,7 @@ fn draw_relay_chain(f: &mut Frame, app: &App, area: Rect) {
                     .map(|t| format_duration(t.elapsed()))
                     .unwrap_or_else(|| "--".into());
                 Line::from(vec![
-                    Span::styled(
-                        format!("{}. ", i + 1),
-                        Style::default().fg(Color::DarkGray),
-                    ),
+                    Span::styled(format!("{}. ", i + 1), Style::default().fg(Color::DarkGray)),
                     Span::styled(format!("{icon} "), Style::default().fg(color)),
                     Span::raw(name.clone()),
                     Span::styled(format!("  {timer}"), Style::default().fg(Color::DarkGray)),
@@ -358,8 +355,7 @@ fn draw_relay_chain(f: &mut Frame, app: &App, area: Rect) {
         spans.push(Span::styled(" ]", Style::default().fg(color)));
     }
 
-    let p = Paragraph::new(Line::from(spans))
-        .alignment(ratatui::layout::Alignment::Center);
+    let p = Paragraph::new(Line::from(spans)).alignment(ratatui::layout::Alignment::Center);
     let y = area.y + area.height / 2;
     f.render_widget(p, Rect::new(area.x, y, area.width, 1));
 }
@@ -444,16 +440,26 @@ fn draw_pipeline_dag(f: &mut Frame, app: &App, area: Rect) {
 
     let block_style_fn = |block_id: BlockId| -> (Color, BorderType) {
         // Aggregate status across all replicas of this logical block
-        let replicas: Vec<_> = app.block_rows().iter()
+        let replicas: Vec<_> = app
+            .block_rows()
+            .iter()
             .filter(|r| r.source_block_id == block_id)
             .collect();
         if replicas.is_empty() {
             return (Color::DarkGray, BorderType::Plain);
         }
-        let any_running = replicas.iter().any(|r| matches!(r.status, AgentRowStatus::Running));
-        let any_error = replicas.iter().any(|r| matches!(r.status, AgentRowStatus::Error(_)));
-        let all_finished = replicas.iter().all(|r| matches!(r.status, AgentRowStatus::Finished));
-        let all_skipped = replicas.iter().all(|r| matches!(r.status, AgentRowStatus::Skipped(_)));
+        let any_running = replicas
+            .iter()
+            .any(|r| matches!(r.status, AgentRowStatus::Running));
+        let any_error = replicas
+            .iter()
+            .any(|r| matches!(r.status, AgentRowStatus::Error(_)));
+        let all_finished = replicas
+            .iter()
+            .all(|r| matches!(r.status, AgentRowStatus::Finished));
+        let all_skipped = replicas
+            .iter()
+            .all(|r| matches!(r.status, AgentRowStatus::Skipped(_)));
         let color = if any_running {
             Color::Yellow
         } else if all_finished {
@@ -468,7 +474,14 @@ fn draw_pipeline_dag(f: &mut Frame, app: &App, area: Rect) {
         (color, BorderType::Plain)
     };
 
-    super::pipeline::render_dag_readonly(f, inner, blocks, connections, &app.pipeline.pipeline_def.loop_connections, &block_style_fn);
+    super::pipeline::render_dag_readonly(
+        f,
+        inner,
+        blocks,
+        connections,
+        &app.pipeline.pipeline_def.loop_connections,
+        &block_style_fn,
+    );
 }
 
 fn draw_multi_run(f: &mut Frame, app: &App) {

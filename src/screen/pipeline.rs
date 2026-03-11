@@ -1,4 +1,6 @@
-use crate::app::{App, PipelineDialogMode, PipelineEditField, PipelineFocus, PipelineLoopEditField};
+use crate::app::{
+    App, PipelineDialogMode, PipelineEditField, PipelineFocus, PipelineLoopEditField,
+};
 use crate::execution::pipeline::BlockId;
 use crate::execution::truncate_chars;
 use crate::screen::centered_rect;
@@ -546,30 +548,66 @@ fn draw_canvas(f: &mut Frame, app: &App, area: Rect) {
 
     // ── Loop connection rendering ──
     {
-        let loop_conns_as_regular: Vec<crate::execution::pipeline::PipelineConnection> =
-            app.pipeline.pipeline_def.loop_connections.iter()
-                .map(|lc| crate::execution::pipeline::PipelineConnection { from: lc.from, to: lc.to })
-                .collect();
+        let loop_conns_as_regular: Vec<crate::execution::pipeline::PipelineConnection> = app
+            .pipeline
+            .pipeline_def
+            .loop_connections
+            .iter()
+            .map(|lc| crate::execution::pipeline::PipelineConnection {
+                from: lc.from,
+                to: lc.to,
+            })
+            .collect();
         if !loop_conns_as_regular.is_empty() {
-            let loop_lanes = assign_lanes(&loop_conns_as_regular, &app.pipeline.pipeline_def.blocks);
-            let loop_ports = assign_ports(&loop_conns_as_regular, &app.pipeline.pipeline_def.blocks);
+            let loop_lanes =
+                assign_lanes(&loop_conns_as_regular, &app.pipeline.pipeline_def.blocks);
+            let loop_ports =
+                assign_ports(&loop_conns_as_regular, &app.pipeline.pipeline_def.blocks);
 
-            for (ci, lc) in app.pipeline.pipeline_def.loop_connections.iter().enumerate() {
-                let fb = app.pipeline.pipeline_def.blocks.iter().find(|b| b.id == lc.from);
-                let tb = app.pipeline.pipeline_def.blocks.iter().find(|b| b.id == lc.to);
-                let (Some(fb), Some(tb)) = (fb, tb) else { continue; };
+            for (ci, lc) in app
+                .pipeline
+                .pipeline_def
+                .loop_connections
+                .iter()
+                .enumerate()
+            {
+                let fb = app
+                    .pipeline
+                    .pipeline_def
+                    .blocks
+                    .iter()
+                    .find(|b| b.id == lc.from);
+                let tb = app
+                    .pipeline
+                    .pipeline_def
+                    .blocks
+                    .iter()
+                    .find(|b| b.id == lc.to);
+                let (Some(fb), Some(tb)) = (fb, tb) else {
+                    continue;
+                };
 
                 let _removing = app.pipeline.pipeline_removing_conn
                     && is_conn_for_selected(app, lc.from, lc.to);
                 let highlighted = if app.pipeline.pipeline_removing_conn {
                     let sel = app.pipeline.pipeline_block_cursor.unwrap_or(0);
-                    let regular_count = app.pipeline.pipeline_def.connections.iter()
-                        .filter(|c| c.from == sel || c.to == sel).count();
-                    let loop_offset = app.pipeline.pipeline_def.loop_connections.iter()
+                    let regular_count = app
+                        .pipeline
+                        .pipeline_def
+                        .connections
+                        .iter()
+                        .filter(|c| c.from == sel || c.to == sel)
+                        .count();
+                    let loop_offset = app
+                        .pipeline
+                        .pipeline_def
+                        .loop_connections
+                        .iter()
                         .enumerate()
                         .filter(|(_, l)| l.from == sel || l.to == sel)
                         .position(|(i, _)| i == ci);
-                    loop_offset.map(|off| app.pipeline.pipeline_conn_cursor == regular_count + off)
+                    loop_offset
+                        .map(|off| app.pipeline.pipeline_conn_cursor == regular_count + off)
                         .unwrap_or(false)
                 } else {
                     false
@@ -583,8 +621,12 @@ fn draw_canvas(f: &mut Frame, app: &App, area: Rect) {
 
                 let (exit_y_off, entry_y_off) = loop_ports[ci];
                 let segs = route_wire(
-                    fb.position, tb.position, &grid_occ,
-                    loop_lanes[ci], exit_y_off, entry_y_off,
+                    fb.position,
+                    tb.position,
+                    &grid_occ,
+                    loop_lanes[ci],
+                    exit_y_off,
+                    entry_y_off,
                 );
                 let mut conn_map: ConnectionRaster = HashMap::new();
                 for seg in &segs {
@@ -603,7 +645,13 @@ fn draw_canvas(f: &mut Frame, app: &App, area: Rect) {
                     } else {
                         conn_map.insert(
                             (last.x2, last.y2),
-                            WireCell { dirs: 0, color, is_arrow: true, arrow_char: arrow_ch, is_loop: true },
+                            WireCell {
+                                dirs: 0,
+                                color,
+                                is_arrow: true,
+                                arrow_char: arrow_ch,
+                                is_loop: true,
+                            },
                         );
                     }
                 }
@@ -614,7 +662,11 @@ fn draw_canvas(f: &mut Frame, app: &App, area: Rect) {
                     if seg.y1 == seg.y2 {
                         let len = (seg.x2 - seg.x1).abs();
                         if best_h.is_none() || len > (best_h.unwrap().2 - best_h.unwrap().1).abs() {
-                            let (lo, hi) = if seg.x1 <= seg.x2 { (seg.x1, seg.x2) } else { (seg.x2, seg.x1) };
+                            let (lo, hi) = if seg.x1 <= seg.x2 {
+                                (seg.x1, seg.x2)
+                            } else {
+                                (seg.x2, seg.x1)
+                            };
                             best_h = Some((seg.y1, lo, hi));
                         }
                     }
@@ -631,16 +683,31 @@ fn draw_canvas(f: &mut Frame, app: &App, area: Rect) {
                     } else {
                         dirs_to_double_char(cell.dirs)
                     };
-                    put_char(f, canvas_inner, wx - ox, wy - oy, ch,
-                        Style::default().fg(cell.color));
+                    put_char(
+                        f,
+                        canvas_inner,
+                        wx - ox,
+                        wy - oy,
+                        ch,
+                        Style::default().fg(cell.color),
+                    );
                 }
 
                 // Paint the label
                 if let Some((ly, lx_start, lx_end)) = best_h {
                     let mid_x = (lx_start + lx_end) / 2;
-                    let label_style = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+                    let label_style = Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD);
                     for (i, ch) in label.chars().enumerate() {
-                        put_char(f, canvas_inner, mid_x + i as i16 - ox, ly - oy, ch, label_style);
+                        put_char(
+                            f,
+                            canvas_inner,
+                            mid_x + i as i16 - ox,
+                            ly - oy,
+                            ch,
+                            label_style,
+                        );
                     }
                 }
             }
@@ -832,18 +899,48 @@ fn route_wire(
         if target_row_clear {
             let v1 = ex + side_lane.min(side_clamp);
             return vec![
-                WireSeg { x1: ex, y1: ey, x2: v1, y2: ey },
-                WireSeg { x1: v1, y1: ey, x2: v1, y2: ny },
-                WireSeg { x1: v1, y1: ny, x2: nx, y2: ny },
+                WireSeg {
+                    x1: ex,
+                    y1: ey,
+                    x2: v1,
+                    y2: ey,
+                },
+                WireSeg {
+                    x1: v1,
+                    y1: ey,
+                    x2: v1,
+                    y2: ny,
+                },
+                WireSeg {
+                    x1: v1,
+                    y1: ny,
+                    x2: nx,
+                    y2: ny,
+                },
             ];
         }
         let source_row_clear = (fc + 1..tc).all(|c| !grid_occ.contains(&(c, fr)));
         if source_row_clear {
             let v2 = nx - side_lane.min(side_clamp);
             return vec![
-                WireSeg { x1: ex, y1: ey, x2: v2, y2: ey },
-                WireSeg { x1: v2, y1: ey, x2: v2, y2: ny },
-                WireSeg { x1: v2, y1: ny, x2: nx, y2: ny },
+                WireSeg {
+                    x1: ex,
+                    y1: ey,
+                    x2: v2,
+                    y2: ey,
+                },
+                WireSeg {
+                    x1: v2,
+                    y1: ey,
+                    x2: v2,
+                    y2: ny,
+                },
+                WireSeg {
+                    x1: v2,
+                    y1: ny,
+                    x2: nx,
+                    y2: ny,
+                },
             ];
         }
     }
@@ -1106,10 +1203,7 @@ pub(crate) fn render_dag_readonly(
                 prompt_label,
                 Style::default().fg(Color::DarkGray),
             ));
-            f.render_widget(
-                prompt_p,
-                Rect::new(inner.x, inner.y + 1, inner.width, 1),
-            );
+            f.render_widget(prompt_p, Rect::new(inner.x, inner.y + 1, inner.width, 1));
         }
     }
 
@@ -1190,8 +1284,12 @@ pub(crate) fn render_dag_readonly(
     // ── Loop connection rendering (readonly) ──
     {
         let loop_conns_as_regular: Vec<crate::execution::pipeline::PipelineConnection> =
-            loop_connections.iter()
-                .map(|lc| crate::execution::pipeline::PipelineConnection { from: lc.from, to: lc.to })
+            loop_connections
+                .iter()
+                .map(|lc| crate::execution::pipeline::PipelineConnection {
+                    from: lc.from,
+                    to: lc.to,
+                })
                 .collect();
         if !loop_conns_as_regular.is_empty() {
             let loop_lanes = assign_lanes(&loop_conns_as_regular, blocks);
@@ -1200,14 +1298,20 @@ pub(crate) fn render_dag_readonly(
             for (ci, lc) in loop_connections.iter().enumerate() {
                 let fb = blocks.iter().find(|b| b.id == lc.from);
                 let tb = blocks.iter().find(|b| b.id == lc.to);
-                let (Some(fb), Some(tb)) = (fb, tb) else { continue; };
+                let (Some(fb), Some(tb)) = (fb, tb) else {
+                    continue;
+                };
 
                 let color = Color::Yellow;
 
                 let (exit_y_off, entry_y_off) = loop_ports[ci];
                 let segs = route_wire(
-                    fb.position, tb.position, &grid_occ,
-                    loop_lanes[ci], exit_y_off, entry_y_off,
+                    fb.position,
+                    tb.position,
+                    &grid_occ,
+                    loop_lanes[ci],
+                    exit_y_off,
+                    entry_y_off,
                 );
                 let mut conn_map: ConnectionRaster = HashMap::new();
                 for seg in &segs {
@@ -1224,7 +1328,13 @@ pub(crate) fn render_dag_readonly(
                     } else {
                         conn_map.insert(
                             (last.x2, last.y2),
-                            WireCell { dirs: 0, color, is_arrow: true, arrow_char: arrow_ch, is_loop: true },
+                            WireCell {
+                                dirs: 0,
+                                color,
+                                is_arrow: true,
+                                arrow_char: arrow_ch,
+                                is_loop: true,
+                            },
                         );
                     }
                 }
@@ -1235,7 +1345,11 @@ pub(crate) fn render_dag_readonly(
                     if seg.y1 == seg.y2 {
                         let len = (seg.x2 - seg.x1).abs();
                         if best_h.is_none() || len > (best_h.unwrap().2 - best_h.unwrap().1).abs() {
-                            let (lo, hi) = if seg.x1 <= seg.x2 { (seg.x1, seg.x2) } else { (seg.x2, seg.x1) };
+                            let (lo, hi) = if seg.x1 <= seg.x2 {
+                                (seg.x1, seg.x2)
+                            } else {
+                                (seg.x2, seg.x1)
+                            };
                             best_h = Some((seg.y1, lo, hi));
                         }
                     }
@@ -1251,13 +1365,21 @@ pub(crate) fn render_dag_readonly(
                     } else {
                         dirs_to_double_char(cell.dirs)
                     };
-                    put_char(f, area, wx - ox, wy - oy, ch,
-                        Style::default().fg(cell.color));
+                    put_char(
+                        f,
+                        area,
+                        wx - ox,
+                        wy - oy,
+                        ch,
+                        Style::default().fg(cell.color),
+                    );
                 }
 
                 if let Some((ly, lx_start, lx_end)) = best_h {
                     let mid_x = (lx_start + lx_end) / 2;
-                    let label_style = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+                    let label_style = Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD);
                     for (i, ch) in label.chars().enumerate() {
                         put_char(f, area, mid_x + i as i16 - ox, ly - oy, ch, label_style);
                     }
@@ -1308,17 +1430,17 @@ fn draw_edit_popup(f: &mut Frame, app: &App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2),             // Name          [0]
-            Constraint::Length(1),             // spacer        [1]
-            Constraint::Length(agent_list_h),  // Agents list   [2]
-            Constraint::Length(1),             // spacer        [3]
+            Constraint::Length(2),            // Name          [0]
+            Constraint::Length(1),            // spacer        [1]
+            Constraint::Length(agent_list_h), // Agents list   [2]
+            Constraint::Length(1),            // spacer        [3]
             Constraint::Min(6),               // Prompt        [4]
-            Constraint::Length(1),             // spacer        [5]
-            Constraint::Length(2),             // Session ID    [6]
-            Constraint::Length(1),             // spacer        [7]
-            Constraint::Length(2),             // Replicas      [8]
-            Constraint::Length(1),             // spacer        [9]
-            Constraint::Length(1),             // hint          [10]
+            Constraint::Length(1),            // spacer        [5]
+            Constraint::Length(2),            // Session ID    [6]
+            Constraint::Length(1),            // spacer        [7]
+            Constraint::Length(2),            // Replicas      [8]
+            Constraint::Length(1),            // spacer        [9]
+            Constraint::Length(1),            // hint          [10]
         ])
         .split(inner);
 
@@ -1361,7 +1483,9 @@ fn draw_edit_popup(f: &mut Frame, app: &App, area: Rect) {
             let agent_color = if is_avail { Color::Green } else { Color::Red };
             let is_cursor = agent_focus && i == app.pipeline.pipeline_edit_agent_cursor;
             let style = if is_cursor {
-                Style::default().fg(agent_color).add_modifier(Modifier::BOLD | Modifier::REVERSED)
+                Style::default()
+                    .fg(agent_color)
+                    .add_modifier(Modifier::BOLD | Modifier::REVERSED)
             } else {
                 Style::default().fg(agent_color)
             };
@@ -1370,12 +1494,18 @@ fn draw_edit_popup(f: &mut Frame, app: &App, area: Rect) {
         .collect();
     let agent_label = Line::from(Span::styled(
         "Agents:",
-        Style::default().fg(if agent_focus { Color::Cyan } else { Color::White }),
+        Style::default().fg(if agent_focus {
+            Color::Cyan
+        } else {
+            Color::White
+        }),
     ));
     let mut all_agent_lines = vec![agent_label];
     all_agent_lines.extend(agent_lines);
     let agent_visible_rows = (chunks[2].height as usize).saturating_sub(1);
-    app.pipeline.pipeline_edit_agent_visible.set(agent_visible_rows);
+    app.pipeline
+        .pipeline_edit_agent_visible
+        .set(agent_visible_rows);
     let scroll_offset = app.pipeline.pipeline_edit_agent_scroll as u16;
     let agent_p = Paragraph::new(all_agent_lines).scroll((scroll_offset, 0));
     f.render_widget(agent_p, chunks[2]);
@@ -1443,7 +1573,13 @@ fn draw_edit_popup(f: &mut Frame, app: &App, area: Rect) {
     } else {
         Style::default().fg(Color::DarkGray)
     };
-    let selected_agents = app.pipeline.pipeline_edit_agent_selection.iter().filter(|&&s| s).count().max(1) as u32;
+    let selected_agents = app
+        .pipeline
+        .pipeline_edit_agent_selection
+        .iter()
+        .filter(|&&s| s)
+        .count()
+        .max(1) as u32;
     let too_many_agents = selected_agents > 32;
     let max_replicas = (32 / selected_agents).max(1);
     let rep_line = if too_many_agents {
@@ -1597,12 +1733,12 @@ fn draw_session_config_popup(f: &mut Frame, app: &App, area: Rect) {
             format!("{:<6}", "Keep"),
             Style::default().add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            "\u{00d7}N",
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
+        Span::styled("\u{00d7}N", Style::default().add_modifier(Modifier::BOLD)),
     ]);
-    f.render_widget(Paragraph::new(header), Rect::new(inner.x, inner.y, inner.width, 1));
+    f.render_widget(
+        Paragraph::new(header),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
 
     // Footer
     let footer = Paragraph::new("j/k: navigate | Space/Enter: toggle | Esc: close")
@@ -1623,7 +1759,10 @@ fn draw_session_config_popup(f: &mut Frame, app: &App, area: Rect) {
         .min(sessions.len().saturating_sub(1));
     let scroll_offset = cursor.saturating_sub(visible_rows.saturating_sub(1));
 
-    for (vi, si) in (scroll_offset..sessions.len()).take(visible_rows).enumerate() {
+    for (vi, si) in (scroll_offset..sessions.len())
+        .take(visible_rows)
+        .enumerate()
+    {
         let session = &sessions[si];
         let is_selected = si == cursor;
 
@@ -1641,9 +1780,7 @@ fn draw_session_config_popup(f: &mut Frame, app: &App, area: Rect) {
         };
 
         let style = if is_selected {
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
+            Style::default().fg(Color::Black).bg(Color::Cyan)
         } else {
             Style::default()
         };
@@ -1654,16 +1791,27 @@ fn draw_session_config_popup(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(
                 format!("{:<6}", keep_col),
                 if session.keep_across_iterations {
-                    style.fg(if is_selected { Color::Black } else { Color::Green })
+                    style.fg(if is_selected {
+                        Color::Black
+                    } else {
+                        Color::Green
+                    })
                 } else {
-                    style.fg(if is_selected { Color::Black } else { Color::Red })
+                    style.fg(if is_selected {
+                        Color::Black
+                    } else {
+                        Color::Red
+                    })
                 },
             ),
             Span::styled(replicas_col, style),
         ]);
 
         let row_y = inner.y + 1 + vi as u16; // +1 for header
-        f.render_widget(Paragraph::new(row), Rect::new(inner.x, row_y, inner.width, 1));
+        f.render_widget(
+            Paragraph::new(row),
+            Rect::new(inner.x, row_y, inner.width, 1),
+        );
     }
 }
 
@@ -1671,19 +1819,40 @@ fn draw_loop_edit_popup(f: &mut Frame, app: &App, area: Rect) {
     let popup = centered_rect(50, 40, area);
     f.render_widget(Clear, popup);
 
-    let (from_name, to_name) = if let Some((from_id, to_id)) = app.pipeline.pipeline_loop_edit_target {
-        let fname = app.pipeline.pipeline_def.blocks.iter()
-            .find(|b| b.id == from_id)
-            .map(|b| if b.name.is_empty() { format!("Block {}", b.id) } else { b.name.clone() })
-            .unwrap_or_else(|| format!("#{from_id}"));
-        let tname = app.pipeline.pipeline_def.blocks.iter()
-            .find(|b| b.id == to_id)
-            .map(|b| if b.name.is_empty() { format!("Block {}", b.id) } else { b.name.clone() })
-            .unwrap_or_else(|| format!("#{to_id}"));
-        (fname, tname)
-    } else {
-        ("?".into(), "?".into())
-    };
+    let (from_name, to_name) =
+        if let Some((from_id, to_id)) = app.pipeline.pipeline_loop_edit_target {
+            let fname = app
+                .pipeline
+                .pipeline_def
+                .blocks
+                .iter()
+                .find(|b| b.id == from_id)
+                .map(|b| {
+                    if b.name.is_empty() {
+                        format!("Block {}", b.id)
+                    } else {
+                        b.name.clone()
+                    }
+                })
+                .unwrap_or_else(|| format!("#{from_id}"));
+            let tname = app
+                .pipeline
+                .pipeline_def
+                .blocks
+                .iter()
+                .find(|b| b.id == to_id)
+                .map(|b| {
+                    if b.name.is_empty() {
+                        format!("Block {}", b.id)
+                    } else {
+                        b.name.clone()
+                    }
+                })
+                .unwrap_or_else(|| format!("#{to_id}"));
+            (fname, tname)
+        } else {
+            ("?".into(), "?".into())
+        };
 
     let title = format!(" Loop: {} \u{2192} {} ", from_name, to_name);
     let block = Block::default()
@@ -1719,7 +1888,10 @@ fn draw_loop_edit_popup(f: &mut Frame, app: &App, area: Rect) {
         Span::styled("[", count_style),
         Span::raw(&app.pipeline.pipeline_loop_edit_count_buf),
         Span::styled("]", count_style),
-        Span::styled(" (1-99, returns from target to source)", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            " (1-99, returns from target to source)",
+            Style::default().fg(Color::DarkGray),
+        ),
     ]);
     f.render_widget(Paragraph::new(count_line), chunks[0]);
 
@@ -1765,8 +1937,10 @@ fn draw_loop_edit_popup(f: &mut Frame, app: &App, area: Rect) {
     }
 
     // Hint
-    let hint = Paragraph::new("  Tab: switch field  Enter: save (from Count) / newline (from Prompt)  Esc: cancel")
-        .style(Style::default().fg(Color::DarkGray));
+    let hint = Paragraph::new(
+        "  Tab: switch field  Enter: save (from Count) / newline (from Prompt)  Esc: cancel",
+    )
+    .style(Style::default().fg(Color::DarkGray));
     f.render_widget(hint, chunks[3]);
 }
 
@@ -1871,7 +2045,11 @@ mod routing_tests {
         let occ = grid_occupancy(&blocks);
         let segs = route_wire((0, 0), (2, 2), &occ, 0, 0, 0);
         // Unobstructed forward different-row uses a 3-segment L-path
-        assert_eq!(segs.len(), 3, "forward different row (clear) = 3-segment L-path");
+        assert_eq!(
+            segs.len(),
+            3,
+            "forward different row (clear) = 3-segment L-path"
+        );
         no_seg_hits_block(&segs, &blocks);
     }
 

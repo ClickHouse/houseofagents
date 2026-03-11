@@ -133,11 +133,7 @@ impl Provider for AnthropicProvider {
         true
     }
 
-    fn send_streaming(
-        &mut self,
-        message: &str,
-        chunk_tx: mpsc::Sender<String>,
-    ) -> SendFuture<'_> {
+    fn send_streaming(&mut self, message: &str, chunk_tx: mpsc::Sender<String>) -> SendFuture<'_> {
         let message = message.to_string();
         Box::pin(async move {
             if let Err(message) = validate_effort_config(

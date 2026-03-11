@@ -63,7 +63,12 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     // Help popup overlay
     if app.help_popup.active {
-        help::draw_help_overlay(f, &app.help_popup, help::home_help_lines(), " Execution Modes ");
+        help::draw_help_overlay(
+            f,
+            &app.help_popup,
+            help::home_help_lines(),
+            " Execution Modes ",
+        );
     }
 
     // Error modal overlay (always topmost)

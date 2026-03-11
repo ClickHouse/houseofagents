@@ -1013,8 +1013,7 @@ impl RunningState {
             } => {
                 self.upsert_active_block(*block_id, label.clone());
                 self.block_timers.insert(*block_id, AgentTimer::new());
-                self.stream_buffers
-                    .remove(&StreamTarget::Block(*block_id));
+                self.stream_buffers.remove(&StreamTarget::Block(*block_id));
                 if let Some(row) = self.block_rows.iter_mut().find(|r| r.block_id == *block_id) {
                     row.status = AgentRowStatus::Running;
                     row.iteration = *iteration;
@@ -1042,7 +1041,10 @@ impl RunningState {
                 ..
             } => {
                 self.remove_active_block(*block_id);
-                if self.completed_block_steps.insert((*block_id, *iteration, *loop_pass)) {
+                if self
+                    .completed_block_steps
+                    .insert((*block_id, *iteration, *loop_pass))
+                {
                     self.completed_steps += 1;
                 }
                 if let Some(t) = self.block_timers.get_mut(block_id) {
@@ -1063,7 +1065,10 @@ impl RunningState {
                 ..
             } => {
                 self.remove_active_block(*block_id);
-                if self.completed_block_steps.insert((*block_id, *iteration, *loop_pass)) {
+                if self
+                    .completed_block_steps
+                    .insert((*block_id, *iteration, *loop_pass))
+                {
                     self.completed_steps += 1;
                 }
                 let body = details.as_deref().unwrap_or(error);
@@ -1088,7 +1093,10 @@ impl RunningState {
                 ..
             } => {
                 self.remove_active_block(*block_id);
-                if self.completed_block_steps.insert((*block_id, *iteration, *loop_pass)) {
+                if self
+                    .completed_block_steps
+                    .insert((*block_id, *iteration, *loop_pass))
+                {
                     self.completed_steps += 1;
                 }
                 if let Some(t) = self.block_timers.get_mut(block_id) {

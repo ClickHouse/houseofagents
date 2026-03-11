@@ -112,7 +112,11 @@ pub(crate) struct SuccessThenPanicProvider {
 }
 
 impl SuccessThenPanicProvider {
-    pub(crate) fn new(kind: ProviderKind, first_content: &str, panic_message: &'static str) -> Self {
+    pub(crate) fn new(
+        kind: ProviderKind,
+        first_content: &str,
+        panic_message: &'static str,
+    ) -> Self {
         Self {
             kind,
             first_response: Mutex::new(Some(first_content.to_string())),

@@ -150,7 +150,10 @@ fn loop_replica_filename(info: &RuntimeReplicaInfo, iteration: u32, loop_pass: u
     if loop_pass == 0 {
         replica_filename(info, iteration)
     } else {
-        format!("{}_iter{}_loop{}.md", info.filename_stem, iteration, loop_pass)
+        format!(
+            "{}_iter{}_loop{}.md",
+            info.filename_stem, iteration, loop_pass
+        )
     }
 }
 
@@ -345,17 +348,19 @@ impl PipelineDefinition {
         }
         let mut sessions: Vec<EffectiveSession> = map
             .into_iter()
-            .map(|((agent, session_key), (display_label, block_ids, total_replicas))| {
-                let keep = self.keep_session_across_iterations(&agent, &session_key);
-                EffectiveSession {
-                    agent,
-                    session_key,
-                    display_label,
-                    block_ids,
-                    keep_across_iterations: keep,
-                    total_replicas,
-                }
-            })
+            .map(
+                |((agent, session_key), (display_label, block_ids, total_replicas))| {
+                    let keep = self.keep_session_across_iterations(&agent, &session_key);
+                    EffectiveSession {
+                        agent,
+                        session_key,
+                        display_label,
+                        block_ids,
+                        keep_across_iterations: keep,
+                        total_replicas,
+                    }
+                },
+            )
             .collect();
         sessions.sort_by(|a, b| (&a.agent, &a.session_key).cmp(&(&b.agent, &b.session_key)));
 
@@ -427,8 +432,9 @@ impl PipelineDefinition {
             .collect();
 
         // Drop stale rows and rows with keep=true (default)
-        self.session_configs
-            .retain(|c| !c.keep_across_iterations && valid.contains(&(c.agent.clone(), c.session_key.clone())));
+        self.session_configs.retain(|c| {
+            !c.keep_across_iterations && valid.contains(&(c.agent.clone(), c.session_key.clone()))
+        });
 
         // Sort for stability
         self.session_configs
@@ -603,9 +609,9 @@ pub fn prune_invalid_loops(def: &mut PipelineDefinition) -> Vec<String> {
         let mut overlap_indices: HashSet<usize> = HashSet::new();
         for (i, lc) in def.loop_connections.iter().enumerate() {
             if let Some(blocks) = compute_loop_sub_dag(&graph, lc.from, lc.to) {
-                let overlaps = kept_sub_dags.iter().any(|(_, existing)| {
-                    blocks.iter().any(|b| existing.contains(b))
-                });
+                let overlaps = kept_sub_dags
+                    .iter()
+                    .any(|(_, existing)| blocks.iter().any(|b| existing.contains(b)));
                 if overlaps {
                     removed.push(format!(
                         "Loop {}→{} removed (sub-DAG overlaps with another loop after edge change)",
@@ -653,7 +659,11 @@ impl RegularGraph {
             forward.entry(conn.from).or_default().push(conn.to);
             reverse.entry(conn.to).or_default().push(conn.from);
         }
-        RegularGraph { forward, reverse, replicas }
+        RegularGraph {
+            forward,
+            reverse,
+            replicas,
+        }
     }
 }
 
@@ -716,11 +726,7 @@ pub(crate) fn compute_loop_sub_dag(
 }
 
 /// Build a full `LoopSubDag` from a block set.
-fn build_loop_sub_dag(
-    graph: &RegularGraph,
-    blocks: HashSet<BlockId>,
-    to: BlockId,
-) -> LoopSubDag {
+fn build_loop_sub_dag(graph: &RegularGraph, blocks: HashSet<BlockId>, to: BlockId) -> LoopSubDag {
     let mut internal_in_degree: HashMap<BlockId, usize> = blocks.iter().map(|&b| (b, 0)).collect();
     let mut deferred_external_edges: HashMap<BlockId, Vec<(BlockId, usize)>> = HashMap::new();
     let mut total_replicas: usize = 0;
@@ -793,18 +799,22 @@ pub fn loop_extra_tasks(def: &PipelineDefinition) -> usize {
         return 0;
     }
     let graph = RegularGraph::from_def(def);
-    def.loop_connections.iter().map(|lc| {
-        let sub_dag_blocks = compute_loop_sub_dag(&graph, lc.from, lc.to);
-        match sub_dag_blocks {
-            Some(blocks) => {
-                let total_replicas: usize = blocks.iter()
-                    .map(|b| graph.replicas.get(b).copied().unwrap_or(1) as usize)
-                    .sum();
-                total_replicas * lc.count as usize
+    def.loop_connections
+        .iter()
+        .map(|lc| {
+            let sub_dag_blocks = compute_loop_sub_dag(&graph, lc.from, lc.to);
+            match sub_dag_blocks {
+                Some(blocks) => {
+                    let total_replicas: usize = blocks
+                        .iter()
+                        .map(|b| graph.replicas.get(b).copied().unwrap_or(1) as usize)
+                        .sum();
+                    total_replicas * lc.count as usize
+                }
+                None => 0,
             }
-            None => 0,
-        }
-    }).sum()
+        })
+        .sum()
 }
 
 // ---------------------------------------------------------------------------
@@ -1148,8 +1158,10 @@ impl LoopRuntimeState {
             self.extra_tasks_remaining
         } else {
             let completed_this_pass: u32 = self.block_completed_this_pass.values().sum();
-            let current_pass_remaining =
-                self.sub_dag.total_replicas.saturating_sub(completed_this_pass as usize);
+            let current_pass_remaining = self
+                .sub_dag
+                .total_replicas
+                .saturating_sub(completed_this_pass as usize);
             self.extra_tasks_remaining
                 .saturating_sub(current_pass_remaining)
         }
@@ -1157,7 +1169,11 @@ impl LoopRuntimeState {
 
     /// Check if all replicas of a block have completed this pass.
     fn block_all_replicas_done(&self, block_id: BlockId, replicas: u32) -> bool {
-        self.block_completed_this_pass.get(&block_id).copied().unwrap_or(0) >= replicas
+        self.block_completed_this_pass
+            .get(&block_id)
+            .copied()
+            .unwrap_or(0)
+            >= replicas
     }
 }
 
@@ -1250,10 +1266,12 @@ where
 
     // Prepare loop data
     let prepared = prepare_loops(def);
-    let block_to_loop: HashMap<BlockId, (BlockId, BlockId)> = prepared.as_ref()
+    let block_to_loop: HashMap<BlockId, (BlockId, BlockId)> = prepared
+        .as_ref()
         .map(|p| p.block_to_loop.clone())
         .unwrap_or_default();
-    let _from_set: HashSet<BlockId> = prepared.as_ref()
+    let _from_set: HashSet<BlockId> = prepared
+        .as_ref()
         .map(|p| p.from_set.clone())
         .unwrap_or_default();
 
@@ -1287,23 +1305,29 @@ where
 
         // Loop runtime state per iteration
         let mut loop_state: HashMap<(BlockId, BlockId), LoopRuntimeState> = if prepared.is_some() {
-            def.loop_connections.iter().map(|lc| {
-                let key = (lc.from, lc.to);
-                // Re-build sub_dag for each iteration from prepared data
-                let sub_dag_blocks = compute_loop_sub_dag(&graph, lc.from, lc.to)
-                    .unwrap_or_default();
-                let sub_dag = build_loop_sub_dag(&graph, sub_dag_blocks, lc.to);
-                let extra = sub_dag.total_replicas * lc.count as usize;
-                (key, LoopRuntimeState {
-                    remaining: lc.count,
-                    current_pass: 0,
-                    prompt: lc.prompt.clone(),
-                    sub_dag,
-                    block_completed_this_pass: HashMap::new(),
-                    extra_tasks_remaining: extra,
-                    abandoned: false,
+            def.loop_connections
+                .iter()
+                .map(|lc| {
+                    let key = (lc.from, lc.to);
+                    // Re-build sub_dag for each iteration from prepared data
+                    let sub_dag_blocks =
+                        compute_loop_sub_dag(&graph, lc.from, lc.to).unwrap_or_default();
+                    let sub_dag = build_loop_sub_dag(&graph, sub_dag_blocks, lc.to);
+                    let extra = sub_dag.total_replicas * lc.count as usize;
+                    (
+                        key,
+                        LoopRuntimeState {
+                            remaining: lc.count,
+                            current_pass: 0,
+                            prompt: lc.prompt.clone(),
+                            sub_dag,
+                            block_completed_this_pass: HashMap::new(),
+                            extra_tasks_remaining: extra,
+                            abandoned: false,
+                        },
+                    )
                 })
-            }).collect()
+                .collect()
         } else {
             HashMap::new()
         };
@@ -1950,8 +1974,12 @@ where
         previous_terminal_outputs.clear();
         for &tid in &terminals {
             if let Some(rids) = rt.logical_to_runtime.get(&tid) {
-                let needs_label = def.blocks.iter().find(|b| b.id == tid)
-                    .map(|b| b.replicas > 1 || b.agents.len() > 1).unwrap_or(false);
+                let needs_label = def
+                    .blocks
+                    .iter()
+                    .find(|b| b.id == tid)
+                    .map(|b| b.replicas > 1 || b.agents.len() > 1)
+                    .unwrap_or(false);
                 for &rid in rids {
                     if let Some(content) = replica_outputs.get(&rid) {
                         if !previous_terminal_outputs.is_empty() {
@@ -1960,7 +1988,8 @@ where
                         if needs_label {
                             let info = &rt.entries[rid as usize];
                             previous_terminal_outputs.push_str(&format!(
-                                "--- Output from {} ---\n{}", info.display_label, content
+                                "--- Output from {} ---\n{}",
+                                info.display_label, content
                             ));
                         } else {
                             previous_terminal_outputs.push_str(content);
@@ -2019,8 +2048,11 @@ fn build_pipeline_block_message(
                     for &rid in rids {
                         let info = &context.runtime_table.entries[rid as usize];
                         let filename = loop_aware_upstream_filename(
-                            info, context.iteration, *uid,
-                            context.block_to_loop, context.block_loop_pass,
+                            info,
+                            context.iteration,
+                            *uid,
+                            context.block_to_loop,
+                            context.block_loop_pass,
                         );
                         let path = context.output.run_dir().join(&filename);
                         if path.exists() {
@@ -2048,7 +2080,8 @@ fn build_pipeline_block_message(
                             if needs_label {
                                 let info = &context.runtime_table.entries[rid as usize];
                                 upstream_content.push_str(&format!(
-                                    "--- Output from {} ---\n{}", info.display_label, content
+                                    "--- Output from {} ---\n{}",
+                                    info.display_label, content
                                 ));
                             } else {
                                 upstream_content.push_str(content);
@@ -2075,7 +2108,10 @@ fn loop_aware_upstream_filename(
     block_loop_pass: &HashMap<BlockId, u32>,
 ) -> String {
     if block_to_loop.contains_key(&upstream_block_id) {
-        let pass = block_loop_pass.get(&upstream_block_id).copied().unwrap_or(0);
+        let pass = block_loop_pass
+            .get(&upstream_block_id)
+            .copied()
+            .unwrap_or(0);
         if pass == 0 {
             replica_filename(info, iteration)
         } else {
@@ -2140,7 +2176,11 @@ fn build_loop_rerun_message_v2(
                     for &rid in rids {
                         let info = &runtime_table.entries[rid as usize];
                         let filename = loop_aware_upstream_filename(
-                            info, iteration, uid, block_to_loop, block_loop_pass,
+                            info,
+                            iteration,
+                            uid,
+                            block_to_loop,
+                            block_loop_pass,
                         );
                         let path = output.run_dir().join(&filename);
                         if path.exists() {
@@ -2170,7 +2210,8 @@ fn build_loop_rerun_message_v2(
                             if needs_label {
                                 let info = &runtime_table.entries[rid as usize];
                                 upstream_content.push_str(&format!(
-                                    "--- Output from {} ---\n{}", info.display_label, content
+                                    "--- Output from {} ---\n{}",
+                                    info.display_label, content
                                 ));
                             } else {
                                 upstream_content.push_str(content);
@@ -2253,7 +2294,9 @@ fn build_loop_rerun_message_v2(
 mod tests {
     use super::*;
     use crate::config::ProviderConfig;
-    use crate::execution::test_utils::{collect_progress_events, MockProvider, PanicProvider, SuccessThenPanicProvider};
+    use crate::execution::test_utils::{
+        collect_progress_events, MockProvider, PanicProvider, SuccessThenPanicProvider,
+    };
     use crate::output::OutputManager;
     use crate::provider::ProviderKind;
     use std::collections::HashMap;
@@ -3010,10 +3053,7 @@ to = 1
 
     #[test]
     fn effective_sessions_isolated_blocks_get_separate_rows() {
-        let def = def_with(
-            vec![block(1, 0, 0), block(2, 1, 0), block(3, 2, 0)],
-            vec![],
-        );
+        let def = def_with(vec![block(1, 0, 0), block(2, 1, 0), block(3, 2, 0)], vec![]);
         let sessions = def.effective_sessions();
         assert_eq!(sessions.len(), 3);
     }
@@ -3240,9 +3280,8 @@ keep_across_iterations = false
 
     struct ClearCountProvider {
         kind: ProviderKind,
-        responses: std::sync::Mutex<
-            VecDeque<Result<crate::provider::CompletionResponse, AppError>>,
-        >,
+        responses:
+            std::sync::Mutex<VecDeque<Result<crate::provider::CompletionResponse, AppError>>>,
         clear_count: Arc<AtomicUsize>,
     }
 
@@ -3507,7 +3546,12 @@ keep_across_iterations = false
     // -- loop connection helpers --
 
     fn lconn(from: BlockId, to: BlockId, count: u32) -> LoopConnection {
-        LoopConnection { from, to, count, prompt: String::new() }
+        LoopConnection {
+            from,
+            to,
+            count,
+            prompt: String::new(),
+        }
     }
 
     fn def_with_loops(
@@ -3529,13 +3573,12 @@ keep_across_iterations = false
 
     #[test]
     fn test_validate_rejects_loop_self_edge() {
-        let def = def_with_loops(
-            vec![block(1, 0, 0)],
-            vec![],
-            vec![lconn(1, 1, 2)],
-        );
+        let def = def_with_loops(vec![block(1, 0, 0)], vec![], vec![lconn(1, 1, 2)]);
         let err = validate_pipeline(&def).unwrap_err();
-        assert!(err.to_string().contains("self-edge"), "expected 'self-edge', got: {err}");
+        assert!(
+            err.to_string().contains("self-edge"),
+            "expected 'self-edge', got: {err}"
+        );
     }
 
     #[test]
@@ -3543,10 +3586,18 @@ keep_across_iterations = false
         let def = def_with_loops(
             vec![block(1, 0, 0), block(2, 1, 0)],
             vec![],
-            vec![LoopConnection { from: 1, to: 2, count: 0, prompt: String::new() }],
+            vec![LoopConnection {
+                from: 1,
+                to: 2,
+                count: 0,
+                prompt: String::new(),
+            }],
         );
         let err = validate_pipeline(&def).unwrap_err();
-        assert!(err.to_string().contains("1-99"), "expected 'between 1 and 99' range msg, got: {err}");
+        assert!(
+            err.to_string().contains("1-99"),
+            "expected 'between 1 and 99' range msg, got: {err}"
+        );
     }
 
     #[test]
@@ -3559,7 +3610,10 @@ keep_across_iterations = false
             vec![lconn(2, 1, 1), lconn(2, 3, 1)],
         );
         let err = validate_pipeline(&def).unwrap_err();
-        assert!(err.to_string().contains("already a loop endpoint"), "expected 'already a loop endpoint', got: {err}");
+        assert!(
+            err.to_string().contains("already a loop endpoint"),
+            "expected 'already a loop endpoint', got: {err}"
+        );
     }
 
     #[test]
@@ -3567,12 +3621,20 @@ keep_across_iterations = false
         // A(1)→B(2)→C(3)→D(4), loop_back(B,A) has B as from,
         // loop_back(D,B) has B as to — B in two loops with different roles
         let def = def_with_loops(
-            vec![block(1, 0, 0), block(2, 1, 0), block(3, 2, 0), block(4, 3, 0)],
+            vec![
+                block(1, 0, 0),
+                block(2, 1, 0),
+                block(3, 2, 0),
+                block(4, 3, 0),
+            ],
             vec![conn(1, 2), conn(2, 3), conn(3, 4)],
             vec![lconn(2, 1, 1), lconn(4, 2, 1)],
         );
         let err = validate_pipeline(&def).unwrap_err();
-        assert!(err.to_string().contains("already a loop endpoint"), "expected 'already a loop endpoint', got: {err}");
+        assert!(
+            err.to_string().contains("already a loop endpoint"),
+            "expected 'already a loop endpoint', got: {err}"
+        );
     }
 
     #[test]
@@ -3583,7 +3645,10 @@ keep_across_iterations = false
             vec![conn(1, 2)],
             vec![lconn(2, 1, 1)],
         );
-        assert!(validate_pipeline(&def).is_ok(), "regular connection between loop endpoints should be valid");
+        assert!(
+            validate_pipeline(&def).is_ok(),
+            "regular connection between loop endpoints should be valid"
+        );
     }
 
     #[test]
@@ -3595,30 +3660,40 @@ keep_across_iterations = false
             vec![lconn(2, 1, 1)],
         );
         let err = validate_pipeline(&def).unwrap_err();
-        assert!(err.to_string().contains("not a regular-graph ancestor"), "expected ancestry error, got: {err}");
+        assert!(
+            err.to_string().contains("not a regular-graph ancestor"),
+            "expected ancestry error, got: {err}"
+        );
     }
 
     #[test]
     fn test_validate_rejects_overlapping_sub_dags() {
         // A(1)→B(2)→C(3)→D(4), loop_back(C,A,1) and loop_back(D,B,1) — B is in both sub-DAGs
         let def = def_with_loops(
-            vec![block(1, 0, 0), block(2, 1, 0), block(3, 2, 0), block(4, 3, 0)],
+            vec![
+                block(1, 0, 0),
+                block(2, 1, 0),
+                block(3, 2, 0),
+                block(4, 3, 0),
+            ],
             vec![conn(1, 2), conn(2, 3), conn(3, 4)],
             vec![lconn(3, 1, 1), lconn(4, 2, 1)],
         );
         let err = validate_pipeline(&def).unwrap_err();
-        assert!(err.to_string().contains("Overlapping loop sub-DAGs"), "expected overlap error, got: {err}");
+        assert!(
+            err.to_string().contains("Overlapping loop sub-DAGs"),
+            "expected overlap error, got: {err}"
+        );
     }
 
     #[test]
     fn test_validate_rejects_loop_dangling() {
-        let def = def_with_loops(
-            vec![block(1, 0, 0)],
-            vec![],
-            vec![lconn(1, 99, 1)],
-        );
+        let def = def_with_loops(vec![block(1, 0, 0)], vec![], vec![lconn(1, 99, 1)]);
         let err = validate_pipeline(&def).unwrap_err();
-        assert!(err.to_string().contains("non-existent"), "expected 'dangling' ref msg, got: {err}");
+        assert!(
+            err.to_string().contains("non-existent"),
+            "expected 'dangling' ref msg, got: {err}"
+        );
     }
 
     #[test]
@@ -3647,7 +3722,12 @@ keep_across_iterations = false
         let mut def = def_with_loops(
             vec![block(1, 0, 0), block(2, 1, 0)],
             vec![conn(1, 2)],
-            vec![LoopConnection { from: 1, to: 2, count: 1, prompt: String::new() }],
+            vec![LoopConnection {
+                from: 1,
+                to: 2,
+                count: 1,
+                prompt: String::new(),
+            }],
         );
         migrate_loop_direction(&mut def);
         assert_eq!(def.loop_connections[0].from, 2);
@@ -3715,8 +3795,11 @@ keep_across_iterations = false
         // Block 2 is in both sub-DAGs → overlap → loop B pruned.
         let mut def = def_with_loops(
             vec![
-                block(1, 0, 0), block(2, 1, 0), block(3, 2, 0),
-                block(4, 1, 1), block(5, 2, 1),
+                block(1, 0, 0),
+                block(2, 1, 0),
+                block(3, 2, 0),
+                block(4, 1, 1),
+                block(5, 2, 1),
             ],
             vec![conn(1, 2), conn(2, 3), conn(2, 4), conn(4, 5)],
             vec![lconn(3, 1, 1), lconn(5, 2, 1)],
@@ -3743,7 +3826,10 @@ keep_across_iterations = false
         );
         let ups = upstream_of(&def, 1);
         // Block 1 has no regular incoming (only a loop back-edge from 2)
-        assert!(ups.is_empty(), "upstream_of(A) should be empty — loop edge is not upstream");
+        assert!(
+            ups.is_empty(),
+            "upstream_of(A) should be empty — loop edge is not upstream"
+        );
     }
 
     #[test]
@@ -3755,7 +3841,11 @@ keep_across_iterations = false
             vec![lconn(2, 1, 1)],
         );
         let layers = topological_layers(&def).unwrap();
-        assert_eq!(layers, vec![vec![1], vec![2]], "topo layers should follow regular connections only");
+        assert_eq!(
+            layers,
+            vec![vec![1], vec![2]],
+            "topo layers should follow regular connections only"
+        );
     }
 
     #[test]
@@ -3782,8 +3872,16 @@ keep_across_iterations = false
             vec![conn(1, 2)],
             vec![lconn(2, 1, 1)],
         );
-        assert_eq!(root_blocks(&def), vec![1], "A should be root (loop back-edge excluded)");
-        assert_eq!(terminal_blocks(&def), vec![2], "B should be terminal (loop back-edge excluded)");
+        assert_eq!(
+            root_blocks(&def),
+            vec![1],
+            "A should be root (loop back-edge excluded)"
+        );
+        assert_eq!(
+            terminal_blocks(&def),
+            vec![2],
+            "B should be terminal (loop back-edge excluded)"
+        );
     }
 
     // -- loop serialization test --
@@ -3869,12 +3967,22 @@ keep_across_iterations = false
 
         // Count BlockFinished events per runtime block_id
         // Runtime ID 0 = block 1 (A), Runtime ID 1 = block 2 (B)
-        let a_finished = events.iter().filter(|e| matches!(
-            e, ProgressEvent::BlockFinished { block_id, .. } if *block_id == 0
-        )).count();
-        let b_finished = events.iter().filter(|e| matches!(
-            e, ProgressEvent::BlockFinished { block_id, .. } if *block_id == 1
-        )).count();
+        let a_finished = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e, ProgressEvent::BlockFinished { block_id, .. } if *block_id == 0
+                )
+            })
+            .count();
+        let b_finished = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e, ProgressEvent::BlockFinished { block_id, .. } if *block_id == 1
+                )
+            })
+            .count();
 
         assert_eq!(a_finished, 2, "A should finish twice (pass 0 + pass 1)");
         assert_eq!(b_finished, 2, "B should finish twice (pass 0 + pass 1)");
@@ -3938,14 +4046,24 @@ keep_across_iterations = false
 
         // Runtime IDs: 0=A(block1), 1=B(block2), 2=C(block3)
         // Find index of C's BlockStarted
-        let c_started_idx = events.iter().position(|e| matches!(
-            e, ProgressEvent::BlockStarted { block_id, .. } if *block_id == 2
-        )).expect("C should have started");
+        let c_started_idx = events
+            .iter()
+            .position(|e| {
+                matches!(
+                    e, ProgressEvent::BlockStarted { block_id, .. } if *block_id == 2
+                )
+            })
+            .expect("C should have started");
 
         // Find index of B's LAST BlockFinished (pass 1)
-        let b_last_finished_idx = events.iter().rposition(|e| matches!(
-            e, ProgressEvent::BlockFinished { block_id, .. } if *block_id == 1
-        )).expect("B should have finished");
+        let b_last_finished_idx = events
+            .iter()
+            .rposition(|e| {
+                matches!(
+                    e, ProgressEvent::BlockFinished { block_id, .. } if *block_id == 1
+                )
+            })
+            .expect("B should have finished");
 
         assert!(
             c_started_idx > b_last_finished_idx,
@@ -4025,15 +4143,23 @@ keep_across_iterations = false
 
         // A gets runtime 0, B gets runtimes 1,2 (replicas=2)
         // A (runtime 0) should finish twice (pass 0 + pass 1)
-        let a_finished = events.iter().filter(|e| matches!(
-            e, ProgressEvent::BlockFinished { block_id, .. } if *block_id == 0
-        )).count();
+        let a_finished = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e, ProgressEvent::BlockFinished { block_id, .. } if *block_id == 0
+                )
+            })
+            .count();
         assert_eq!(a_finished, 2, "A should finish twice (pass 0 + pass 1)");
 
         // At least one BlockError from the panicking replica
-        assert!(events.iter().any(|e| matches!(
-            e, ProgressEvent::BlockError { error, .. } if error.contains("panicked")
-        )), "should have a panic error event");
+        assert!(
+            events.iter().any(|e| matches!(
+                e, ProgressEvent::BlockError { error, .. } if error.contains("panicked")
+            )),
+            "should have a panic error event"
+        );
 
         assert!(events.iter().any(|e| matches!(e, ProgressEvent::AllDone)));
     }
@@ -4108,15 +4234,23 @@ keep_across_iterations = false
 
         // A gets runtimes 0,1 (replicas=2), B gets runtime 2
         // B (runtime 2, feedback source) should finish twice (pass 0 + pass 1)
-        let b_finished = events.iter().filter(|e| matches!(
-            e, ProgressEvent::BlockFinished { block_id, .. } if *block_id == 2
-        )).count();
+        let b_finished = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e, ProgressEvent::BlockFinished { block_id, .. } if *block_id == 2
+                )
+            })
+            .count();
         assert_eq!(b_finished, 2, "B should finish twice (pass 0 + pass 1)");
 
         // At least one BlockError from the panicking A replica
-        assert!(events.iter().any(|e| matches!(
-            e, ProgressEvent::BlockError { error, .. } if error.contains("panicked")
-        )), "should have a panic error event from A replica");
+        assert!(
+            events.iter().any(|e| matches!(
+                e, ProgressEvent::BlockError { error, .. } if error.contains("panicked")
+            )),
+            "should have a panic error event from A replica"
+        );
 
         assert!(events.iter().any(|e| matches!(e, ProgressEvent::AllDone)));
     }
@@ -4167,7 +4301,12 @@ keep_across_iterations = false
     fn test_compute_sub_dag_diamond() {
         // A(1)→{B(2),C(3)}→D(4), sub_dag(D,A) = {A,B,C,D}
         let def = def_with(
-            vec![block(1, 0, 0), block(2, 1, 0), block(3, 1, 1), block(4, 2, 0)],
+            vec![
+                block(1, 0, 0),
+                block(2, 1, 0),
+                block(3, 1, 1),
+                block(4, 2, 0),
+            ],
             vec![conn(1, 2), conn(1, 3), conn(2, 4), conn(3, 4)],
         );
         let graph = RegularGraph::from_def(&def);
@@ -4179,7 +4318,12 @@ keep_across_iterations = false
     fn test_compute_sub_dag_partial() {
         // A(1)→B(2)→C(3)→D(4), sub_dag(C,B) = {B,C}
         let def = def_with(
-            vec![block(1, 0, 0), block(2, 1, 0), block(3, 2, 0), block(4, 3, 0)],
+            vec![
+                block(1, 0, 0),
+                block(2, 1, 0),
+                block(3, 2, 0),
+                block(4, 3, 0),
+            ],
             vec![conn(1, 2), conn(2, 3), conn(3, 4)],
         );
         let graph = RegularGraph::from_def(&def);
@@ -4192,10 +4336,7 @@ keep_across_iterations = false
     #[test]
     fn test_compute_sub_dag_not_ancestor() {
         // A(1) and B(2) disconnected — no path
-        let def = def_with(
-            vec![block(1, 0, 0), block(2, 1, 0)],
-            vec![],
-        );
+        let def = def_with(vec![block(1, 0, 0), block(2, 1, 0)], vec![]);
         let graph = RegularGraph::from_def(&def);
         assert!(compute_loop_sub_dag(&graph, 2, 1).is_none());
     }
@@ -4204,7 +4345,12 @@ keep_across_iterations = false
     fn test_compute_sub_dag_mixed_parents() {
         // X(5)→B(2), A(1)→B(2)→C(3), sub_dag(C,A) = {A,B,C}, X excluded
         let def = def_with(
-            vec![block(1, 0, 0), block(2, 1, 0), block(3, 2, 0), block(5, 0, 1)],
+            vec![
+                block(1, 0, 0),
+                block(2, 1, 0),
+                block(3, 2, 0),
+                block(5, 0, 1),
+            ],
             vec![conn(1, 2), conn(5, 2), conn(2, 3)],
         );
         let graph = RegularGraph::from_def(&def);
@@ -4273,9 +4419,14 @@ keep_across_iterations = false
         // Runtime IDs: 0=A, 1=B, 2=C
         // All three should finish twice (pass 0 + pass 1)
         for (rid, name) in [(0, "A"), (1, "B"), (2, "C")] {
-            let count = events.iter().filter(|e| matches!(
-                e, ProgressEvent::BlockFinished { block_id, .. } if *block_id == rid
-            )).count();
+            let count = events
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        e, ProgressEvent::BlockFinished { block_id, .. } if *block_id == rid
+                    )
+                })
+                .count();
             assert_eq!(count, 2, "{name} (runtime {rid}) should finish twice");
         }
         assert!(events.iter().any(|e| matches!(e, ProgressEvent::AllDone)));
@@ -4288,7 +4439,12 @@ keep_across_iterations = false
         let dir = tempfile::tempdir().unwrap();
         let output = OutputManager::new(dir.path(), Some("loop-external-deferred")).unwrap();
         let def = def_with_loops(
-            vec![block(1, 0, 0), block(2, 1, 0), block(3, 2, 0), block(4, 2, 1)],
+            vec![
+                block(1, 0, 0),
+                block(2, 1, 0),
+                block(3, 2, 0),
+                block(4, 2, 1),
+            ],
             vec![conn(1, 2), conn(2, 3), conn(2, 4)],
             vec![lconn(3, 1, 1)],
         );
@@ -4337,14 +4493,24 @@ keep_across_iterations = false
 
         // Runtime IDs: 0=A, 1=B, 2=C, 3=E
         // E (runtime 3) should start only after the loop completes
-        let e_started_idx = events.iter().position(|e| matches!(
-            e, ProgressEvent::BlockStarted { block_id, .. } if *block_id == 3
-        )).expect("E should have started");
+        let e_started_idx = events
+            .iter()
+            .position(|e| {
+                matches!(
+                    e, ProgressEvent::BlockStarted { block_id, .. } if *block_id == 3
+                )
+            })
+            .expect("E should have started");
 
         // C (runtime 2, feedback source) last finished = loop completion
-        let c_last_finished_idx = events.iter().rposition(|e| matches!(
-            e, ProgressEvent::BlockFinished { block_id, .. } if *block_id == 2
-        )).expect("C should have finished");
+        let c_last_finished_idx = events
+            .iter()
+            .rposition(|e| {
+                matches!(
+                    e, ProgressEvent::BlockFinished { block_id, .. } if *block_id == 2
+                )
+            })
+            .expect("C should have finished");
 
         assert!(
             e_started_idx > c_last_finished_idx,
@@ -4363,7 +4529,12 @@ keep_across_iterations = false
         let dir = tempfile::tempdir().unwrap();
         let output = OutputManager::new(dir.path(), Some("loop-abort-ext")).unwrap();
         let def = def_with_loops(
-            vec![block(1, 0, 0), block(2, 1, 0), block(3, 2, 0), block(4, 2, 1)],
+            vec![
+                block(1, 0, 0),
+                block(2, 1, 0),
+                block(3, 2, 0),
+                block(4, 2, 1),
+            ],
             vec![conn(1, 2), conn(2, 3), conn(2, 4)],
             vec![lconn(3, 1, 1)],
         );
@@ -4421,25 +4592,43 @@ keep_across_iterations = false
         let events = collect_progress_events(rx);
 
         // A panics
-        assert!(events.iter().any(|e| matches!(
-            e, ProgressEvent::BlockError { error, .. } if error.contains("panicked")
-        )), "should have a panic error from A");
+        assert!(
+            events.iter().any(|e| matches!(
+                e, ProgressEvent::BlockError { error, .. } if error.contains("panicked")
+            )),
+            "should have a panic error from A"
+        );
 
         // E (runtime 3) should be skipped exactly once, not started or double-enqueued
-        let e_skipped = events.iter().filter(|e| matches!(
-            e, ProgressEvent::BlockSkipped { block_id, .. } if *block_id == 3
-        )).count();
+        let e_skipped = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e, ProgressEvent::BlockSkipped { block_id, .. } if *block_id == 3
+                )
+            })
+            .count();
         assert_eq!(e_skipped, 1, "E should be skipped exactly once");
 
         // E should NOT have a BlockStarted event
-        let e_started = events.iter().filter(|e| matches!(
-            e, ProgressEvent::BlockStarted { block_id, .. } if *block_id == 3
-        )).count();
-        assert_eq!(e_started, 0, "E should not be started when loop is abandoned");
+        let e_started = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e, ProgressEvent::BlockStarted { block_id, .. } if *block_id == 3
+                )
+            })
+            .count();
+        assert_eq!(
+            e_started, 0,
+            "E should not be started when loop is abandoned"
+        );
 
         // Must reach AllDone (no hang from double-release)
-        assert!(events.iter().any(|e| matches!(e, ProgressEvent::AllDone)),
-            "pipeline should reach AllDone after loop abort");
+        assert!(
+            events.iter().any(|e| matches!(e, ProgressEvent::AllDone)),
+            "pipeline should reach AllDone after loop abort"
+        );
     }
 
     #[tokio::test]
@@ -4514,7 +4703,11 @@ keep_across_iterations = false
                         // A: succeeds 3 times, captures received prompts
                         Box::new(MockProvider::with_responses(
                             ProviderKind::Anthropic,
-                            vec![ok_response("A-p0"), ok_response("A-p1"), ok_response("A-p2")],
+                            vec![
+                                ok_response("A-p0"),
+                                ok_response("A-p1"),
+                                ok_response("A-p2"),
+                            ],
                             recv_clone.clone(),
                         ))
                     }
@@ -4522,7 +4715,11 @@ keep_across_iterations = false
                         // B-r1: always succeeds
                         Box::new(MockProvider::with_responses(
                             ProviderKind::Anthropic,
-                            vec![ok_response("fresh-B1"), ok_response("fresh-B1"), ok_response("fresh-B1")],
+                            vec![
+                                ok_response("fresh-B1"),
+                                ok_response("fresh-B1"),
+                                ok_response("fresh-B1"),
+                            ],
                             Arc::new(Mutex::new(Vec::new())),
                         ))
                     }
@@ -4534,13 +4731,11 @@ keep_across_iterations = false
                             "B-r2 panicked",
                         ))
                     }
-                    _ => {
-                        Box::new(MockProvider::ok(
-                            ProviderKind::Anthropic,
-                            "unexpected",
-                            Arc::new(Mutex::new(Vec::new())),
-                        ))
-                    }
+                    _ => Box::new(MockProvider::ok(
+                        ProviderKind::Anthropic,
+                        "unexpected",
+                        Arc::new(Mutex::new(Vec::new())),
+                    )),
                 }
             },
         )
@@ -4550,18 +4745,27 @@ keep_across_iterations = false
         let events = collect_progress_events(rx);
 
         // Pipeline should complete
-        assert!(events.iter().any(|e| matches!(e, ProgressEvent::AllDone)),
-            "pipeline should reach AllDone");
+        assert!(
+            events.iter().any(|e| matches!(e, ProgressEvent::AllDone)),
+            "pipeline should reach AllDone"
+        );
 
         // B-r2 should have panic errors
-        assert!(events.iter().any(|e| matches!(
-            e, ProgressEvent::BlockError { error, .. } if error.contains("panicked")
-        )), "B-r2 should emit a panic error");
+        assert!(
+            events.iter().any(|e| matches!(
+                e, ProgressEvent::BlockError { error, .. } if error.contains("panicked")
+            )),
+            "B-r2 should emit a panic error"
+        );
 
         // Key assertion: A's pass-2 prompt must NOT contain stale B-r2 output.
         // A is called 3 times (pass 0, 1, 2). The pass-2 prompt is the last.
         let prompts = received_a.lock().expect("lock");
-        assert!(prompts.len() >= 3, "A should receive at least 3 prompts (passes 0,1,2), got {}", prompts.len());
+        assert!(
+            prompts.len() >= 3,
+            "A should receive at least 3 prompts (passes 0,1,2), got {}",
+            prompts.len()
+        );
         let pass2_prompt = &prompts[2];
         assert!(
             !pass2_prompt.contains("STALE_MARKER"),
@@ -4588,8 +4792,15 @@ keep_across_iterations = false
         def.loop_connections.retain(|lc| lc.from != 2 && lc.to != 2);
         // Now prune loops with broken sub-DAGs
         let warnings = prune_invalid_loops(&mut def);
-        assert_eq!(warnings.len(), 1, "loop with broken internal path should be pruned");
-        assert!(def.loop_connections.is_empty(), "loop 3→1 should be removed");
+        assert_eq!(
+            warnings.len(),
+            1,
+            "loop with broken internal path should be pruned"
+        );
+        assert!(
+            def.loop_connections.is_empty(),
+            "loop 3→1 should be removed"
+        );
     }
 
     // -- multi-agent runtime table tests --
@@ -4634,14 +4845,20 @@ keep_across_iterations = false
         def.blocks[0].replicas = 3;
         let rt = build_runtime_table(&def);
         assert_eq!(rt.entries.len(), 6); // 2 agents × 3 replicas
-        // First 3 entries: Claude r1, r2, r3
+                                         // First 3 entries: Claude r1, r2, r3
         assert_eq!(rt.entries[0].agent, "Claude");
-        assert!(rt.entries[0].display_label.contains("Claude") && rt.entries[0].display_label.contains("r1"));
+        assert!(
+            rt.entries[0].display_label.contains("Claude")
+                && rt.entries[0].display_label.contains("r1")
+        );
         assert_eq!(rt.entries[2].agent, "Claude");
         assert!(rt.entries[2].display_label.contains("r3"));
         // Next 3 entries: GPT r1, r2, r3
         assert_eq!(rt.entries[3].agent, "GPT");
-        assert!(rt.entries[3].display_label.contains("GPT") && rt.entries[3].display_label.contains("r1"));
+        assert!(
+            rt.entries[3].display_label.contains("GPT")
+                && rt.entries[3].display_label.contains("r1")
+        );
         assert_eq!(rt.entries[5].agent, "GPT");
         assert!(rt.entries[5].display_label.contains("r3"));
         // Session keys: 3 unique (per-replica), shared across agents (provider pool
@@ -4649,8 +4866,11 @@ keep_across_iterations = false
         let keys: HashSet<String> = rt.entries.iter().map(|e| e.session_key.clone()).collect();
         assert_eq!(keys.len(), 3);
         // But (agent, session_key) pairs are unique
-        let agent_keys: HashSet<(String, String)> = rt.entries.iter()
-            .map(|e| (e.agent.clone(), e.session_key.clone())).collect();
+        let agent_keys: HashSet<(String, String)> = rt
+            .entries
+            .iter()
+            .map(|e| (e.agent.clone(), e.session_key.clone()))
+            .collect();
         assert_eq!(agent_keys.len(), 6);
         // Unique filename stems
         let stems: HashSet<String> = rt.entries.iter().map(|e| e.filename_stem.clone()).collect();
@@ -4692,7 +4912,10 @@ keep_across_iterations = false
             position = [0, 0]
         "#;
         let def: PipelineDefinition = toml::from_str(toml_str).expect("should parse agents list");
-        assert_eq!(def.blocks[0].agents, vec!["Claude".to_string(), "GPT".to_string()]);
+        assert_eq!(
+            def.blocks[0].agents,
+            vec!["Claude".to_string(), "GPT".to_string()]
+        );
     }
 
     #[test]
@@ -4706,7 +4929,10 @@ keep_across_iterations = false
             position = [0, 0]
         "#;
         let def: PipelineDefinition = toml::from_str(toml_str).expect("should parse");
-        assert_eq!(def.blocks[0].agents, vec!["New1".to_string(), "New2".to_string()]);
+        assert_eq!(
+            def.blocks[0].agents,
+            vec!["New1".to_string(), "New2".to_string()]
+        );
     }
 
     #[test]

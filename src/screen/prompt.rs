@@ -271,11 +271,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         } else {
             Style::default().fg(Color::DarkGray)
         };
-        let ks_text = if app.prompt.keep_session {
-            "on"
-        } else {
-            "off"
-        };
+        let ks_text = if app.prompt.keep_session { "on" } else { "off" };
         let ks_style = if app.prompt.keep_session {
             Style::default().fg(Color::Green)
         } else {

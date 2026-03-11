@@ -624,7 +624,8 @@ pub(super) fn start_multi_pipeline_execution(
                         );
                     }
                     let run_rt = crate::execution::pipeline::build_runtime_table(&pipeline_def);
-                    let run_loop_extra = crate::execution::pipeline::loop_extra_tasks(&pipeline_def);
+                    let run_loop_extra =
+                        crate::execution::pipeline::loop_extra_tasks(&pipeline_def);
                     if let Err(e) = output.write_pipeline_session_info(
                         pipeline_def.blocks.len(),
                         pipeline_def.connections.len(),
@@ -1358,7 +1359,9 @@ pub(super) fn update_step_status(state: &mut RunState, label: &str, status: RunS
 pub(super) fn format_block_step_label(block_id: u32, label: &str, agent_name: &str) -> String {
     if label.trim().is_empty() {
         format!("Block {block_id} ({agent_name})")
-    } else if label.contains(&format!("({agent_name})")) || label.contains(&format!("({agent_name} ")) {
+    } else if label.contains(&format!("({agent_name})"))
+        || label.contains(&format!("({agent_name} "))
+    {
         // Label already includes agent name (multi-agent display labels from runtime table)
         label.to_string()
     } else {

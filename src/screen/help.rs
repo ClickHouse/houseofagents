@@ -1,11 +1,11 @@
 use super::centered_rect;
+use super::results::render_markdown;
 use crate::app::{HelpPopupState, SetupAnalysisState};
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
-use super::results::render_markdown;
 use std::sync::LazyLock;
 
 pub const PIPELINE_TAB_COUNT: usize = 6;
@@ -65,7 +65,9 @@ pub fn home_help_lines() -> &'static [Line<'static>] {
             )),
             Line::from(""),
             Line::from("  Build a custom DAG of agent blocks with explicit connections."),
-            Line::from("  Each block has one or more agents, a prompt, and an optional session ID."),
+            Line::from(
+                "  Each block has one or more agents, a prompt, and an optional session ID.",
+            ),
             Line::from("  Blocks execute as soon as their dependencies are satisfied,"),
             Line::from("  maximizing parallelism. Root blocks receive the initial prompt;"),
             Line::from("  on subsequent iterations they receive terminal block outputs."),
@@ -455,10 +457,7 @@ pub fn draw_help_overlay(f: &mut Frame, state: &HelpPopupState, lines: &[Line<'_
 
     // Bottom bar — Tab/Shift+Tab hint only when multi-tab
     let mut hints = vec![
-        Span::styled(
-            "j/k, arrows, PgUp/PgDn",
-            Style::default().fg(Color::Yellow),
-        ),
+        Span::styled("j/k, arrows, PgUp/PgDn", Style::default().fg(Color::Yellow)),
         Span::raw(": scroll  "),
     ];
     if state.tab_count > 1 {
@@ -499,8 +498,8 @@ pub fn draw_setup_analysis_popup(f: &mut Frame, state: &SetupAnalysisState) {
         .split(inner);
 
     if state.loading {
-        let loading = Paragraph::new("Analyzing setup...")
-            .style(Style::default().fg(Color::Yellow));
+        let loading =
+            Paragraph::new("Analyzing setup...").style(Style::default().fg(Color::Yellow));
         f.render_widget(loading, sections[0]);
         let hint = Paragraph::new(Line::from(vec![
             Span::styled("Esc/q", Style::default().fg(Color::Yellow)),
@@ -539,10 +538,7 @@ pub fn draw_setup_analysis_popup(f: &mut Frame, state: &SetupAnalysisState) {
     f.render_widget(text, sections[0]);
 
     let hints = Line::from(vec![
-        Span::styled(
-            "j/k, arrows, PgUp/PgDn",
-            Style::default().fg(Color::Yellow),
-        ),
+        Span::styled("j/k, arrows, PgUp/PgDn", Style::default().fg(Color::Yellow)),
         Span::raw(": scroll  "),
         Span::styled("Esc/q", Style::default().fg(Color::Yellow)),
         Span::raw(": close"),

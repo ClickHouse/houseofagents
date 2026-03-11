@@ -84,7 +84,12 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     // Help popup overlay
     if app.help_popup.active {
-        help::draw_help_overlay(f, &app.help_popup, help::order_help_lines(), " Relay Order ");
+        help::draw_help_overlay(
+            f,
+            &app.help_popup,
+            help::order_help_lines(),
+            " Relay Order ",
+        );
     }
     if app.setup_analysis.active {
         help::draw_setup_analysis_popup(f, &app.setup_analysis);

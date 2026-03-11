@@ -201,11 +201,7 @@ pub trait Provider: Send {
     fn supports_streaming(&self) -> bool {
         false
     }
-    fn send_streaming(
-        &mut self,
-        message: &str,
-        _chunk_tx: mpsc::Sender<String>,
-    ) -> SendFuture<'_> {
+    fn send_streaming(&mut self, message: &str, _chunk_tx: mpsc::Sender<String>) -> SendFuture<'_> {
         self.send(message)
     }
 }

@@ -61,9 +61,8 @@ pub(super) fn start_setup_analysis(app: &mut App) {
         }
         Screen::Pipeline => {
             if app.pipeline.pipeline_def.blocks.is_empty() {
-                app.setup_analysis.show_message(
-                    "Pipeline has no blocks. Add blocks before analyzing.".into(),
-                );
+                app.setup_analysis
+                    .show_message("Pipeline has no blocks. Add blocks before analyzing.".into());
                 return;
             }
             if app.pipeline.pipeline_def.initial_prompt.trim().is_empty() {
@@ -166,8 +165,7 @@ pub(super) fn start_setup_analysis(app: &mut App) {
             let ks = keep_session;
             let mode = selected_mode;
             let is_prompt_screen = on_prompt_screen;
-            let is_multi_agent_relay =
-                mode == ExecutionMode::Relay && agents.len() > 1;
+            let is_multi_agent_relay = mode == ExecutionMode::Relay && agents.len() > 1;
 
             if is_prompt_screen && is_multi_agent_relay {
                 full_prompt.push_str(
@@ -266,7 +264,10 @@ fn build_relay_prompt(app: &App, prompt: &mut String) {
         }
     }
 
-    prompt.push_str(&format!("Agent order: {}\n", app.selected_agents.join(" -> ")));
+    prompt.push_str(&format!(
+        "Agent order: {}\n",
+        app.selected_agents.join(" -> ")
+    ));
 
     // On Prompt screen with multi-agent relay, order can still change
     if app.screen == Screen::Prompt
@@ -307,7 +308,11 @@ fn build_relay_prompt(app: &App, prompt: &mut String) {
     ));
     prompt.push_str(&format!(
         "Forward Prompt: {}\n",
-        if app.prompt.forward_prompt { "on" } else { "off" }
+        if app.prompt.forward_prompt {
+            "on"
+        } else {
+            "off"
+        }
     ));
     prompt.push_str(&format!(
         "Keep Session: {}\n",
@@ -415,17 +420,28 @@ fn build_pipeline_prompt(app: &App, prompt: &mut String) {
     prompt.push_str("\nBlocks:\n");
     for block in &def.blocks {
         let label = pipeline_block_label(block);
-        let agent_names: Vec<String> = block.agents.iter().map(|a| {
-            if let Some(cfg) = app.effective_agent_config(a) {
-                format!("{} ({})", a, cfg.model)
-            } else {
-                a.clone()
-            }
-        }).collect();
+        let agent_names: Vec<String> = block
+            .agents
+            .iter()
+            .map(|a| {
+                if let Some(cfg) = app.effective_agent_config(a) {
+                    format!("{} ({})", a, cfg.model)
+                } else {
+                    a.clone()
+                }
+            })
+            .collect();
         let agent_info = agent_names.join(", ");
         let snippet = truncate_chars(&block.prompt, 200);
-        let agent_label = if block.agents.len() > 1 { "agents" } else { "agent" };
-        let mut line = format!("  {} \"{}\" — {}: {}", block.id, label, agent_label, agent_info);
+        let agent_label = if block.agents.len() > 1 {
+            "agents"
+        } else {
+            "agent"
+        };
+        let mut line = format!(
+            "  {} \"{}\" — {}: {}",
+            block.id, label, agent_label, agent_info
+        );
         if !snippet.is_empty() {
             line.push_str(&format!(", prompt: {}", snippet));
             if block.prompt.chars().count() > 200 {
@@ -571,7 +587,10 @@ fn build_pipeline_prompt(app: &App, prompt: &mut String) {
 
     // Runtime table for replicas / multi-agent expansion
     let rt = build_runtime_table(def);
-    let has_expansion = def.blocks.iter().any(|b| b.replicas > 1 || b.agents.len() > 1);
+    let has_expansion = def
+        .blocks
+        .iter()
+        .any(|b| b.replicas > 1 || b.agents.len() > 1);
     if has_expansion {
         prompt.push_str(&format!(
             "\nRuntime blocks (after agent/replica expansion): {}\n",

@@ -105,11 +105,7 @@ impl Provider for OpenAIProvider {
         true
     }
 
-    fn send_streaming(
-        &mut self,
-        message: &str,
-        chunk_tx: mpsc::Sender<String>,
-    ) -> SendFuture<'_> {
+    fn send_streaming(&mut self, message: &str, chunk_tx: mpsc::Sender<String>) -> SendFuture<'_> {
         let message = message.to_string();
         Box::pin(async move {
             self.base.prepare_send(&message);

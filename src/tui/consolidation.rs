@@ -96,7 +96,9 @@ fn keep_highest_loop_pass(
         if let Some(lp) = stem.rfind("_loop") {
             if let Ok(n) = stem[lp + 5..].parse::<u32>() {
                 let base = stem[..lp].to_string();
-                let entry = best.entry(base).or_insert((0, String::new(), std::path::PathBuf::new()));
+                let entry =
+                    best.entry(base)
+                        .or_insert((0, String::new(), std::path::PathBuf::new()));
                 if n >= entry.0 {
                     *entry = (n, name, path);
                 }

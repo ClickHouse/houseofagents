@@ -1555,11 +1555,10 @@ fn session_config_popup_toggle_sets_false() {
     let sessions = app.pipeline.pipeline_def.effective_sessions();
     assert!(!sessions.is_empty());
     let first = &sessions[0];
-    assert!(
-        !app.pipeline
-            .pipeline_def
-            .keep_session_across_iterations(&first.agent, &first.session_key)
-    );
+    assert!(!app
+        .pipeline
+        .pipeline_def
+        .keep_session_across_iterations(&first.agent, &first.session_key));
 }
 
 #[test]
@@ -1571,11 +1570,10 @@ fn session_config_popup_toggle_back_to_true() {
     handle_key(&mut app, key(KeyCode::Char(' ')));
     let sessions = app.pipeline.pipeline_def.effective_sessions();
     let first = &sessions[0];
-    assert!(
-        app.pipeline
-            .pipeline_def
-            .keep_session_across_iterations(&first.agent, &first.session_key)
-    );
+    assert!(app
+        .pipeline
+        .pipeline_def
+        .keep_session_across_iterations(&first.agent, &first.session_key));
 }
 
 #[test]
@@ -1734,7 +1732,10 @@ fn help_tab_wraps_backward() {
     let mut app = test_app();
     app.help_popup.open(6);
     app.help_popup.tab = 0;
-    handle_key(&mut app, KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+    handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
+    );
     assert_eq!(app.help_popup.tab, 5);
     assert_eq!(app.help_popup.scroll, 0);
 }
@@ -1914,10 +1915,7 @@ fn test_o_opens_edit_on_existing_loop() {
     assert!(app.pipeline.pipeline_show_loop_edit);
     assert_eq!(app.pipeline.pipeline_loop_edit_count_buf, "3");
     assert_eq!(app.pipeline.pipeline_loop_edit_prompt_buf, "review again");
-    assert_eq!(
-        app.pipeline.pipeline_loop_edit_target,
-        Some((1, 2))
-    );
+    assert_eq!(app.pipeline.pipeline_loop_edit_target, Some((1, 2)));
 }
 
 #[test]
@@ -1937,7 +1935,10 @@ fn test_loop_connect_creates_loop() {
     use crate::execution::pipeline::PipelineConnection;
     let mut app = pipeline_app_with_two_blocks();
     // Regular connection 1→2 so ancestry check passes
-    app.pipeline.pipeline_def.connections.push(PipelineConnection { from: 1, to: 2 });
+    app.pipeline
+        .pipeline_def
+        .connections
+        .push(PipelineConnection { from: 1, to: 2 });
     // Enter loop connect mode from block 2 (downstream feedback source)
     app.pipeline.pipeline_loop_connecting_from = Some(2);
     // Cursor on block 1 (upstream restart target)
@@ -2123,11 +2124,7 @@ fn terminal_sweep_cancelled_marks_leftover_as_error() {
     let mut app = test_app();
     app.running.is_running = true;
 
-    let labels: Vec<String> = vec![
-        "A (Claude)".into(),
-        "B (GPT)".into(),
-        "C (Claude)".into(),
-    ];
+    let labels: Vec<String> = vec!["A (Claude)".into(), "B (GPT)".into(), "C (Claude)".into()];
     let mut run = RunState::new(1, &labels);
     // A completed, B was in-flight, C never started.
     run.status = RunStatus::Running;
@@ -2147,7 +2144,11 @@ fn terminal_sweep_cancelled_marks_leftover_as_error() {
     );
 
     let steps = &app.running.multi_run_states[0].steps;
-    assert_eq!(steps[0].status, RunStepStatus::Done, "A completed before cancel");
+    assert_eq!(
+        steps[0].status,
+        RunStepStatus::Done,
+        "A completed before cancel"
+    );
     assert_eq!(
         steps[1].status,
         RunStepStatus::Error,
@@ -2166,7 +2167,13 @@ fn terminal_sweep_cancelled_marks_leftover_as_error() {
 
 fn setup_analysis_app_with_diag() -> App {
     let agents = vec![
-        test_agent("Claude", ProviderKind::Anthropic, "claude-opus-4-6", false, None),
+        test_agent(
+            "Claude",
+            ProviderKind::Anthropic,
+            "claude-opus-4-6",
+            false,
+            None,
+        ),
         test_agent("OpenAI", ProviderKind::OpenAI, "gpt-4o", false, None),
     ];
     let mut config = test_config();
@@ -2245,8 +2252,7 @@ fn setup_analysis_prompt_pipeline() {
             replicas: 1,
         },
     ];
-    app.pipeline.pipeline_def.connections =
-        vec![PipelineConnection { from: 1, to: 2 }];
+    app.pipeline.pipeline_def.connections = vec![PipelineConnection { from: 1, to: 2 }];
 
     let prompt = build_setup_analysis_prompt(&app);
     assert!(prompt.contains("Mode: Pipeline"));
@@ -2375,7 +2381,10 @@ fn setup_analysis_no_diagnostic_provider() {
     start_setup_analysis(&mut app);
     assert!(app.setup_analysis.active);
     assert!(!app.setup_analysis.loading);
-    assert!(app.setup_analysis.content.contains("No diagnostic_provider"));
+    assert!(app
+        .setup_analysis
+        .content
+        .contains("No diagnostic_provider"));
 }
 
 #[test]
@@ -2415,7 +2424,13 @@ fn setup_analysis_empty_prompt_without_resume() {
 fn setup_analysis_relay_agent_invalid_runtime() {
     // CLI-mode agent with CLI not installed should be caught
     let agents = vec![
-        test_agent("Claude", ProviderKind::Anthropic, "claude-opus-4-6", false, None),
+        test_agent(
+            "Claude",
+            ProviderKind::Anthropic,
+            "claude-opus-4-6",
+            false,
+            None,
+        ),
         test_agent("CliAgent", ProviderKind::OpenAI, "gpt-4", true, None),
     ];
     let mut config = test_config();
@@ -2436,7 +2451,13 @@ fn setup_analysis_relay_agent_invalid_runtime() {
 fn setup_analysis_pipeline_agent_invalid_runtime() {
     // Pipeline block with CLI-mode agent that has no CLI installed
     let agents = vec![
-        test_agent("Claude", ProviderKind::Anthropic, "claude-opus-4-6", false, None),
+        test_agent(
+            "Claude",
+            ProviderKind::Anthropic,
+            "claude-opus-4-6",
+            false,
+            None,
+        ),
         test_agent("CliAgent", ProviderKind::OpenAI, "gpt-4", true, None),
     ];
     let mut config = test_config();
@@ -2588,7 +2609,9 @@ async fn ctrl_e_from_prompt_text_focus_opens_popup() {
     handle_key(&mut app, key);
     // Should open popup (loading), not insert 'e' into text
     assert!(app.setup_analysis.active || !app.setup_analysis.content.is_empty());
-    assert!(!app.prompt.prompt_text.contains('e') || app.prompt.prompt_text == "Analyze this codebase");
+    assert!(
+        !app.prompt.prompt_text.contains('e') || app.prompt.prompt_text == "Analyze this codebase"
+    );
 }
 
 #[test]
@@ -2652,36 +2675,49 @@ fn test_delete_internal_block_prunes_loop() {
     //
     // Chain: 1→2→3, loop 3→1.
     // Delete block 2 via 'd' key → loop 3→1 should be removed.
-    use crate::execution::pipeline::{
-        LoopConnection, PipelineBlock, PipelineConnection,
-    };
+    use crate::execution::pipeline::{LoopConnection, PipelineBlock, PipelineConnection};
     let mut app = test_app();
     app.screen = Screen::Pipeline;
     app.pipeline.pipeline_focus = PipelineFocus::Builder;
     app.pipeline.pipeline_def.blocks = vec![
         PipelineBlock {
-            id: 1, name: "A".into(), agents: vec!["Claude".into()],
-            prompt: String::new(), session_id: None,
-            position: (0, 0), replicas: 1,
+            id: 1,
+            name: "A".into(),
+            agents: vec!["Claude".into()],
+            prompt: String::new(),
+            session_id: None,
+            position: (0, 0),
+            replicas: 1,
         },
         PipelineBlock {
-            id: 2, name: "B".into(), agents: vec!["Claude".into()],
-            prompt: String::new(), session_id: None,
-            position: (1, 0), replicas: 1,
+            id: 2,
+            name: "B".into(),
+            agents: vec!["Claude".into()],
+            prompt: String::new(),
+            session_id: None,
+            position: (1, 0),
+            replicas: 1,
         },
         PipelineBlock {
-            id: 3, name: "C".into(), agents: vec!["Claude".into()],
-            prompt: String::new(), session_id: None,
-            position: (2, 0), replicas: 1,
+            id: 3,
+            name: "C".into(),
+            agents: vec!["Claude".into()],
+            prompt: String::new(),
+            session_id: None,
+            position: (2, 0),
+            replicas: 1,
         },
     ];
     app.pipeline.pipeline_def.connections = vec![
         PipelineConnection { from: 1, to: 2 },
         PipelineConnection { from: 2, to: 3 },
     ];
-    app.pipeline.pipeline_def.loop_connections = vec![
-        LoopConnection { from: 3, to: 1, count: 1, prompt: String::new() },
-    ];
+    app.pipeline.pipeline_def.loop_connections = vec![LoopConnection {
+        from: 3,
+        to: 1,
+        count: 1,
+        prompt: String::new(),
+    }];
 
     // Select block 2 (internal to the loop sub-DAG) and press 'd'
     app.pipeline.pipeline_block_cursor = Some(2);
@@ -2697,5 +2733,8 @@ fn test_delete_internal_block_prunes_loop() {
         "loop 3→1 should be pruned when internal block 2 is deleted"
     );
     // User should see a warning about the pruned loop
-    assert!(app.error_modal.is_some(), "user should be warned about pruned loop");
+    assert!(
+        app.error_modal.is_some(),
+        "user should be warned about pruned loop"
+    );
 }

@@ -579,9 +579,8 @@ pub(super) fn handle_pipeline_key(app: &mut App, key: KeyEvent) {
                             .pipeline_def
                             .connections
                             .push(pipeline_mod::PipelineConnection { from, to });
-                        let warnings = pipeline_mod::prune_invalid_loops(
-                            &mut app.pipeline.pipeline_def,
-                        );
+                        let warnings =
+                            pipeline_mod::prune_invalid_loops(&mut app.pipeline.pipeline_def);
                         if !warnings.is_empty() {
                             app.error_modal = Some(warnings.join("\n"));
                         }
@@ -835,9 +834,7 @@ pub(super) fn handle_pipeline_builder_key(app: &mut App, key: KeyEvent) {
                     .loop_connections
                     .retain(|lc| lc.from != sel && lc.to != sel);
                 // Prune loops whose sub-DAG lost an internal node
-                let warnings = pipeline_mod::prune_invalid_loops(
-                    &mut app.pipeline.pipeline_def,
-                );
+                let warnings = pipeline_mod::prune_invalid_loops(&mut app.pipeline.pipeline_def);
                 if !warnings.is_empty() {
                     app.error_modal = Some(warnings.join("\n"));
                 }
@@ -879,8 +876,7 @@ pub(super) fn handle_pipeline_builder_key(app: &mut App, key: KeyEvent) {
                         block.session_id.clone().unwrap_or_default();
                     app.pipeline.pipeline_edit_session_cursor =
                         app.pipeline.pipeline_edit_session_buf.len();
-                    app.pipeline.pipeline_edit_replicas_buf =
-                        block.replicas.to_string();
+                    app.pipeline.pipeline_edit_replicas_buf = block.replicas.to_string();
                 }
             }
         }
@@ -1064,17 +1060,16 @@ fn handle_pipeline_session_config_key(app: &mut App, key: KeyEvent) {
             app.pipeline.pipeline_show_session_config = false;
         }
         KeyCode::Up | KeyCode::Char('k') => {
-            app.pipeline.pipeline_session_config_cursor =
-                app.pipeline.pipeline_session_config_cursor.saturating_sub(1);
+            app.pipeline.pipeline_session_config_cursor = app
+                .pipeline
+                .pipeline_session_config_cursor
+                .saturating_sub(1);
         }
         KeyCode::Down | KeyCode::Char('j') => {
             let sessions = app.pipeline.pipeline_def.effective_sessions();
             if !sessions.is_empty() {
-                app.pipeline.pipeline_session_config_cursor = (app
-                    .pipeline
-                    .pipeline_session_config_cursor
-                    + 1)
-                .min(sessions.len() - 1);
+                app.pipeline.pipeline_session_config_cursor =
+                    (app.pipeline.pipeline_session_config_cursor + 1).min(sessions.len() - 1);
             }
         }
         KeyCode::Char(' ') | KeyCode::Enter => {
@@ -1088,11 +1083,9 @@ fn handle_pipeline_session_config_key(app: &mut App, key: KeyEvent) {
                 .min(sessions.len() - 1);
             let session = &sessions[cursor];
             let new_keep = !session.keep_across_iterations;
-            app.pipeline.pipeline_def.set_keep_session_across_iterations(
-                &session.agent,
-                &session.session_key,
-                new_keep,
-            );
+            app.pipeline
+                .pipeline_def
+                .set_keep_session_across_iterations(&session.agent, &session.session_key, new_keep);
             app.pipeline.pipeline_def.normalize_session_configs();
             // Re-clamp cursor
             let sessions = app.pipeline.pipeline_def.effective_sessions();
@@ -1285,12 +1278,13 @@ pub(super) fn handle_pipeline_edit_key(app: &mut App, key: KeyEvent) {
             PipelineEditField::Agent => match key.code {
                 KeyCode::Up | KeyCode::Char('k') => {
                     if !app.config.agents.is_empty() {
-                        app.pipeline.pipeline_edit_agent_cursor = app
-                            .pipeline
-                            .pipeline_edit_agent_cursor
-                            .saturating_sub(1);
-                        if app.pipeline.pipeline_edit_agent_cursor < app.pipeline.pipeline_edit_agent_scroll {
-                            app.pipeline.pipeline_edit_agent_scroll = app.pipeline.pipeline_edit_agent_cursor;
+                        app.pipeline.pipeline_edit_agent_cursor =
+                            app.pipeline.pipeline_edit_agent_cursor.saturating_sub(1);
+                        if app.pipeline.pipeline_edit_agent_cursor
+                            < app.pipeline.pipeline_edit_agent_scroll
+                        {
+                            app.pipeline.pipeline_edit_agent_scroll =
+                                app.pipeline.pipeline_edit_agent_cursor;
                         }
                     }
                 }
@@ -1301,8 +1295,11 @@ pub(super) fn handle_pipeline_edit_key(app: &mut App, key: KeyEvent) {
                             app.pipeline.pipeline_edit_agent_cursor += 1;
                         }
                         let visible = app.pipeline.pipeline_edit_agent_visible.get().max(1);
-                        if app.pipeline.pipeline_edit_agent_cursor >= app.pipeline.pipeline_edit_agent_scroll + visible {
-                            app.pipeline.pipeline_edit_agent_scroll = app.pipeline.pipeline_edit_agent_cursor + 1 - visible;
+                        if app.pipeline.pipeline_edit_agent_cursor
+                            >= app.pipeline.pipeline_edit_agent_scroll + visible
+                        {
+                            app.pipeline.pipeline_edit_agent_scroll =
+                                app.pipeline.pipeline_edit_agent_cursor + 1 - visible;
                         }
                     }
                 }
@@ -1363,20 +1360,12 @@ pub(super) fn handle_pipeline_edit_key(app: &mut App, key: KeyEvent) {
                 }
                 KeyCode::Up | KeyCode::Char('+') => {
                     let max = pipeline_edit_max_replicas(app);
-                    let cur: u32 = app
-                        .pipeline
-                        .pipeline_edit_replicas_buf
-                        .parse()
-                        .unwrap_or(1);
+                    let cur: u32 = app.pipeline.pipeline_edit_replicas_buf.parse().unwrap_or(1);
                     let next = (cur + 1).min(max);
                     app.pipeline.pipeline_edit_replicas_buf = next.to_string();
                 }
                 KeyCode::Down | KeyCode::Char('-') => {
-                    let cur: u32 = app
-                        .pipeline
-                        .pipeline_edit_replicas_buf
-                        .parse()
-                        .unwrap_or(1);
+                    let cur: u32 = app.pipeline.pipeline_edit_replicas_buf.parse().unwrap_or(1);
                     let next = cur.saturating_sub(1).max(1);
                     app.pipeline.pipeline_edit_replicas_buf = next.to_string();
                 }
@@ -1479,7 +1468,13 @@ pub(super) fn handle_pipeline_remove_conn_key(app: &mut App, key: KeyEvent) {
             refs.push(ConnRef::Regular(i));
         }
     }
-    for (i, lc) in app.pipeline.pipeline_def.loop_connections.iter().enumerate() {
+    for (i, lc) in app
+        .pipeline
+        .pipeline_def
+        .loop_connections
+        .iter()
+        .enumerate()
+    {
         if lc.from == sel || lc.to == sel {
             refs.push(ConnRef::Loop(i));
         }
@@ -1502,9 +1497,8 @@ pub(super) fn handle_pipeline_remove_conn_key(app: &mut App, key: KeyEvent) {
                 match conn_ref {
                     ConnRef::Regular(idx) => {
                         app.pipeline.pipeline_def.connections.remove(*idx);
-                        let warnings = pipeline_mod::prune_invalid_loops(
-                            &mut app.pipeline.pipeline_def,
-                        );
+                        let warnings =
+                            pipeline_mod::prune_invalid_loops(&mut app.pipeline.pipeline_def);
                         if !warnings.is_empty() {
                             app.error_modal = Some(warnings.join("\n"));
                         }
@@ -1546,7 +1540,8 @@ fn handle_pipeline_loop_connect_key(app: &mut App, key: KeyEvent) {
                     match pipeline_mod::compute_loop_sub_dag(&graph, from, to) {
                         None => {
                             app.error_modal = Some(
-                                "Target is not an ancestor of source via regular connections".into(),
+                                "Target is not an ancestor of source via regular connections"
+                                    .into(),
                             );
                         }
                         Some(sub_dag_blocks) => {
@@ -1554,7 +1549,9 @@ fn handle_pipeline_loop_connect_key(app: &mut App, key: KeyEvent) {
                             let mut overlap = false;
                             for existing_lc in &app.pipeline.pipeline_def.loop_connections {
                                 if let Some(existing_blocks) = pipeline_mod::compute_loop_sub_dag(
-                                    &graph, existing_lc.from, existing_lc.to,
+                                    &graph,
+                                    existing_lc.from,
+                                    existing_lc.to,
                                 ) {
                                     if sub_dag_blocks.iter().any(|b| existing_blocks.contains(b)) {
                                         overlap = true;
@@ -1563,18 +1560,16 @@ fn handle_pipeline_loop_connect_key(app: &mut App, key: KeyEvent) {
                                 }
                             }
                             if overlap {
-                                app.error_modal =
-                                    Some("Loop sub-DAGs would overlap".into());
+                                app.error_modal = Some("Loop sub-DAGs would overlap".into());
                             } else {
-                                app.pipeline
-                                    .pipeline_def
-                                    .loop_connections
-                                    .push(pipeline_mod::LoopConnection {
+                                app.pipeline.pipeline_def.loop_connections.push(
+                                    pipeline_mod::LoopConnection {
                                         from,
                                         to,
                                         count: 1,
                                         prompt: String::new(),
-                                    });
+                                    },
+                                );
                                 app.pipeline.pipeline_loop_connecting_from = None;
                             }
                         }
@@ -1583,12 +1578,8 @@ fn handle_pipeline_loop_connect_key(app: &mut App, key: KeyEvent) {
             }
         }
         KeyCode::Up | KeyCode::Char('k') => pipeline_spatial_nav(app, NavAxis::Vertical, true),
-        KeyCode::Down | KeyCode::Char('j') => {
-            pipeline_spatial_nav(app, NavAxis::Vertical, false)
-        }
-        KeyCode::Left | KeyCode::Char('h') => {
-            pipeline_spatial_nav(app, NavAxis::Horizontal, true)
-        }
+        KeyCode::Down | KeyCode::Char('j') => pipeline_spatial_nav(app, NavAxis::Vertical, false),
+        KeyCode::Left | KeyCode::Char('h') => pipeline_spatial_nav(app, NavAxis::Horizontal, true),
         KeyCode::Right | KeyCode::Char('l') => {
             pipeline_spatial_nav(app, NavAxis::Horizontal, false)
         }
@@ -1829,10 +1820,7 @@ fn running_stream_targets(app: &App) -> Vec<crate::app::StreamTarget> {
         };
     candidates
         .into_iter()
-        .filter(|t| {
-            app.stream_buffer(t)
-                .is_some_and(|b| !b.text().is_empty())
-        })
+        .filter(|t| app.stream_buffer(t).is_some_and(|b| !b.text().is_empty()))
         .collect()
 }
 
@@ -2775,7 +2763,13 @@ pub(super) fn sync_pipeline_concurrency_buf(app: &mut App) {
 }
 
 fn pipeline_edit_max_replicas(app: &App) -> u32 {
-    let selected = app.pipeline.pipeline_edit_agent_selection.iter().filter(|&&s| s).count().max(1) as u32;
+    let selected = app
+        .pipeline
+        .pipeline_edit_agent_selection
+        .iter()
+        .filter(|&&s| s)
+        .count()
+        .max(1) as u32;
     (32 / selected).max(1)
 }
 
