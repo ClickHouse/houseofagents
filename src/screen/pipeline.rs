@@ -367,12 +367,13 @@ fn draw_canvas(f: &mut Frame, app: &App, area: Rect) {
         };
 
         let base_title = if block.name.is_empty() {
-            block.agent.clone()
+            block.primary_agent().to_string()
         } else {
             block.name.clone()
         };
-        let title = if block.replicas > 1 {
-            format!(" {} \u{00d7}{} ", base_title, block.replicas)
+        let total_tasks = block.agents.len() as u32 * block.replicas;
+        let title = if total_tasks > 1 {
+            format!(" {} \u{00d7}{} ", base_title, total_tasks)
         } else {
             format!(" {} ", base_title)
         };
@@ -384,9 +385,14 @@ fn draw_canvas(f: &mut Frame, app: &App, area: Rect) {
         let inner = block_widget.inner(block_area);
         f.render_widget(block_widget, block_area);
 
-        // Line 1: Agent name
+        // Line 1: Agent name(s)
         if inner.height > 0 && inner.width > 0 {
-            let agent_display = truncate_chars(&block.agent, inner.width as usize);
+            let agent_text = if block.agents.len() > 1 {
+                format!("Multiple ({})", block.agents.len())
+            } else {
+                block.primary_agent().to_string()
+            };
+            let agent_display = truncate_chars(&agent_text, inner.width as usize);
             let agent_p = Paragraph::new(Span::styled(
                 agent_display,
                 Style::default().fg(Color::White),
@@ -1058,12 +1064,13 @@ pub(crate) fn render_dag_readonly(
 
         let (border_color, border_type) = block_style_fn(block.id);
         let base_title = if block.name.is_empty() {
-            block.agent.clone()
+            block.primary_agent().to_string()
         } else {
             block.name.clone()
         };
-        let title = if block.replicas > 1 {
-            format!(" {} \u{00d7}{} ", base_title, block.replicas)
+        let total_tasks = block.agents.len() as u32 * block.replicas;
+        let title = if total_tasks > 1 {
+            format!(" {} \u{00d7}{} ", base_title, total_tasks)
         } else {
             format!(" {} ", base_title)
         };
@@ -1076,7 +1083,12 @@ pub(crate) fn render_dag_readonly(
         f.render_widget(block_widget, block_area);
 
         if inner.height > 0 && inner.width > 0 {
-            let agent_display = truncate_chars(&block.agent, inner.width as usize);
+            let agent_text = if block.agents.len() > 1 {
+                format!("Multiple ({})", block.agents.len())
+            } else {
+                block.primary_agent().to_string()
+            };
+            let agent_display = truncate_chars(&agent_text, inner.width as usize);
             let agent_p = Paragraph::new(Span::styled(
                 agent_display,
                 Style::default().fg(Color::White),
@@ -1291,20 +1303,22 @@ fn draw_edit_popup(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
+    // Agent list height: 1 label + min(agent_count, 6) rows
+    let agent_list_h = 1 + (app.config.agents.len() as u16).min(6);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2), // Name          [0]
-            Constraint::Length(1), // spacer        [1]
-            Constraint::Length(2), // Provider      [2]
-            Constraint::Length(1), // spacer        [3]
-            Constraint::Min(6),    // Prompt        [4]
-            Constraint::Length(1), // spacer        [5]
-            Constraint::Length(2), // Session ID    [6]
-            Constraint::Length(1), // spacer        [7]
-            Constraint::Length(2), // Replicas      [8]
-            Constraint::Length(1), // spacer        [9]
-            Constraint::Length(1), // hint          [10]
+            Constraint::Length(2),             // Name          [0]
+            Constraint::Length(1),             // spacer        [1]
+            Constraint::Length(agent_list_h),  // Agents list   [2]
+            Constraint::Length(1),             // spacer        [3]
+            Constraint::Min(6),               // Prompt        [4]
+            Constraint::Length(1),             // spacer        [5]
+            Constraint::Length(2),             // Session ID    [6]
+            Constraint::Length(1),             // spacer        [7]
+            Constraint::Length(2),             // Replicas      [8]
+            Constraint::Length(1),             // spacer        [9]
+            Constraint::Length(1),             // hint          [10]
         ])
         .split(inner);
 
@@ -1323,38 +1337,47 @@ fn draw_edit_popup(f: &mut Frame, app: &App, area: Rect) {
     ]);
     f.render_widget(Paragraph::new(name_line), chunks[0]);
 
-    // Agent selector
+    // Agent multiselect list
     let agent_focus = app.pipeline.pipeline_edit_field == PipelineEditField::Agent;
-    let agent_name = app
-        .config
-        .agents
-        .get(app.pipeline.pipeline_edit_agent_idx)
-        .map(|a| a.name.as_str())
-        .unwrap_or("(none)");
     let avail_agents: std::collections::HashMap<&str, bool> = app
         .available_agents()
         .into_iter()
         .map(|(a, avail)| (a.name.as_str(), avail))
         .collect();
-    let is_avail = avail_agents.get(agent_name).copied().unwrap_or(false);
-    let agent_color = if is_avail { Color::Green } else { Color::Red };
-    let arrow_style = Style::default().fg(if agent_focus {
-        Color::White
-    } else {
-        Color::DarkGray
-    });
-    let agent_line = Line::from(vec![
-        Span::styled("Agent: ", Style::default().fg(Color::White)),
-        Span::styled("\u{25c4} ", arrow_style),
-        Span::styled(
-            agent_name,
-            Style::default()
-                .fg(agent_color)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" \u{25ba}", arrow_style),
-    ]);
-    let agent_p = Paragraph::new(agent_line);
+    let agent_lines: Vec<Line> = app
+        .config
+        .agents
+        .iter()
+        .enumerate()
+        .map(|(i, a)| {
+            let selected = app
+                .pipeline
+                .pipeline_edit_agent_selection
+                .get(i)
+                .copied()
+                .unwrap_or(false);
+            let is_avail = avail_agents.get(a.name.as_str()).copied().unwrap_or(false);
+            let checkbox = if selected { "[x] " } else { "[ ] " };
+            let agent_color = if is_avail { Color::Green } else { Color::Red };
+            let is_cursor = agent_focus && i == app.pipeline.pipeline_edit_agent_cursor;
+            let style = if is_cursor {
+                Style::default().fg(agent_color).add_modifier(Modifier::BOLD | Modifier::REVERSED)
+            } else {
+                Style::default().fg(agent_color)
+            };
+            Line::from(Span::styled(format!("{checkbox}{}", a.name), style))
+        })
+        .collect();
+    let agent_label = Line::from(Span::styled(
+        "Agents:",
+        Style::default().fg(if agent_focus { Color::Cyan } else { Color::White }),
+    ));
+    let mut all_agent_lines = vec![agent_label];
+    all_agent_lines.extend(agent_lines);
+    let agent_visible_rows = (chunks[2].height as usize).saturating_sub(1);
+    app.pipeline.pipeline_edit_agent_visible.set(agent_visible_rows);
+    let scroll_offset = app.pipeline.pipeline_edit_agent_scroll as u16;
+    let agent_p = Paragraph::new(all_agent_lines).scroll((scroll_offset, 0));
     f.render_widget(agent_p, chunks[2]);
 
     // Prompt textarea
@@ -1420,13 +1443,27 @@ fn draw_edit_popup(f: &mut Frame, app: &App, area: Rect) {
     } else {
         Style::default().fg(Color::DarkGray)
     };
-    let rep_line = Line::from(vec![
-        Span::styled("Replicas: ", Style::default().fg(Color::White)),
-        Span::styled("[", rep_style),
-        Span::raw(&app.pipeline.pipeline_edit_replicas_buf),
-        Span::styled("]", rep_style),
-        Span::styled(" (1-32)", Style::default().fg(Color::DarkGray)),
-    ]);
+    let selected_agents = app.pipeline.pipeline_edit_agent_selection.iter().filter(|&&s| s).count().max(1) as u32;
+    let too_many_agents = selected_agents > 32;
+    let max_replicas = (32 / selected_agents).max(1);
+    let rep_line = if too_many_agents {
+        Line::from(vec![
+            Span::styled("Replicas: ", Style::default().fg(Color::White)),
+            Span::styled("[", rep_style),
+            Span::raw(&app.pipeline.pipeline_edit_replicas_buf),
+            Span::styled("]", rep_style),
+            Span::styled(" too many agents (max 32)", Style::default().fg(Color::Red)),
+        ])
+    } else {
+        let rep_hint = format!(" (1-{})", max_replicas);
+        Line::from(vec![
+            Span::styled("Replicas: ", Style::default().fg(Color::White)),
+            Span::styled("[", rep_style),
+            Span::raw(&app.pipeline.pipeline_edit_replicas_buf),
+            Span::styled("]", rep_style),
+            Span::styled(rep_hint, Style::default().fg(Color::DarkGray)),
+        ])
+    };
     f.render_widget(Paragraph::new(rep_line), chunks[8]);
 
     // Hint
@@ -1757,7 +1794,7 @@ mod routing_tests {
         PipelineBlock {
             id,
             name: String::new(),
-            agent: "test".into(),
+            agents: vec!["test".into()],
             prompt: String::new(),
             session_id: None,
             position: (col, row),

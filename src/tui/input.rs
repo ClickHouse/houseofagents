@@ -807,7 +807,7 @@ pub(super) fn handle_pipeline_builder_key(app: &mut App, key: KeyEvent) {
                 .push(pipeline_mod::PipelineBlock {
                     id,
                     name: format!("Block#{id}"),
-                    agent: default_agent,
+                    agents: vec![default_agent],
                     prompt: String::new(),
                     session_id: None,
                     position: pos,
@@ -865,12 +865,14 @@ pub(super) fn handle_pipeline_builder_key(app: &mut App, key: KeyEvent) {
                     app.pipeline.pipeline_edit_field = PipelineEditField::Name;
                     app.pipeline.pipeline_edit_name_buf = block.name.clone();
                     app.pipeline.pipeline_edit_name_cursor = block.name.len();
-                    app.pipeline.pipeline_edit_agent_idx = app
+                    app.pipeline.pipeline_edit_agent_selection = app
                         .config
                         .agents
                         .iter()
-                        .position(|a| a.name == block.agent)
-                        .unwrap_or(0);
+                        .map(|a| block.agents.contains(&a.name))
+                        .collect();
+                    app.pipeline.pipeline_edit_agent_cursor = 0;
+                    app.pipeline.pipeline_edit_agent_scroll = 0;
                     app.pipeline.pipeline_edit_prompt_buf = block.prompt.clone();
                     app.pipeline.pipeline_edit_prompt_cursor = block.prompt.len();
                     app.pipeline.pipeline_edit_session_buf =
@@ -1220,12 +1222,22 @@ pub(super) fn handle_pipeline_edit_key(app: &mut App, key: KeyEvent) {
                             .find(|b| b.id == sel)
                         {
                             block.name = app.pipeline.pipeline_edit_name_buf.clone();
-                            block.agent = app
+                            block.agents = app
                                 .config
                                 .agents
-                                .get(app.pipeline.pipeline_edit_agent_idx)
-                                .map(|a| a.name.clone())
-                                .unwrap_or_else(|| "Claude".to_string());
+                                .iter()
+                                .zip(&app.pipeline.pipeline_edit_agent_selection)
+                                .filter(|(_, &selected)| selected)
+                                .map(|(a, _)| a.name.clone())
+                                .collect();
+                            if block.agents.is_empty() {
+                                block.agents = vec![app
+                                    .config
+                                    .agents
+                                    .first()
+                                    .map(|a| a.name.clone())
+                                    .unwrap_or_else(|| "Claude".into())];
+                            }
                             block.prompt = app.pipeline.pipeline_edit_prompt_buf.clone();
                             block.session_id = if app.pipeline.pipeline_edit_session_buf.is_empty()
                             {
@@ -1233,12 +1245,14 @@ pub(super) fn handle_pipeline_edit_key(app: &mut App, key: KeyEvent) {
                             } else {
                                 Some(app.pipeline.pipeline_edit_session_buf.clone())
                             };
+                            let agent_count = block.agents.len() as u32;
+                            let max_replicas = (32 / agent_count.max(1)).max(1);
                             block.replicas = app
                                 .pipeline
                                 .pipeline_edit_replicas_buf
                                 .parse::<u32>()
                                 .unwrap_or(1)
-                                .clamp(1, 32);
+                                .clamp(1, max_replicas);
                         }
                     }
                     app.pipeline.pipeline_def.normalize_session_configs();
@@ -1269,15 +1283,48 @@ pub(super) fn handle_pipeline_edit_key(app: &mut App, key: KeyEvent) {
                 _ => {}
             },
             PipelineEditField::Agent => match key.code {
-                KeyCode::Left | KeyCode::Char('k') => {
-                    let len = app.config.agents.len().max(1);
-                    app.pipeline.pipeline_edit_agent_idx =
-                        (app.pipeline.pipeline_edit_agent_idx + len - 1) % len;
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if !app.config.agents.is_empty() {
+                        app.pipeline.pipeline_edit_agent_cursor = app
+                            .pipeline
+                            .pipeline_edit_agent_cursor
+                            .saturating_sub(1);
+                        if app.pipeline.pipeline_edit_agent_cursor < app.pipeline.pipeline_edit_agent_scroll {
+                            app.pipeline.pipeline_edit_agent_scroll = app.pipeline.pipeline_edit_agent_cursor;
+                        }
+                    }
                 }
-                KeyCode::Right | KeyCode::Char('j') => {
-                    let len = app.config.agents.len().max(1);
-                    app.pipeline.pipeline_edit_agent_idx =
-                        (app.pipeline.pipeline_edit_agent_idx + 1) % len;
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if !app.config.agents.is_empty() {
+                        let max = app.config.agents.len().saturating_sub(1);
+                        if app.pipeline.pipeline_edit_agent_cursor < max {
+                            app.pipeline.pipeline_edit_agent_cursor += 1;
+                        }
+                        let visible = app.pipeline.pipeline_edit_agent_visible.get().max(1);
+                        if app.pipeline.pipeline_edit_agent_cursor >= app.pipeline.pipeline_edit_agent_scroll + visible {
+                            app.pipeline.pipeline_edit_agent_scroll = app.pipeline.pipeline_edit_agent_cursor + 1 - visible;
+                        }
+                    }
+                }
+                KeyCode::Char(' ') => {
+                    let idx = app.pipeline.pipeline_edit_agent_cursor;
+                    if idx < app.pipeline.pipeline_edit_agent_selection.len() {
+                        let currently_selected = app.pipeline.pipeline_edit_agent_selection[idx];
+                        // Prevent deselecting the last agent
+                        let selected_count = app
+                            .pipeline
+                            .pipeline_edit_agent_selection
+                            .iter()
+                            .filter(|&&s| s)
+                            .count();
+                        if !currently_selected || selected_count > 1 {
+                            app.pipeline.pipeline_edit_agent_selection[idx] = !currently_selected;
+                            // Re-clamp replicas to new agents × replicas cap
+                            if !app.pipeline.pipeline_edit_replicas_buf.is_empty() {
+                                sync_pipeline_edit_replicas_buf(app);
+                            }
+                        }
+                    }
                 }
                 _ => {}
             },
@@ -1315,12 +1362,13 @@ pub(super) fn handle_pipeline_edit_key(app: &mut App, key: KeyEvent) {
                     }
                 }
                 KeyCode::Up | KeyCode::Char('+') => {
+                    let max = pipeline_edit_max_replicas(app);
                     let cur: u32 = app
                         .pipeline
                         .pipeline_edit_replicas_buf
                         .parse()
                         .unwrap_or(1);
-                    let next = (cur + 1).min(32);
+                    let next = (cur + 1).min(max);
                     app.pipeline.pipeline_edit_replicas_buf = next.to_string();
                 }
                 KeyCode::Down | KeyCode::Char('-') => {
@@ -2726,13 +2774,19 @@ pub(super) fn sync_pipeline_concurrency_buf(app: &mut App) {
     app.pipeline.pipeline_concurrency_buf = app.pipeline.pipeline_concurrency.to_string();
 }
 
+fn pipeline_edit_max_replicas(app: &App) -> u32 {
+    let selected = app.pipeline.pipeline_edit_agent_selection.iter().filter(|&&s| s).count().max(1) as u32;
+    (32 / selected).max(1)
+}
+
 fn sync_pipeline_edit_replicas_buf(app: &mut App) {
+    let max = pipeline_edit_max_replicas(app);
     let v: u32 = app
         .pipeline
         .pipeline_edit_replicas_buf
         .parse()
         .unwrap_or(1)
-        .clamp(1, 32);
+        .clamp(1, max);
     app.pipeline.pipeline_edit_replicas_buf = v.to_string();
 }
 

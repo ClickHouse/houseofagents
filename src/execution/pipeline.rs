@@ -68,7 +68,6 @@ pub(crate) fn build_runtime_table(def: &PipelineDefinition) -> RuntimeReplicaTab
 
     for block in &def.blocks {
         let base_session_key = block.effective_session_key();
-        let base_keep = def.keep_session_across_iterations(&block.agent, &base_session_key);
         let block_name_key = if block.name.trim().is_empty() {
             format!("block{}", block.id)
         } else {
@@ -78,41 +77,60 @@ pub(crate) fn build_runtime_table(def: &PipelineDefinition) -> RuntimeReplicaTab
                 block.id
             )
         };
-        let agent_file_key = OutputManager::sanitize_session_name(&block.agent);
+
+        let num_agents = block.agents.len();
+        let num_replicas = block.replicas;
+        let multi_agent = num_agents > 1;
+        let multi_replica = num_replicas > 1;
+        let blabel = block_label(block);
 
         let mut runtime_ids = Vec::new();
-        for ri in 0..block.replicas {
-            let runtime_id = next_id;
-            next_id += 1;
+        for agent in &block.agents {
+            let agent_file_key = OutputManager::sanitize_session_name(agent);
+            let base_keep = def.keep_session_across_iterations(agent, &base_session_key);
 
-            let (display_label, session_key, filename_stem) = if block.replicas == 1 {
-                (
-                    block_label(block),
-                    base_session_key.clone(),
-                    format!("{}_{}", block_name_key, agent_file_key),
-                )
-            } else {
-                let ord = ri + 1;
-                (
-                    format!("{} (r{})", block_label(block), ord),
-                    format!("{}_r{}", base_session_key, ord),
-                    format!("{}_{}_r{}", block_name_key, agent_file_key, ord),
-                )
-            };
+            for ri in 0..num_replicas {
+                let runtime_id = next_id;
+                next_id += 1;
 
-            keep_policy.insert((block.agent.clone(), session_key.clone()), base_keep);
+                let display_label = match (multi_agent, multi_replica) {
+                    (false, false) => blabel.clone(),
+                    (false, true) => format!("{} (r{})", blabel, ri + 1),
+                    (true, false) => format!("{} ({})", blabel, agent),
+                    (true, true) => format!("{} ({} r{})", blabel, agent, ri + 1),
+                };
 
-            entries.push(RuntimeReplicaInfo {
-                runtime_id,
-                source_block_id: block.id,
-                replica_index: ri,
-                agent: block.agent.clone(),
-                display_label,
-                session_key,
-                filename_stem,
-            });
+                let session_key = if multi_replica {
+                    format!("{}_r{}", base_session_key, ri + 1)
+                } else {
+                    base_session_key.clone()
+                };
 
-            runtime_ids.push(runtime_id);
+                let filename_stem = match (multi_agent, multi_replica) {
+                    (false, false) => format!("{}_{}", block_name_key, agent_file_key),
+                    (false, true) => {
+                        format!("{}_{}_r{}", block_name_key, agent_file_key, ri + 1)
+                    }
+                    (true, false) => format!("{}_{}", block_name_key, agent_file_key),
+                    (true, true) => {
+                        format!("{}_{}_r{}", block_name_key, agent_file_key, ri + 1)
+                    }
+                };
+
+                keep_policy.insert((agent.clone(), session_key.clone()), base_keep);
+
+                entries.push(RuntimeReplicaInfo {
+                    runtime_id,
+                    source_block_id: block.id,
+                    replica_index: ri,
+                    agent: agent.clone(),
+                    display_label,
+                    session_key,
+                    filename_stem,
+                });
+
+                runtime_ids.push(runtime_id);
+            }
         }
         logical_to_runtime.insert(block.id, runtime_ids);
     }
@@ -136,12 +154,12 @@ fn loop_replica_filename(info: &RuntimeReplicaInfo, iteration: u32, loop_pass: u
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct PipelineBlock {
     pub id: BlockId,
     #[serde(default)]
     pub name: String,
-    pub agent: String,
+    pub agents: Vec<String>,
     #[serde(default)]
     pub prompt: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -149,6 +167,69 @@ pub struct PipelineBlock {
     pub position: (u16, u16), // grid coordinates (col, row)
     #[serde(default = "default_one", skip_serializing_if = "is_one")]
     pub replicas: u32,
+}
+
+/// Custom deserialize for backward compat: accepts both `agent` (legacy string)
+/// and `agents` (new vec). On serialization, always writes `agents`.
+impl<'de> Deserialize<'de> for PipelineBlock {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            id: BlockId,
+            #[serde(default)]
+            name: String,
+            #[serde(default)]
+            agent: Option<String>,
+            #[serde(default)]
+            agents: Option<Vec<String>>,
+            #[serde(default)]
+            prompt: String,
+            #[serde(default)]
+            session_id: Option<String>,
+            position: (u16, u16),
+            #[serde(default = "default_one")]
+            replicas: u32,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        let agents = match (raw.agents, raw.agent) {
+            (Some(v), _) if !v.is_empty() => {
+                if let Some(blank) = v.iter().find(|a| a.trim().is_empty()) {
+                    return Err(serde::de::Error::custom(format!(
+                        "block has a blank agent name '{}' in 'agents' list",
+                        blank
+                    )));
+                }
+                v
+            }
+            (Some(_), _) => {
+                // agents field explicitly present but empty — reject
+                return Err(serde::de::Error::custom(
+                    "block has an empty 'agents' list; at least one agent is required",
+                ));
+            }
+            (_, Some(a)) if !a.trim().is_empty() => vec![a],
+            (_, Some(_)) => {
+                // agent field explicitly present but empty/whitespace — reject
+                return Err(serde::de::Error::custom(
+                    "block has a blank 'agent' field; a non-empty agent name is required",
+                ));
+            }
+            // Neither field present (legacy/minimal TOML) — default to Claude
+            (None, None) => vec!["Claude".to_string()],
+        };
+        Ok(PipelineBlock {
+            id: raw.id,
+            name: raw.name,
+            agents,
+            prompt: raw.prompt,
+            session_id: raw.session_id,
+            position: raw.position,
+            replicas: raw.replicas,
+        })
+    }
 }
 
 fn default_one() -> u32 {
@@ -160,6 +241,11 @@ fn is_one(v: &u32) -> bool {
 }
 
 impl PipelineBlock {
+    /// Primary agent (first in the list). Used for backward-compat display contexts.
+    pub fn primary_agent(&self) -> &str {
+        self.agents.first().map(|s| s.as_str()).unwrap_or("Claude")
+    }
+
     pub fn effective_session_key(&self) -> String {
         self.session_id
             .clone()
@@ -241,19 +327,21 @@ impl PipelineDefinition {
     pub fn effective_sessions(&self) -> Vec<EffectiveSession> {
         let mut map: HashMap<(String, String), (String, Vec<BlockId>, u32)> = HashMap::new();
         for block in &self.blocks {
-            let key = (block.agent.clone(), block.effective_session_key());
-            let entry = map.entry(key).or_insert_with(|| {
-                let label = if block.session_id.is_some() {
-                    block.session_id.clone().unwrap()
-                } else if !block.name.is_empty() {
-                    block.name.clone()
-                } else {
-                    format!("Block {}", block.id)
-                };
-                (label, Vec::new(), 0)
-            });
-            entry.1.push(block.id);
-            entry.2 += block.replicas;
+            for agent in &block.agents {
+                let key = (agent.clone(), block.effective_session_key());
+                let entry = map.entry(key).or_insert_with(|| {
+                    let label = if block.session_id.is_some() {
+                        block.session_id.clone().unwrap()
+                    } else if !block.name.is_empty() {
+                        block.name.clone()
+                    } else {
+                        format!("Block {}", block.id)
+                    };
+                    (label, Vec::new(), 0)
+                });
+                entry.1.push(block.id);
+                entry.2 += block.replicas;
+            }
         }
         let mut sessions: Vec<EffectiveSession> = map
             .into_iter()
@@ -332,7 +420,10 @@ impl PipelineDefinition {
         let valid: HashSet<(String, String)> = self
             .blocks
             .iter()
-            .map(|b| (b.agent.clone(), b.effective_session_key()))
+            .flat_map(|b| {
+                let sk = b.effective_session_key();
+                b.agents.iter().map(move |a| (a.clone(), sk.clone()))
+            })
             .collect();
 
         // Drop stale rows and rows with keep=true (default)
@@ -556,7 +647,7 @@ impl RegularGraph {
         let mut reverse: HashMap<BlockId, Vec<BlockId>> = HashMap::new();
         let mut replicas: HashMap<BlockId, u32> = HashMap::new();
         for block in &def.blocks {
-            replicas.insert(block.id, block.replicas);
+            replicas.insert(block.id, block.agents.len() as u32 * block.replicas);
         }
         for conn in &def.connections {
             forward.entry(conn.from).or_default().push(conn.to);
@@ -805,6 +896,13 @@ pub(crate) fn validate_replicas(def: &PipelineDefinition) -> Result<(), AppError
                 block.name
             )));
         }
+        let total_tasks = block.agents.len() as u32 * block.replicas;
+        if total_tasks > 32 {
+            return Err(AppError::Config(format!(
+                "Block '{}' has agents × replicas = {} (max 32 per block)",
+                block.name, total_tasks
+            )));
+        }
     }
     // Session sharing restriction: blocks with replicas > 1 cannot share session_id
     for block in &def.blocks {
@@ -976,6 +1074,25 @@ pub(crate) fn validate_pipeline(def: &PipelineDefinition) -> Result<(), AppError
                 return Err(AppError::Config(format!(
                     "Duplicate session config for ({}, {})",
                     cfg.agent, cfg.session_key
+                )));
+            }
+        }
+    }
+
+    // Check for empty or duplicate agents within a block
+    for block in &def.blocks {
+        if block.agents.is_empty() {
+            return Err(AppError::Config(format!(
+                "Block {} has no agents",
+                block.id
+            )));
+        }
+        let mut seen_agents = HashSet::new();
+        for agent in &block.agents {
+            if !seen_agents.insert(agent.as_str()) {
+                return Err(AppError::Config(format!(
+                    "Duplicate agent '{}' in block {}",
+                    agent, block.id
                 )));
             }
         }
@@ -1225,7 +1342,7 @@ where
                             continue;
                         }
                     };
-                    let replica_count = block.replicas as usize;
+                    let replica_count = block.agents.len() * block.replicas as usize;
 
                     // Determine loop pass for this block
                     let current_loop_pass = if let Some(&key) = block_to_loop.get(&block_id) {
@@ -1315,85 +1432,14 @@ where
                         continue;
                     }
 
-                    let use_cli = agent_configs
-                        .get(&block.agent)
-                        .map(|(_, _, cli)| *cli)
-                        .unwrap_or(false);
-
-                    // Build message based on block role and pass
-                    let message = if current_loop_pass > 0 {
-                        if let Some(&(loop_from, loop_to)) = block_to_loop.get(&block_id) {
-                            if block_id == loop_to {
-                                // `to` (restart target) on re-run: get feedback from `from`
-                                let ls = loop_state.get(&(loop_from, loop_to)).unwrap();
-                                let lc = def.loop_connections.iter()
-                                    .find(|lc| lc.from == loop_from && lc.to == loop_to)
-                                    .unwrap();
-                                build_loop_rerun_message_v2(
-                                    block,
-                                    use_cli,
-                                    def,
-                                    &ls.sub_dag.blocks,
-                                    loop_from,
-                                    current_loop_pass,
-                                    lc.count + 1,
-                                    &ls.prompt,
-                                    &replica_outputs,
-                                    &rt,
-                                    output,
-                                    iteration,
-                                    &previous_terminal_outputs,
-                                    prompt_context,
-                                    &block_to_loop,
-                                    &block_loop_pass,
-                                )
-                            } else {
-                                // Intermediate or `from` block on re-run: normal message
-                                // with loop-aware upstream file resolution
-                                build_pipeline_block_message(
-                                    block,
-                                    use_cli,
-                                    &PipelineMessageContext {
-                                        def,
-                                        iteration,
-                                        block_outputs: &replica_outputs,
-                                        previous_terminal_outputs: &previous_terminal_outputs,
-                                        output,
-                                        prompt_context,
-                                        runtime_table: &rt,
-                                        block_to_loop: &block_to_loop,
-                                        block_loop_pass: &block_loop_pass,
-                                    },
-                                )
-                            }
-                        } else {
-                            unreachable!("loop_pass > 0 but block not in a loop")
-                        }
-                    } else {
-                        build_pipeline_block_message(
-                            block,
-                            use_cli,
-                            &PipelineMessageContext {
-                                def,
-                                iteration,
-                                block_outputs: &replica_outputs,
-                                previous_terminal_outputs: &previous_terminal_outputs,
-                                output,
-                                prompt_context,
-                                runtime_table: &rt,
-                                block_to_loop: &block_to_loop,
-                                block_loop_pass: &block_loop_pass,
-                            },
-                        )
-                    };
-
-                    // Check provider availability (all replicas share the same agent)
+                    // Check provider availability for all agents in this block
                     let rids = match rt.logical_to_runtime.get(&block_id) {
                         Some(rids) => rids,
                         None => { completed += replica_count; continue; }
                     };
 
-                    if !agent_configs.contains_key(&block.agent) {
+                    let any_missing_agent = block.agents.iter().any(|a| !agent_configs.contains_key(a));
+                    if any_missing_agent {
                         for &rid in rids {
                             let info = &rt.entries[rid as usize];
                             let _ = progress_tx.send(ProgressEvent::BlockError {
@@ -1458,9 +1504,61 @@ where
                         continue;
                     }
 
-                    // Spawn one task per replica
+                    // Spawn one task per replica (agents × replicas)
                     for &rid in rids {
                         let info = &rt.entries[rid as usize];
+
+                        // Per-replica use_cli and message building (agents may differ)
+                        let use_cli = agent_configs
+                            .get(&info.agent)
+                            .map(|(_, _, cli)| *cli)
+                            .unwrap_or(false);
+
+                        let message = if current_loop_pass > 0 {
+                            if let Some(&(loop_from, loop_to)) = block_to_loop.get(&block_id) {
+                                if block_id == loop_to {
+                                    let ls = loop_state.get(&(loop_from, loop_to)).unwrap();
+                                    let lc = def.loop_connections.iter()
+                                        .find(|lc| lc.from == loop_from && lc.to == loop_to)
+                                        .unwrap();
+                                    build_loop_rerun_message_v2(
+                                        block, use_cli, def,
+                                        &ls.sub_dag.blocks, loop_from,
+                                        current_loop_pass, lc.count + 1,
+                                        &ls.prompt, &replica_outputs, &rt, output,
+                                        iteration, &previous_terminal_outputs,
+                                        prompt_context, &block_to_loop, &block_loop_pass,
+                                    )
+                                } else {
+                                    build_pipeline_block_message(
+                                        block, use_cli,
+                                        &PipelineMessageContext {
+                                            def, iteration,
+                                            block_outputs: &replica_outputs,
+                                            previous_terminal_outputs: &previous_terminal_outputs,
+                                            output, prompt_context, runtime_table: &rt,
+                                            block_to_loop: &block_to_loop,
+                                            block_loop_pass: &block_loop_pass,
+                                        },
+                                    )
+                                }
+                            } else {
+                                unreachable!("loop_pass > 0 but block not in a loop")
+                            }
+                        } else {
+                            build_pipeline_block_message(
+                                block, use_cli,
+                                &PipelineMessageContext {
+                                    def, iteration,
+                                    block_outputs: &replica_outputs,
+                                    previous_terminal_outputs: &previous_terminal_outputs,
+                                    output, prompt_context, runtime_table: &rt,
+                                    block_to_loop: &block_to_loop,
+                                    block_loop_pass: &block_loop_pass,
+                                },
+                            )
+                        };
+
                         let pool_key = (info.agent.clone(), info.session_key.clone());
                         let provider_arc = match provider_pool.get(&pool_key) {
                             Some(p) => p.clone(),
@@ -1513,7 +1611,7 @@ where
                         let task_filename = loop_replica_filename(info, iteration, current_loop_pass);
                         let task_agent_name = info.agent.clone();
                         let task_label = info.display_label.clone();
-                        let message_clone = message.clone();
+                        let message_clone = message;
                         let sem_clone = concurrency_sem.clone();
                         let task_loop_pass = current_loop_pass;
                         let task_handle = tasks.spawn(async move {
@@ -1852,13 +1950,14 @@ where
         previous_terminal_outputs.clear();
         for &tid in &terminals {
             if let Some(rids) = rt.logical_to_runtime.get(&tid) {
-                let upstream_replicas = def.blocks.iter().find(|b| b.id == tid).map(|b| b.replicas).unwrap_or(1);
+                let needs_label = def.blocks.iter().find(|b| b.id == tid)
+                    .map(|b| b.replicas > 1 || b.agents.len() > 1).unwrap_or(false);
                 for &rid in rids {
                     if let Some(content) = replica_outputs.get(&rid) {
                         if !previous_terminal_outputs.is_empty() {
                             previous_terminal_outputs.push_str("\n\n---\n\n");
                         }
-                        if upstream_replicas > 1 {
+                        if needs_label {
                             let info = &rt.entries[rid as usize];
                             previous_terminal_outputs.push_str(&format!(
                                 "--- Output from {} ---\n{}", info.display_label, content
@@ -1943,7 +2042,10 @@ fn build_pipeline_block_message(
                             if !upstream_content.is_empty() {
                                 upstream_content.push_str("\n\n---\n\n");
                             }
-                            if upstream_block.map(|b| b.replicas).unwrap_or(1) > 1 {
+                            let needs_label = upstream_block
+                                .map(|b| b.replicas > 1 || b.agents.len() > 1)
+                                .unwrap_or(false);
+                            if needs_label {
                                 let info = &context.runtime_table.entries[rid as usize];
                                 upstream_content.push_str(&format!(
                                     "--- Output from {} ---\n{}", info.display_label, content
@@ -2062,7 +2164,10 @@ fn build_loop_rerun_message_v2(
                                 upstream_content.push_str("\n\n---\n\n");
                             }
                             let upstream_block = def.blocks.iter().find(|b| b.id == uid);
-                            if upstream_block.map(|b| b.replicas).unwrap_or(1) > 1 {
+                            let needs_label = upstream_block
+                                .map(|b| b.replicas > 1 || b.agents.len() > 1)
+                                .unwrap_or(false);
+                            if needs_label {
                                 let info = &runtime_table.entries[rid as usize];
                                 upstream_content.push_str(&format!(
                                     "--- Output from {} ---\n{}", info.display_label, content
@@ -2160,7 +2265,7 @@ mod tests {
         PipelineBlock {
             id,
             name: format!("Block#{id}"),
-            agent: "Claude".into(),
+            agents: vec!["Claude".into()],
             prompt: format!("block {id}"),
             session_id: None,
             position: (col, row),
@@ -2527,7 +2632,7 @@ to = 1
             blocks: vec![PipelineBlock {
                 id: 1,
                 name: "Root".into(),
-                agent: "Claude".into(),
+                agents: vec!["Claude".into()],
                 prompt: "block prompt".into(),
                 session_id: None,
                 position: (0, 0),
@@ -2572,7 +2677,7 @@ to = 1
             blocks: vec![PipelineBlock {
                 id: 1,
                 name: "Root".into(),
-                agent: "Claude".into(),
+                agents: vec!["Claude".into()],
                 prompt: String::new(),
                 session_id: None,
                 position: (0, 0),
@@ -2650,7 +2755,7 @@ to = 1
             blocks: vec![PipelineBlock {
                 id: 1,
                 name: "Root".into(),
-                agent: "Claude".into(),
+                agents: vec!["Claude".into()],
                 prompt: String::new(),
                 session_id: None,
                 position: (0, 0),
@@ -2823,7 +2928,7 @@ to = 1
         let b = PipelineBlock {
             id: 1,
             name: "B".into(),
-            agent: "Claude".into(),
+            agents: vec!["Claude".into()],
             prompt: String::new(),
             session_id: Some("shared".into()),
             position: (0, 0),
@@ -2847,7 +2952,7 @@ to = 1
                 PipelineBlock {
                     id: 1,
                     name: "A".into(),
-                    agent: "Claude".into(),
+                    agents: vec!["Claude".into()],
                     prompt: String::new(),
                     session_id: Some("shared".into()),
                     position: (0, 0),
@@ -2856,7 +2961,7 @@ to = 1
                 PipelineBlock {
                     id: 2,
                     name: "B".into(),
-                    agent: "Claude".into(),
+                    agents: vec!["Claude".into()],
                     prompt: String::new(),
                     session_id: Some("shared".into()),
                     position: (1, 0),
@@ -2880,7 +2985,7 @@ to = 1
                 PipelineBlock {
                     id: 1,
                     name: "A".into(),
-                    agent: "Claude".into(),
+                    agents: vec!["Claude".into()],
                     prompt: String::new(),
                     session_id: Some("shared".into()),
                     position: (0, 0),
@@ -2889,7 +2994,7 @@ to = 1
                 PipelineBlock {
                     id: 2,
                     name: "B".into(),
-                    agent: "GPT".into(),
+                    agents: vec!["GPT".into()],
                     prompt: String::new(),
                     session_id: Some("shared".into()),
                     position: (1, 0),
@@ -2920,7 +3025,7 @@ to = 1
                 PipelineBlock {
                     id: 1,
                     name: "Z".into(),
-                    agent: "GPT".into(),
+                    agents: vec!["GPT".into()],
                     prompt: String::new(),
                     session_id: None,
                     position: (0, 0),
@@ -2929,7 +3034,7 @@ to = 1
                 PipelineBlock {
                     id: 2,
                     name: "A".into(),
-                    agent: "Claude".into(),
+                    agents: vec!["Claude".into()],
                     prompt: String::new(),
                     session_id: None,
                     position: (1, 0),
@@ -2951,7 +3056,7 @@ to = 1
                 PipelineBlock {
                     id: 1,
                     name: "Worker".into(),
-                    agent: "Claude".into(),
+                    agents: vec!["Claude".into()],
                     prompt: String::new(),
                     session_id: None,
                     position: (0, 0),
@@ -2960,7 +3065,7 @@ to = 1
                 PipelineBlock {
                     id: 2,
                     name: "Worker".into(),
-                    agent: "Claude".into(),
+                    agents: vec!["Claude".into()],
                     prompt: String::new(),
                     session_id: None,
                     position: (1, 0),
@@ -3333,7 +3438,7 @@ keep_across_iterations = false
                 PipelineBlock {
                     id: 1,
                     name: "A".into(),
-                    agent: "Claude".into(),
+                    agents: vec!["Claude".into()],
                     prompt: String::new(),
                     session_id: Some("shared".into()),
                     position: (0, 0),
@@ -3342,7 +3447,7 @@ keep_across_iterations = false
                 PipelineBlock {
                     id: 2,
                     name: "B".into(),
-                    agent: "Claude".into(),
+                    agents: vec!["Claude".into()],
                     prompt: String::new(),
                     session_id: Some("shared".into()),
                     position: (1, 0),
@@ -4485,5 +4590,243 @@ keep_across_iterations = false
         let warnings = prune_invalid_loops(&mut def);
         assert_eq!(warnings.len(), 1, "loop with broken internal path should be pruned");
         assert!(def.loop_connections.is_empty(), "loop 3→1 should be removed");
+    }
+
+    // -- multi-agent runtime table tests --
+
+    #[test]
+    fn runtime_table_single_agent_single_replica() {
+        let def = def_with(vec![block(1, 0, 0)], vec![]);
+        let rt = build_runtime_table(&def);
+        assert_eq!(rt.entries.len(), 1);
+        assert_eq!(rt.entries[0].agent, "Claude");
+        assert_eq!(rt.entries[0].display_label, "Block#1");
+    }
+
+    #[test]
+    fn runtime_table_two_agents_single_replica() {
+        let mut def = def_with(vec![block(1, 0, 0)], vec![]);
+        def.blocks[0].agents = vec!["Claude".into(), "GPT".into()];
+        let rt = build_runtime_table(&def);
+        assert_eq!(rt.entries.len(), 2);
+        assert_eq!(rt.entries[0].agent, "Claude");
+        assert!(rt.entries[0].display_label.contains("Claude"));
+        assert_eq!(rt.entries[1].agent, "GPT");
+        assert!(rt.entries[1].display_label.contains("GPT"));
+    }
+
+    #[test]
+    fn runtime_table_single_agent_three_replicas() {
+        let mut def = def_with(vec![block(1, 0, 0)], vec![]);
+        def.blocks[0].replicas = 3;
+        let rt = build_runtime_table(&def);
+        assert_eq!(rt.entries.len(), 3);
+        for (i, e) in rt.entries.iter().enumerate() {
+            assert_eq!(e.agent, "Claude");
+            assert!(e.display_label.contains(&format!("r{}", i + 1)));
+        }
+    }
+
+    #[test]
+    fn runtime_table_two_agents_three_replicas() {
+        let mut def = def_with(vec![block(1, 0, 0)], vec![]);
+        def.blocks[0].agents = vec!["Claude".into(), "GPT".into()];
+        def.blocks[0].replicas = 3;
+        let rt = build_runtime_table(&def);
+        assert_eq!(rt.entries.len(), 6); // 2 agents × 3 replicas
+        // First 3 entries: Claude r1, r2, r3
+        assert_eq!(rt.entries[0].agent, "Claude");
+        assert!(rt.entries[0].display_label.contains("Claude") && rt.entries[0].display_label.contains("r1"));
+        assert_eq!(rt.entries[2].agent, "Claude");
+        assert!(rt.entries[2].display_label.contains("r3"));
+        // Next 3 entries: GPT r1, r2, r3
+        assert_eq!(rt.entries[3].agent, "GPT");
+        assert!(rt.entries[3].display_label.contains("GPT") && rt.entries[3].display_label.contains("r1"));
+        assert_eq!(rt.entries[5].agent, "GPT");
+        assert!(rt.entries[5].display_label.contains("r3"));
+        // Session keys: 3 unique (per-replica), shared across agents (provider pool
+        // disambiguates by (agent, session_key) pair)
+        let keys: HashSet<String> = rt.entries.iter().map(|e| e.session_key.clone()).collect();
+        assert_eq!(keys.len(), 3);
+        // But (agent, session_key) pairs are unique
+        let agent_keys: HashSet<(String, String)> = rt.entries.iter()
+            .map(|e| (e.agent.clone(), e.session_key.clone())).collect();
+        assert_eq!(agent_keys.len(), 6);
+        // Unique filename stems
+        let stems: HashSet<String> = rt.entries.iter().map(|e| e.filename_stem.clone()).collect();
+        assert_eq!(stems.len(), 6);
+    }
+
+    #[test]
+    fn runtime_table_multi_agent_logical_mapping() {
+        let mut def = def_with(vec![block(1, 0, 0)], vec![]);
+        def.blocks[0].agents = vec!["A".into(), "B".into()];
+        def.blocks[0].replicas = 2;
+        let rt = build_runtime_table(&def);
+        let rids = &rt.logical_to_runtime[&1];
+        assert_eq!(rids.len(), 4); // 2 agents × 2 replicas
+    }
+
+    // -- serde backward compat --
+
+    #[test]
+    fn serde_legacy_agent_field_deserialized_as_agents() {
+        let toml_str = r#"
+            initial_prompt = "test"
+            [[blocks]]
+            id = 1
+            agent = "OldAgent"
+            position = [0, 0]
+        "#;
+        let def: PipelineDefinition = toml::from_str(toml_str).expect("should parse legacy agent");
+        assert_eq!(def.blocks[0].agents, vec!["OldAgent".to_string()]);
+    }
+
+    #[test]
+    fn serde_new_agents_field_deserialized() {
+        let toml_str = r#"
+            initial_prompt = "test"
+            [[blocks]]
+            id = 1
+            agents = ["Claude", "GPT"]
+            position = [0, 0]
+        "#;
+        let def: PipelineDefinition = toml::from_str(toml_str).expect("should parse agents list");
+        assert_eq!(def.blocks[0].agents, vec!["Claude".to_string(), "GPT".to_string()]);
+    }
+
+    #[test]
+    fn serde_agents_takes_precedence_over_agent() {
+        let toml_str = r#"
+            initial_prompt = "test"
+            [[blocks]]
+            id = 1
+            agent = "Old"
+            agents = ["New1", "New2"]
+            position = [0, 0]
+        "#;
+        let def: PipelineDefinition = toml::from_str(toml_str).expect("should parse");
+        assert_eq!(def.blocks[0].agents, vec!["New1".to_string(), "New2".to_string()]);
+    }
+
+    #[test]
+    fn serde_omitted_agents_defaults_to_claude() {
+        let toml_str = r#"
+            initial_prompt = "test"
+            [[blocks]]
+            id = 1
+            position = [0, 0]
+        "#;
+        let def: PipelineDefinition = toml::from_str(toml_str).expect("should default to Claude");
+        assert_eq!(def.blocks[0].agents, vec!["Claude".to_string()]);
+    }
+
+    #[test]
+    fn serde_explicit_empty_agents_is_rejected() {
+        let toml_str = r#"
+            initial_prompt = "test"
+            [[blocks]]
+            id = 1
+            agents = []
+            position = [0, 0]
+        "#;
+        let result: Result<PipelineDefinition, _> = toml::from_str(toml_str);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn serde_explicit_empty_agent_string_is_rejected() {
+        let toml_str = r#"
+            initial_prompt = "test"
+            [[blocks]]
+            id = 1
+            agent = ""
+            position = [0, 0]
+        "#;
+        let result: Result<PipelineDefinition, _> = toml::from_str(toml_str);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn serde_whitespace_only_agent_string_is_rejected() {
+        let toml_str = r#"
+            initial_prompt = "test"
+            [[blocks]]
+            id = 1
+            agent = "   "
+            position = [0, 0]
+        "#;
+        let result: Result<PipelineDefinition, _> = toml::from_str(toml_str);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn serde_blank_agent_in_list_is_rejected() {
+        let toml_str = r#"
+            initial_prompt = "test"
+            [[blocks]]
+            id = 1
+            agents = ["Claude", ""]
+            position = [0, 0]
+        "#;
+        let result: Result<PipelineDefinition, _> = toml::from_str(toml_str);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn serde_serializes_as_agents_not_agent() {
+        let def = def_with(vec![block(1, 0, 0)], vec![]);
+        let toml_str = toml::to_string_pretty(&def).expect("should serialize");
+        assert!(toml_str.contains("agents = "));
+        assert!(!toml_str.contains("\nagent = "));
+    }
+
+    #[test]
+    fn effective_sessions_multi_agent_block() {
+        let mut def = def_with(vec![block(1, 0, 0)], vec![]);
+        def.blocks[0].agents = vec!["A".into(), "B".into()];
+        let sessions = def.effective_sessions();
+        assert_eq!(sessions.len(), 2);
+        let agents: Vec<&str> = sessions.iter().map(|s| s.agent.as_str()).collect();
+        assert!(agents.contains(&"A"));
+        assert!(agents.contains(&"B"));
+    }
+
+    // -- validation: empty agents --
+
+    #[test]
+    fn validate_rejects_empty_agents() {
+        let mut def = def_with(vec![block(1, 0, 0)], vec![]);
+        def.blocks[0].agents = vec![];
+        assert!(validate_pipeline(&def).is_err());
+    }
+
+    // -- validation: agents × replicas cap --
+
+    #[test]
+    fn validate_rejects_agents_times_replicas_over_32() {
+        let mut def = def_with(vec![block(1, 0, 0)], vec![]);
+        def.blocks[0].agents = vec!["A".into(), "B".into(), "C".into(), "D".into(), "E".into()];
+        def.blocks[0].replicas = 7; // 5 × 7 = 35 > 32
+        assert!(validate_pipeline(&def).is_err());
+    }
+
+    #[test]
+    fn validate_accepts_agents_times_replicas_at_32() {
+        let mut def = def_with(vec![block(1, 0, 0)], vec![]);
+        def.blocks[0].agents = vec!["A".into(), "B".into(), "C".into(), "D".into()];
+        def.blocks[0].replicas = 8; // 4 × 8 = 32
+        assert!(validate_pipeline(&def).is_ok());
+    }
+
+    // -- RegularGraph uses agents × replicas --
+
+    #[test]
+    fn regular_graph_task_count_includes_agents() {
+        let mut def = def_with(vec![block(1, 0, 0)], vec![]);
+        def.blocks[0].agents = vec!["A".into(), "B".into()];
+        def.blocks[0].replicas = 3;
+        let graph = RegularGraph::from_def(&def);
+        assert_eq!(graph.replicas[&1], 6); // 2 agents × 3 replicas
     }
 }

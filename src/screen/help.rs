@@ -65,7 +65,7 @@ pub fn home_help_lines() -> &'static [Line<'static>] {
             )),
             Line::from(""),
             Line::from("  Build a custom DAG of agent blocks with explicit connections."),
-            Line::from("  Each block has its own provider, prompt, and optional session ID."),
+            Line::from("  Each block has one or more agents, a prompt, and an optional session ID."),
             Line::from("  Blocks execute as soon as their dependencies are satisfied,"),
             Line::from("  maximizing parallelism. Root blocks receive the initial prompt;"),
             Line::from("  on subsequent iterations they receive terminal block outputs."),
@@ -248,8 +248,10 @@ pub fn pipeline_help_lines(tab: usize) -> &'static [Line<'static>] {
                 Line::from("  initial prompt. On subsequent iterations, they receive"),
                 Line::from("  outputs from terminal blocks (no outgoing connections)."),
                 Line::from(""),
-                Line::from("  Each block has its own agent, prompt, and optional"),
+                Line::from("  Each block has one or more agents, a prompt, and optional"),
                 Line::from("  session ID for grouping conversation history."),
+                Line::from("  Multiple agents multiply with replicas (e.g. 2 agents"),
+                Line::from("  \u{00d7} 3 replicas = 6 runtime tasks)."),
                 Line::from(""),
             ],
             // Tab 1: Canvas Navigation
@@ -284,9 +286,9 @@ pub fn pipeline_help_lines(tab: usize) -> &'static [Line<'static>] {
                 ]),
                 Line::from(vec![
                     Span::styled("  e / Enter", k),
-                    Span::raw(": Edit the selected block (name, agent, prompt,"),
+                    Span::raw(": Edit the selected block (name, agents, prompt,"),
                 ]),
-                Line::from("    session ID, replicas)"),
+                Line::from("    session ID, replicas). Space toggles agent selection."),
                 Line::from(vec![
                     Span::styled("  F5", k),
                     Span::raw(": Start pipeline execution"),

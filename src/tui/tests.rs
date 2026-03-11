@@ -1295,7 +1295,7 @@ fn pipeline_move_selected_block_moves_into_empty_cell() {
     app.pipeline.pipeline_def.blocks = vec![pipeline_mod::PipelineBlock {
         id: 1,
         name: "one".into(),
-        agent: "agent".into(),
+        agents: vec!["agent".into()],
         prompt: String::new(),
         session_id: None,
         position: (2, 2),
@@ -1316,7 +1316,7 @@ fn pipeline_move_selected_block_swaps_when_target_occupied() {
         pipeline_mod::PipelineBlock {
             id: 1,
             name: "one".into(),
-            agent: "agent".into(),
+            agents: vec!["agent".into()],
             prompt: String::new(),
             session_id: None,
             position: (2, 2),
@@ -1325,7 +1325,7 @@ fn pipeline_move_selected_block_swaps_when_target_occupied() {
         pipeline_mod::PipelineBlock {
             id: 2,
             name: "two".into(),
-            agent: "agent".into(),
+            agents: vec!["agent".into()],
             prompt: String::new(),
             session_id: None,
             position: (3, 2),
@@ -1361,7 +1361,7 @@ fn pipeline_builder_arrow_navigates_shift_arrow_moves_block() {
         pipeline_mod::PipelineBlock {
             id: 1,
             name: "one".into(),
-            agent: "agent".into(),
+            agents: vec!["agent".into()],
             prompt: String::new(),
             session_id: None,
             position: (2, 2),
@@ -1370,7 +1370,7 @@ fn pipeline_builder_arrow_navigates_shift_arrow_moves_block() {
         pipeline_mod::PipelineBlock {
             id: 2,
             name: "two".into(),
-            agent: "agent".into(),
+            agents: vec!["agent".into()],
             prompt: String::new(),
             session_id: None,
             position: (3, 2),
@@ -1510,7 +1510,7 @@ fn pipeline_app_with_block() -> App {
     app.pipeline.pipeline_def.blocks.push(PipelineBlock {
         id: 1,
         name: "B1".into(),
-        agent: "Claude".into(),
+        agents: vec!["Claude".into()],
         prompt: String::new(),
         session_id: None,
         position: (0, 0),
@@ -1778,7 +1778,7 @@ fn pipeline_step_labels_expands_replicas() {
             PipelineBlock {
                 id: 1,
                 name: "Writer".into(),
-                agent: "Claude".into(),
+                agents: vec!["Claude".into()],
                 prompt: String::new(),
                 session_id: None,
                 position: (0, 0),
@@ -1787,7 +1787,7 @@ fn pipeline_step_labels_expands_replicas() {
             PipelineBlock {
                 id: 2,
                 name: "Reviewer".into(),
-                agent: "GPT".into(),
+                agents: vec!["GPT".into()],
                 prompt: String::new(),
                 session_id: None,
                 position: (1, 0),
@@ -1815,7 +1815,7 @@ fn pipeline_step_labels_unnamed_blocks_no_agent_duplication() {
         blocks: vec![PipelineBlock {
             id: 5,
             name: String::new(),
-            agent: "Claude".into(),
+            agents: vec!["Claude".into()],
             prompt: String::new(),
             session_id: None,
             position: (0, 0),
@@ -1830,6 +1830,32 @@ fn pipeline_step_labels_unnamed_blocks_no_agent_duplication() {
     assert_eq!(labels[0], "Block 5 (Claude)");
 }
 
+#[test]
+fn pipeline_step_labels_multi_agent_no_duplication() {
+    use crate::execution::pipeline::{PipelineBlock, PipelineDefinition};
+    let def = PipelineDefinition {
+        initial_prompt: "go".into(),
+        iterations: 1,
+        blocks: vec![PipelineBlock {
+            id: 1,
+            name: "Writer".into(),
+            agents: vec!["Claude".into(), "GPT".into()],
+            prompt: String::new(),
+            session_id: None,
+            position: (0, 0),
+            replicas: 1,
+        }],
+        connections: vec![],
+        session_configs: vec![],
+        loop_connections: vec![],
+    };
+    let labels = pipeline_step_labels(&def);
+    assert_eq!(labels.len(), 2);
+    // Agent name should appear exactly once, not doubled
+    assert_eq!(labels[0], "Writer (Claude)");
+    assert_eq!(labels[1], "Writer (GPT)");
+}
+
 // ---------------------------------------------------------------------------
 // Loop connection tests
 // ---------------------------------------------------------------------------
@@ -1842,7 +1868,7 @@ fn pipeline_app_with_two_blocks() -> App {
     app.pipeline.pipeline_def.blocks.push(PipelineBlock {
         id: 1,
         name: "A".into(),
-        agent: "Claude".into(),
+        agents: vec!["Claude".into()],
         prompt: String::new(),
         session_id: None,
         position: (0, 0),
@@ -1851,7 +1877,7 @@ fn pipeline_app_with_two_blocks() -> App {
     app.pipeline.pipeline_def.blocks.push(PipelineBlock {
         id: 2,
         name: "B".into(),
-        agent: "GPT".into(),
+        agents: vec!["GPT".into()],
         prompt: String::new(),
         session_id: None,
         position: (1, 0),
@@ -2203,7 +2229,7 @@ fn setup_analysis_prompt_pipeline() {
         PipelineBlock {
             id: 1,
             name: "Research".into(),
-            agent: "Claude".into(),
+            agents: vec!["Claude".into()],
             prompt: "Do research".into(),
             session_id: None,
             position: (0, 0),
@@ -2212,7 +2238,7 @@ fn setup_analysis_prompt_pipeline() {
         PipelineBlock {
             id: 2,
             name: "Analyze".into(),
-            agent: "OpenAI".into(),
+            agents: vec!["OpenAI".into()],
             prompt: "Analyze results".into(),
             session_id: Some("shared-1".into()),
             position: (1, 0),
@@ -2245,7 +2271,7 @@ fn setup_analysis_prompt_pipeline_with_replicas() {
     app.pipeline.pipeline_def.blocks = vec![PipelineBlock {
         id: 1,
         name: "Worker".into(),
-        agent: "Claude".into(),
+        agents: vec!["Claude".into()],
         prompt: "work".into(),
         session_id: None,
         position: (0, 0),
@@ -2425,7 +2451,7 @@ fn setup_analysis_pipeline_agent_invalid_runtime() {
     app.pipeline.pipeline_def.blocks = vec![PipelineBlock {
         id: 1,
         name: "A".into(),
-        agent: "CliAgent".into(),
+        agents: vec!["CliAgent".into()],
         prompt: "test".into(),
         session_id: None,
         position: (0, 0),
@@ -2475,7 +2501,7 @@ fn setup_analysis_invalid_pipeline() {
     app.pipeline.pipeline_def.blocks = vec![PipelineBlock {
         id: 1,
         name: "A".into(),
-        agent: "Claude".into(),
+        agents: vec!["Claude".into()],
         prompt: "test".into(),
         session_id: None,
         position: (0, 0),
@@ -2507,7 +2533,7 @@ fn setup_analysis_empty_pipeline_initial_prompt() {
     app.pipeline.pipeline_def.blocks = vec![PipelineBlock {
         id: 1,
         name: "A".into(),
-        agent: "Claude".into(),
+        agents: vec!["Claude".into()],
         prompt: "test".into(),
         session_id: None,
         position: (0, 0),
@@ -2539,7 +2565,7 @@ fn setup_analysis_pipeline_unavailable_agent() {
     app.pipeline.pipeline_def.blocks = vec![PipelineBlock {
         id: 1,
         name: "A".into(),
-        agent: "MissingAgent".into(),
+        agents: vec!["MissingAgent".into()],
         prompt: "test".into(),
         session_id: None,
         position: (0, 0),
@@ -2634,17 +2660,17 @@ fn test_delete_internal_block_prunes_loop() {
     app.pipeline.pipeline_focus = PipelineFocus::Builder;
     app.pipeline.pipeline_def.blocks = vec![
         PipelineBlock {
-            id: 1, name: "A".into(), agent: "Claude".into(),
+            id: 1, name: "A".into(), agents: vec!["Claude".into()],
             prompt: String::new(), session_id: None,
             position: (0, 0), replicas: 1,
         },
         PipelineBlock {
-            id: 2, name: "B".into(), agent: "Claude".into(),
+            id: 2, name: "B".into(), agents: vec!["Claude".into()],
             prompt: String::new(), session_id: None,
             position: (1, 0), replicas: 1,
         },
         PipelineBlock {
-            id: 3, name: "C".into(), agent: "Claude".into(),
+            id: 3, name: "C".into(), agents: vec!["Claude".into()],
             prompt: String::new(), session_id: None,
             position: (2, 0), replicas: 1,
         },

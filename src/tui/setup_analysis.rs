@@ -79,20 +79,22 @@ pub(super) fn start_setup_analysis(app: &mut App) {
             }
             // Validate each block's agent runtime
             for block in &app.pipeline.pipeline_def.blocks {
-                let label = format!("{} (block {})", block.agent, block.id);
-                match app.effective_agent_config(&block.agent).cloned() {
-                    Some(cfg) => {
-                        if let Err(msg) = validate_agent_runtime(app, &label, &cfg) {
-                            app.setup_analysis.show_message(msg);
+                for agent_name in &block.agents {
+                    let label = format!("{} (block {})", agent_name, block.id);
+                    match app.effective_agent_config(agent_name).cloned() {
+                        Some(cfg) => {
+                            if let Err(msg) = validate_agent_runtime(app, &label, &cfg) {
+                                app.setup_analysis.show_message(msg);
+                                return;
+                            }
+                        }
+                        None => {
+                            app.setup_analysis.show_message(format!(
+                                "Agent '{}' not found (block {})",
+                                agent_name, block.id
+                            ));
                             return;
                         }
-                    }
-                    None => {
-                        app.setup_analysis.show_message(format!(
-                            "Agent '{}' not found (block {})",
-                            block.agent, block.id
-                        ));
-                        return;
                     }
                 }
             }
@@ -413,13 +415,17 @@ fn build_pipeline_prompt(app: &App, prompt: &mut String) {
     prompt.push_str("\nBlocks:\n");
     for block in &def.blocks {
         let label = pipeline_block_label(block);
-        let agent_info = if let Some(cfg) = app.effective_agent_config(&block.agent) {
-            format!("{} ({})", block.agent, cfg.model)
-        } else {
-            block.agent.clone()
-        };
+        let agent_names: Vec<String> = block.agents.iter().map(|a| {
+            if let Some(cfg) = app.effective_agent_config(a) {
+                format!("{} ({})", a, cfg.model)
+            } else {
+                a.clone()
+            }
+        }).collect();
+        let agent_info = agent_names.join(", ");
         let snippet = truncate_chars(&block.prompt, 200);
-        let mut line = format!("  {} \"{}\" — agent: {}", block.id, label, agent_info);
+        let agent_label = if block.agents.len() > 1 { "agents" } else { "agent" };
+        let mut line = format!("  {} \"{}\" — {}: {}", block.id, label, agent_label, agent_info);
         if !snippet.is_empty() {
             line.push_str(&format!(", prompt: {}", snippet));
             if block.prompt.chars().count() > 200 {
@@ -563,12 +569,12 @@ fn build_pipeline_prompt(app: &App, prompt: &mut String) {
         }
     }
 
-    // Runtime table for replicas
+    // Runtime table for replicas / multi-agent expansion
     let rt = build_runtime_table(def);
-    let has_replicas = def.blocks.iter().any(|b| b.replicas > 1);
-    if has_replicas {
+    let has_expansion = def.blocks.iter().any(|b| b.replicas > 1 || b.agents.len() > 1);
+    if has_expansion {
         prompt.push_str(&format!(
-            "\nRuntime blocks (after replica expansion): {}\n",
+            "\nRuntime blocks (after agent/replica expansion): {}\n",
             rt.entries.len()
         ));
     }

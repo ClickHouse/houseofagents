@@ -4,6 +4,7 @@ use crate::execution::{BatchProgressEvent, ExecutionMode, ProgressEvent, PromptR
 use crate::output::OutputManager;
 use crate::provider::ProviderKind;
 use reqwest::Client;
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -338,7 +339,10 @@ pub(crate) struct PipelineState {
     pub(crate) pipeline_edit_field: PipelineEditField,
     pub(crate) pipeline_edit_name_buf: String,
     pub(crate) pipeline_edit_name_cursor: usize,
-    pub(crate) pipeline_edit_agent_idx: usize,
+    pub(crate) pipeline_edit_agent_selection: Vec<bool>,
+    pub(crate) pipeline_edit_agent_cursor: usize,
+    pub(crate) pipeline_edit_agent_scroll: usize,
+    pub(crate) pipeline_edit_agent_visible: Cell<usize>,
     pub(crate) pipeline_edit_prompt_buf: String,
     pub(crate) pipeline_edit_prompt_cursor: usize,
     pub(crate) pipeline_edit_session_buf: String,
@@ -1220,7 +1224,10 @@ impl PipelineState {
             pipeline_edit_field: PipelineEditField::Name,
             pipeline_edit_name_buf: String::new(),
             pipeline_edit_name_cursor: 0,
-            pipeline_edit_agent_idx: 0,
+            pipeline_edit_agent_selection: Vec::new(),
+            pipeline_edit_agent_cursor: 0,
+            pipeline_edit_agent_scroll: 0,
+            pipeline_edit_agent_visible: Cell::new(6),
             pipeline_edit_prompt_buf: String::new(),
             pipeline_edit_prompt_cursor: 0,
             pipeline_edit_session_buf: String::new(),
@@ -1406,7 +1413,9 @@ mod tests {
         app.pipeline.pipeline_edit_field = PipelineEditField::Prompt;
         app.pipeline.pipeline_edit_name_buf = "name".into();
         app.pipeline.pipeline_edit_name_cursor = 2;
-        app.pipeline.pipeline_edit_agent_idx = 1;
+        app.pipeline.pipeline_edit_agent_selection = vec![true, false];
+        app.pipeline.pipeline_edit_agent_cursor = 1;
+        app.pipeline.pipeline_edit_agent_scroll = 1;
         app.pipeline.pipeline_edit_prompt_buf = "prompt".into();
         app.pipeline.pipeline_edit_prompt_cursor = 3;
         app.pipeline.pipeline_edit_session_buf = "sid".into();
@@ -1493,7 +1502,9 @@ mod tests {
         assert_eq!(app.pipeline.pipeline_edit_field, PipelineEditField::Name);
         assert_eq!(app.pipeline.pipeline_edit_name_buf, "");
         assert_eq!(app.pipeline.pipeline_edit_name_cursor, 0);
-        assert_eq!(app.pipeline.pipeline_edit_agent_idx, 0);
+        assert!(app.pipeline.pipeline_edit_agent_selection.is_empty());
+        assert_eq!(app.pipeline.pipeline_edit_agent_cursor, 0);
+        assert_eq!(app.pipeline.pipeline_edit_agent_scroll, 0);
         assert_eq!(app.pipeline.pipeline_edit_prompt_buf, "");
         assert_eq!(app.pipeline.pipeline_edit_prompt_cursor, 0);
         assert_eq!(app.pipeline.pipeline_edit_session_buf, "");

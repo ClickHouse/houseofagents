@@ -44,21 +44,23 @@ pub(super) fn start_pipeline_execution(app: &mut App) {
         .map(|(a, avail)| (a.name.clone(), avail))
         .collect();
     for block in &app.pipeline.pipeline_def.blocks {
-        match avail_agents.get(&block.agent) {
-            Some(true) => {}
-            Some(false) => {
-                app.error_modal = Some(format!(
-                    "{} is not available (block {})",
-                    block.agent, block.id
-                ));
-                return;
-            }
-            None => {
-                app.error_modal = Some(format!(
-                    "Agent '{}' not found (block {})",
-                    block.agent, block.id
-                ));
-                return;
+        for agent_name in &block.agents {
+            match avail_agents.get(agent_name) {
+                Some(true) => {}
+                Some(false) => {
+                    app.error_modal = Some(format!(
+                        "{} is not available (block {})",
+                        agent_name, block.id
+                    ));
+                    return;
+                }
+                None => {
+                    app.error_modal = Some(format!(
+                        "Agent '{}' not found (block {})",
+                        agent_name, block.id
+                    ));
+                    return;
+                }
             }
         }
     }
@@ -78,21 +80,23 @@ pub(super) fn start_pipeline_execution(app: &mut App) {
         std::collections::HashMap::new();
 
     for block in &app.pipeline.pipeline_def.blocks {
-        if agent_configs.contains_key(&block.agent) {
-            continue;
-        }
-        if let Some(agent_cfg) = app.config.agents.iter().find(|a| a.name == block.agent) {
-            let agent_cfg = app
-                .effective_agent_config(&agent_cfg.name)
-                .unwrap_or(agent_cfg);
-            agent_configs.insert(
-                block.agent.clone(),
-                (
-                    agent_cfg.provider,
-                    agent_cfg.to_provider_config(),
-                    agent_cfg.use_cli,
-                ),
-            );
+        for agent_name in &block.agents {
+            if agent_configs.contains_key(agent_name) {
+                continue;
+            }
+            if let Some(agent_cfg) = app.config.agents.iter().find(|a| a.name == *agent_name) {
+                let agent_cfg = app
+                    .effective_agent_config(&agent_cfg.name)
+                    .unwrap_or(agent_cfg);
+                agent_configs.insert(
+                    agent_name.clone(),
+                    (
+                        agent_cfg.provider,
+                        agent_cfg.to_provider_config(),
+                        agent_cfg.use_cli,
+                    ),
+                );
+            }
         }
     }
 
@@ -1354,6 +1358,9 @@ pub(super) fn update_step_status(state: &mut RunState, label: &str, status: RunS
 pub(super) fn format_block_step_label(block_id: u32, label: &str, agent_name: &str) -> String {
     if label.trim().is_empty() {
         format!("Block {block_id} ({agent_name})")
+    } else if label.contains(&format!("({agent_name})")) || label.contains(&format!("({agent_name} ")) {
+        // Label already includes agent name (multi-agent display labels from runtime table)
+        label.to_string()
     } else {
         format!("{label} ({agent_name})")
     }
