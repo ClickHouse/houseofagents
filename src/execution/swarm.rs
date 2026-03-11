@@ -1,6 +1,6 @@
 use crate::error::AppError;
 use crate::execution::{
-    finish_live_log_forwarder, truncate_chars, wait_for_cancel, ProgressEvent, PromptRuntimeContext,
+    run_with_cancellation, truncate_chars, ProgressEvent, PromptRuntimeContext,
 };
 use crate::output::OutputManager;
 use crate::provider::Provider;
@@ -92,46 +92,37 @@ pub async fn run_swarm(
                 }
 
                 let kind = provider.kind();
-                let (live_tx, mut live_rx) = mpsc::unbounded_channel::<String>();
-                provider.set_live_log_sender(Some(live_tx));
-                let live_progress_tx = tx.clone();
-                let live_agent = agent_name.clone();
-                let live_forward = tokio::spawn(async move {
-                    while let Some(line) = live_rx.recv().await {
-                        let _ = live_progress_tx.send(ProgressEvent::AgentLog {
-                            agent: live_agent.clone(),
+                let result = run_with_cancellation(
+                    provider.as_mut(),
+                    &message,
+                    &tx,
+                    &cancel_flag,
+                    {
+                        let agent_name = agent_name.clone();
+                        move |chunk| ProgressEvent::AgentStreamChunk {
+                            agent: agent_name.clone(),
                             kind,
                             iteration: iter,
-                            message: format!("CLI {line}"),
-                        });
-                    }
-                });
-
-                let result = tokio::select! {
-                    res = crate::execution::send_with_streaming(
-                        provider.as_mut(),
-                        &message,
-                        &tx,
-                        {
-                            let agent_name = agent_name.clone();
-                            move |chunk| ProgressEvent::AgentStreamChunk {
-                                agent: agent_name.clone(),
-                                kind,
-                                iteration: iter,
-                                chunk,
-                            }
-                        },
-                    ) => Some(res),
-                    _ = wait_for_cancel(&cancel_flag) => {
-                        let _ = tx.send(ProgressEvent::AgentLog {
-                            agent: agent_name.clone(), kind, iteration: iter, message: "Cancelled".into(),
-                        });
-                        None
-                    }
-                };
-                provider.set_live_log_sender(None);
-                let cancelled = result.is_none();
-                finish_live_log_forwarder(live_forward, cancelled).await;
+                            chunk,
+                        }
+                    },
+                    {
+                        let agent_name = agent_name.clone();
+                        move |line| ProgressEvent::AgentLog {
+                            agent: agent_name.clone(),
+                            kind,
+                            iteration: iter,
+                            message: line,
+                        }
+                    },
+                    ProgressEvent::AgentLog {
+                        agent: agent_name.clone(),
+                        kind,
+                        iteration: iter,
+                        message: "Cancelled".into(),
+                    },
+                )
+                .await;
                 let Some(result) = result else {
                     return (i, agent_name, provider, None);
                 };
@@ -179,8 +170,7 @@ pub async fn run_swarm(
                             kind,
                             iteration: iter,
                         });
-                        let result_name = agent_name.clone();
-                        (i, agent_name, provider, Some((result_name, resp.content)))
+                        (i, agent_name.clone(), provider, Some((agent_name, resp.content)))
                     }
                     Err(e) => {
                         let err_str = e.to_string();

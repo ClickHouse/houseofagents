@@ -1,6 +1,6 @@
 use crate::error::AppError;
 use crate::execution::{
-    finish_live_log_forwarder, truncate_chars, wait_for_cancel, ProgressEvent, PromptRuntimeContext,
+    run_with_cancellation, truncate_chars, ProgressEvent, PromptRuntimeContext,
 };
 use crate::output::OutputManager;
 use crate::provider::Provider;
@@ -94,48 +94,40 @@ pub async fn run_relay(
                 prompt_context.augment_prompt_for_agent(&base_message, receiver_is_cli)
             };
 
-            // Use select! so cancel aborts the in-flight request
-            let (live_tx, mut live_rx) = mpsc::unbounded_channel::<String>();
-            agents[i].1.set_live_log_sender(Some(live_tx));
-            let live_progress_tx = progress_tx.clone();
-            let live_name = name.clone();
-            let live_kind = *kind;
-            let live_forward = tokio::spawn(async move {
-                while let Some(line) = live_rx.recv().await {
-                    let _ = live_progress_tx.send(ProgressEvent::AgentLog {
-                        agent: live_name.clone(),
-                        kind: live_kind,
+            // Use run_with_cancellation so cancel aborts the in-flight request
+            let result = run_with_cancellation(
+                agents[i].1.as_mut(),
+                &message,
+                &progress_tx,
+                &cancel,
+                {
+                    let name = name.clone();
+                    let kind = *kind;
+                    move |chunk| ProgressEvent::AgentStreamChunk {
+                        agent: name.clone(),
+                        kind,
                         iteration,
-                        message: format!("CLI {line}"),
-                    });
-                }
-            });
-            let result = tokio::select! {
-                res = crate::execution::send_with_streaming(
-                    agents[i].1.as_mut(),
-                    &message,
-                    &progress_tx,
-                    {
-                        let name = name.clone();
-                        let kind = *kind;
-                        move |chunk| ProgressEvent::AgentStreamChunk {
-                            agent: name.clone(),
-                            kind,
-                            iteration,
-                            chunk,
-                        }
-                    },
-                ) => Some(res),
-                _ = wait_for_cancel(&cancel) => {
-                    let _ = progress_tx.send(ProgressEvent::AgentLog {
-                        agent: name.clone(), kind: *kind, iteration, message: "Cancelled".into(),
-                    });
-                    None
-                }
-            };
-            agents[i].1.set_live_log_sender(None);
-            let cancelled = result.is_none();
-            finish_live_log_forwarder(live_forward, cancelled).await;
+                        chunk,
+                    }
+                },
+                {
+                    let name = name.clone();
+                    let kind = *kind;
+                    move |line| ProgressEvent::AgentLog {
+                        agent: name.clone(),
+                        kind,
+                        iteration,
+                        message: line,
+                    }
+                },
+                ProgressEvent::AgentLog {
+                    agent: name.clone(),
+                    kind: *kind,
+                    iteration,
+                    message: "Cancelled".into(),
+                },
+            )
+            .await;
             let Some(result) = result else {
                 let _ = progress_tx.send(ProgressEvent::AllDone);
                 return Ok(());

@@ -7,7 +7,7 @@ description = "Multi-agent prompt runner with TUI"
 
 [dependencies]
 anyhow = "1"
-chrono = "0.4"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.29"
 dirs = "5"
@@ -22,9 +22,16 @@ thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "process", "io-util", "fs"] }
 toml = "0.8"
 pulldown-cmark = "0.10"
-rand = "0.8"
+fastrand = "2"
 uuid = { version = "1", features = ["v4"] }
 unicode-width = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
+
+[profile.release]
+lto = "thin"
+strip = true
+
+[lints.clippy]
+all = "warn"

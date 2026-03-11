@@ -57,7 +57,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     f.render_widget(help, chunks[2]);
 
     // Edit popup overlay
-    if app.edit_popup.show_edit_popup {
+    if app.edit_popup.visible {
         draw_edit_popup(f, app);
     }
 
@@ -184,9 +184,9 @@ fn draw_edit_popup(f: &mut Frame, app: &App) {
     let area = centered_rect(70, 60, f.area());
     let mut selected_line_start = 0usize;
     let diag_agent = app.config.diagnostic_provider.as_deref();
-    let selected_cursor = match app.edit_popup.edit_popup_section {
-        EditPopupSection::Providers => app.edit_popup.edit_popup_cursor,
-        EditPopupSection::Timeouts => app.edit_popup.edit_popup_timeout_cursor,
+    let selected_cursor = match app.edit_popup.section {
+        EditPopupSection::Providers => app.edit_popup.cursor,
+        EditPopupSection::Timeouts => app.edit_popup.timeout_cursor,
     };
 
     let mut header_lines = vec![
@@ -198,7 +198,7 @@ fn draw_edit_popup(f: &mut Frame, app: &App) {
         Line::from(vec![
             Span::raw("Section: "),
             Span::styled(
-                match app.edit_popup.edit_popup_section {
+                match app.edit_popup.section {
                     EditPopupSection::Providers => "Agents",
                     EditPopupSection::Timeouts => "Timeouts",
                 },
@@ -239,9 +239,9 @@ fn draw_edit_popup(f: &mut Frame, app: &App) {
         Line::from(""),
     ];
 
-    if app.edit_popup.edit_popup_editing
+    if app.edit_popup.editing
         && matches!(
-            app.edit_popup.edit_popup_field,
+            app.edit_popup.field,
             crate::app::EditField::OutputDir
         )
     {
@@ -256,7 +256,7 @@ fn draw_edit_popup(f: &mut Frame, app: &App) {
     }
 
     let mut body_lines: Vec<Line> = Vec::new();
-    match app.edit_popup.edit_popup_section {
+    match app.edit_popup.section {
         EditPopupSection::Providers => {
             let agents = app.available_agents();
             for (i, (agent_cfg, _available)) in agents.iter().enumerate() {
@@ -331,7 +331,7 @@ fn draw_edit_popup(f: &mut Frame, app: &App) {
                 }
                 body_lines.push(Line::from(name_spans));
                 let cli_print_mode = config.map(|c| c.cli_print_mode).unwrap_or(true);
-                if is_selected && !app.edit_popup.edit_popup_editing {
+                if is_selected && !app.edit_popup.editing {
                     body_lines.push(Line::from(vec![
                         Span::raw("  Mode:     "),
                         Span::styled(mode_text, mode_style),
@@ -418,13 +418,13 @@ fn draw_edit_popup(f: &mut Frame, app: &App) {
                 }
 
                 if is_selected
-                    && app.edit_popup.edit_popup_editing
+                    && app.edit_popup.editing
                     && !matches!(
-                        app.edit_popup.edit_popup_field,
+                        app.edit_popup.field,
                         crate::app::EditField::OutputDir
                     )
                 {
-                    let field_name = match app.edit_popup.edit_popup_field {
+                    let field_name = match app.edit_popup.field {
                         crate::app::EditField::ApiKey => "key",
                         crate::app::EditField::Model => "model",
                         crate::app::EditField::ExtraCliArgs => "extra cli args",
@@ -510,9 +510,9 @@ fn draw_edit_popup(f: &mut Frame, app: &App) {
                 ]));
 
                 if is_selected
-                    && app.edit_popup.edit_popup_editing
+                    && app.edit_popup.editing
                     && matches!(
-                        app.edit_popup.edit_popup_field,
+                        app.edit_popup.field,
                         crate::app::EditField::TimeoutSeconds
                     )
                 {
@@ -588,7 +588,7 @@ fn draw_model_picker(f: &mut Frame, app: &App) {
     let provider_name: &str = app
         .config
         .agents
-        .get(app.edit_popup.edit_popup_cursor)
+        .get(app.edit_popup.cursor)
         .map(|a| a.name.as_str())
         .unwrap_or("?");
 
@@ -616,10 +616,23 @@ fn draw_model_picker(f: &mut Frame, app: &App) {
         Style::default().fg(Color::Yellow)
     };
 
+    // Build filtered view on demand from the single model_picker_list source
+    let filter_lc = app.edit_popup.model_picker_filter.to_lowercase();
+    let filtered: Vec<&str> = if filter_lc.is_empty() {
+        app.edit_popup.model_picker_list.iter().map(|s| s.as_str()).collect()
+    } else {
+        app.edit_popup
+            .model_picker_list
+            .iter()
+            .filter(|m| m.to_lowercase().contains(&filter_lc))
+            .map(|s| s.as_str())
+            .collect()
+    };
+
     let inner_height = area.height.saturating_sub(2) as usize;
     let reserved_rows = 4usize; // filter, spacer, spacer, help
     let visible_model_rows = inner_height.saturating_sub(reserved_rows).max(1);
-    let total_models = app.edit_popup.model_picker_list.len();
+    let total_models = filtered.len();
     let max_start = total_models.saturating_sub(visible_model_rows);
     let start = app
         .edit_popup
@@ -634,7 +647,7 @@ fn draw_model_picker(f: &mut Frame, app: &App) {
     ])))
     .chain(std::iter::once(ListItem::new("")))
     .chain(
-        app.edit_popup.model_picker_list[start..end]
+        filtered[start..end]
             .iter()
             .enumerate()
             .map(|(offset, model)| {
@@ -656,8 +669,8 @@ fn draw_model_picker(f: &mut Frame, app: &App) {
     )
     .collect();
 
-    let shown = app.edit_popup.model_picker_list.len();
-    let total = app.edit_popup.model_picker_all_models.len();
+    let shown = filtered.len();
+    let total = app.edit_popup.model_picker_list.len();
     let count_label = if shown == total {
         format!("{total}")
     } else {

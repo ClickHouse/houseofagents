@@ -57,13 +57,13 @@ pub(super) fn should_offer_consolidation(app: &App) -> bool {
     if app.running.multi_run_total > 1 {
         return !successful_run_ids(app).is_empty();
     }
-    if app.selected_agents.len() <= 1 {
-        return false;
-    }
     if !matches!(
         app.selected_mode,
         ExecutionMode::Swarm | ExecutionMode::Pipeline
     ) {
+        return false;
+    }
+    if app.selected_mode != ExecutionMode::Pipeline && app.selected_agents.len() <= 1 {
         return false;
     }
 

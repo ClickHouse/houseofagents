@@ -125,7 +125,7 @@ impl fmt::Display for ExecutionMode {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
+#[allow(dead_code)] // Fields within variants are constructed but not all are pattern-matched
 pub enum ProgressEvent {
     AgentStarted {
         agent: String,
@@ -235,12 +235,14 @@ pub enum BatchProgressEvent {
     AllRunsDone,
 }
 
+/// Waits until the cancellation flag is set.
+/// Uses a short polling interval (10ms) as a simple alternative to a Notify channel.
 pub async fn wait_for_cancel(cancel: &Arc<AtomicBool>) {
     loop {
         if cancel.load(Ordering::Relaxed) {
             return;
         }
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
     }
 }
 
@@ -261,7 +263,9 @@ pub(crate) async fn send_with_streaming(
         }
     });
     let result = provider.send_streaming(message, chunk_tx).await;
-    let _ = fwd.await;
+    if let Err(e) = fwd.await {
+        eprintln!("live log forwarder panicked: {e}");
+    }
     result
 }
 
@@ -270,6 +274,40 @@ pub(crate) async fn finish_live_log_forwarder(task: JoinHandle<()>, cancelled: b
         task.abort();
     }
     let _ = task.await;
+}
+
+/// Runs a provider request with live-log forwarding and cancellation support.
+///
+/// Returns `Some(result)` on completion, or `None` if cancelled.
+/// On cancellation, sends `cancel_event` to the progress channel.
+pub(crate) async fn run_with_cancellation(
+    provider: &mut dyn crate::provider::Provider,
+    message: &str,
+    progress_tx: &mpsc::UnboundedSender<ProgressEvent>,
+    cancel: &Arc<AtomicBool>,
+    make_chunk_event: impl Fn(String) -> ProgressEvent + Send + 'static,
+    make_log_event: impl Fn(String) -> ProgressEvent + Send + 'static,
+    cancel_event: ProgressEvent,
+) -> Option<Result<crate::provider::CompletionResponse, crate::error::AppError>> {
+    let (live_tx, mut live_rx) = mpsc::unbounded_channel::<String>();
+    provider.set_live_log_sender(Some(live_tx));
+    let ptx = progress_tx.clone();
+    let live_forward = tokio::spawn(async move {
+        while let Some(line) = live_rx.recv().await {
+            let _ = ptx.send(make_log_event(format!("CLI {line}")));
+        }
+    });
+    let result = tokio::select! {
+        res = send_with_streaming(provider, message, progress_tx, make_chunk_event) => Some(res),
+        _ = wait_for_cancel(cancel) => {
+            let _ = progress_tx.send(cancel_event);
+            None
+        }
+    };
+    provider.set_live_log_sender(None);
+    let cancelled = result.is_none();
+    finish_live_log_forwarder(live_forward, cancelled).await;
+    result
 }
 
 pub fn truncate_chars(s: &str, max_chars: usize) -> String {
@@ -285,16 +323,6 @@ pub fn truncate_chars(s: &str, max_chars: usize) -> String {
         format!("{out}...")
     } else {
         out
-    }
-}
-
-impl ProgressEvent {
-    #[allow(dead_code)]
-    pub fn is_stream_chunk(&self) -> bool {
-        matches!(
-            self,
-            ProgressEvent::AgentStreamChunk { .. } | ProgressEvent::BlockStreamChunk { .. }
-        )
     }
 }
 

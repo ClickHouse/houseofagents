@@ -16,6 +16,7 @@ const ACTIVITY_LOG_LIMIT: usize = 200;
 const ERROR_LEDGER_LIMIT: usize = 200;
 const ERROR_LEDGER_ENTRY_MAX_CHARS: usize = 4096;
 const RECENT_ACTIVITY_LOG_LIMIT: usize = 10;
+const RECENT_LOGS_CAP: usize = 20;
 
 pub(crate) struct AgentTimer {
     pub started_at: Instant,
@@ -48,26 +49,24 @@ pub(crate) enum AgentRowStatus {
     Skipped(String),
 }
 
-#[allow(dead_code)]
 pub(crate) struct AgentStatusRow {
     pub name: String,
+    #[allow(dead_code)] // informational; kept for diagnostics/logging
     pub provider: ProviderKind,
     pub status: AgentRowStatus,
-    pub iteration: u32,
-    pub last_log: String,
 }
 
-#[allow(dead_code)]
 pub(crate) struct BlockStatusRow {
     pub block_id: u32,
     pub source_block_id: u32,
+    #[allow(dead_code)] // informational; kept for diagnostics/logging
     pub replica_index: u32,
     pub label: String,
+    #[allow(dead_code)] // informational; kept for diagnostics/logging
     pub agent_name: String,
+    #[allow(dead_code)] // informational; kept for diagnostics/logging
     pub provider: ProviderKind,
     pub status: AgentRowStatus,
-    pub iteration: u32,
-    pub last_log: String,
 }
 
 #[derive(Hash, Eq, PartialEq, Clone, Debug)]
@@ -301,16 +300,15 @@ pub(crate) struct ResultsState {
 }
 
 pub(crate) struct EditPopupState {
-    pub(crate) show_edit_popup: bool,
-    pub(crate) edit_popup_section: EditPopupSection,
-    pub(crate) edit_popup_cursor: usize,
-    pub(crate) edit_popup_timeout_cursor: usize,
-    pub(crate) edit_popup_field: EditField,
-    pub(crate) edit_popup_editing: bool,
+    pub(crate) visible: bool,
+    pub(crate) section: EditPopupSection,
+    pub(crate) cursor: usize,
+    pub(crate) timeout_cursor: usize,
+    pub(crate) field: EditField,
+    pub(crate) editing: bool,
     pub(crate) edit_buffer: String,
     pub(crate) model_picker_active: bool,
     pub(crate) model_picker_loading: bool,
-    pub(crate) model_picker_all_models: Vec<String>,
     pub(crate) model_picker_list: Vec<String>,
     pub(crate) model_picker_filter: String,
     pub(crate) model_picker_cursor: usize,
@@ -416,7 +414,6 @@ pub enum PromptFocus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum EditField {
     ApiKey,
     Model,
@@ -519,13 +516,35 @@ pub enum PipelineDialogMode {
 }
 
 fn detect_cli(name: &str) -> bool {
-    std::process::Command::new("which")
-        .arg(name)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    let Some(paths) = std::env::var_os("PATH") else {
+        return false;
+    };
+    find_executable(name, std::env::split_paths(&paths))
+}
+
+fn find_executable(name: &str, dirs: impl Iterator<Item = std::path::PathBuf>) -> bool {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
+    dirs.into_iter().any(|dir| {
+        let candidate = dir.join(name);
+        candidate
+            .metadata()
+            .map(|m| {
+                if !m.is_file() {
+                    return false;
+                }
+                #[cfg(unix)]
+                {
+                    m.permissions().mode() & 0o111 != 0
+                }
+                #[cfg(not(unix))]
+                {
+                    true
+                }
+            })
+            .unwrap_or(false)
+    })
 }
 
 impl App {
@@ -742,14 +761,8 @@ impl App {
         self.running.final_iteration
     }
 
-    #[allow(dead_code)]
     pub fn agent_timer(&self, name: &str) -> Option<&AgentTimer> {
         self.running.agent_timers.get(name)
-    }
-
-    #[allow(dead_code)]
-    pub fn block_timer(&self, block_id: u32) -> Option<&AgentTimer> {
-        self.running.block_timers.get(&block_id)
     }
 
     pub fn agent_rows(&self) -> &[AgentStatusRow] {
@@ -805,6 +818,7 @@ impl PromptState {
         self.resume_previous = false;
         self.forward_prompt = false;
         self.keep_session = true;
+        self.prompt_focus = PromptFocus::Text;
     }
 }
 
@@ -933,16 +947,13 @@ impl RunningState {
 
     fn reduce_progress_event(&mut self, event: &ProgressEvent) {
         match event {
-            ProgressEvent::AgentStarted {
-                agent, iteration, ..
-            } => {
+            ProgressEvent::AgentStarted { agent, .. } => {
                 self.active_agents.insert(agent.clone());
                 self.agent_timers.insert(agent.clone(), AgentTimer::new());
                 self.stream_buffers
                     .remove(&StreamTarget::Agent(agent.clone()));
                 if let Some(row) = self.agent_rows.iter_mut().find(|r| &r.name == agent) {
                     row.status = AgentRowStatus::Running;
-                    row.iteration = *iteration;
                 }
             }
             ProgressEvent::AgentLog {
@@ -955,9 +966,7 @@ impl RunningState {
                     agent.clone(),
                     format!("[iter {iteration}] {message}"),
                 );
-                if let Some(row) = self.agent_rows.iter_mut().find(|r| r.name == *agent) {
-                    row.last_log = crate::execution::truncate_chars(message, 60);
-                }
+                // (log message used for activity log only, not stored on row)
             }
             ProgressEvent::AgentFinished {
                 agent, iteration, ..
@@ -1006,21 +1015,16 @@ impl RunningState {
                 self.current_iteration = (*iteration + 1).min(self.final_iteration);
             }
             ProgressEvent::BlockStarted {
-                block_id,
-                label,
-                iteration,
-                ..
+                block_id, label, ..
             } => {
                 self.upsert_active_block(*block_id, label.clone());
                 self.block_timers.insert(*block_id, AgentTimer::new());
                 self.stream_buffers.remove(&StreamTarget::Block(*block_id));
                 if let Some(row) = self.block_rows.iter_mut().find(|r| r.block_id == *block_id) {
                     row.status = AgentRowStatus::Running;
-                    row.iteration = *iteration;
                 }
             }
             ProgressEvent::BlockLog {
-                block_id,
                 agent_name,
                 iteration,
                 message,
@@ -1030,9 +1034,7 @@ impl RunningState {
                     agent_name.clone(),
                     format!("[iter {iteration}] {message}"),
                 );
-                if let Some(row) = self.block_rows.iter_mut().find(|r| r.block_id == *block_id) {
-                    row.last_log = crate::execution::truncate_chars(message, 60);
-                }
+                // (log message used for activity log only, not stored on row)
             }
             ProgressEvent::BlockFinished {
                 block_id,
@@ -1190,16 +1192,15 @@ impl ResultsState {
 impl EditPopupState {
     fn new() -> Self {
         Self {
-            show_edit_popup: false,
-            edit_popup_section: EditPopupSection::Providers,
-            edit_popup_cursor: 0,
-            edit_popup_timeout_cursor: 0,
-            edit_popup_field: EditField::ApiKey,
-            edit_popup_editing: false,
+            visible: false,
+            section: EditPopupSection::Providers,
+            cursor: 0,
+            timeout_cursor: 0,
+            field: EditField::ApiKey,
+            editing: false,
             edit_buffer: String::new(),
             model_picker_active: false,
             model_picker_loading: false,
-            model_picker_all_models: Vec::new(),
             model_picker_list: Vec::new(),
             model_picker_filter: String::new(),
             model_picker_cursor: 0,
@@ -1288,7 +1289,7 @@ impl RunState {
 
     pub fn push_log(&mut self, line: String) {
         self.recent_logs.push_back(line);
-        while self.recent_logs.len() > 20 {
+        while self.recent_logs.len() > RECENT_LOGS_CAP {
             self.recent_logs.pop_front();
         }
     }
@@ -1794,5 +1795,29 @@ mod tests {
         assert_eq!(entries.len(), 1);
         // Should be "[Block 1 Claude iter 1] fail" — agent appears exactly once
         assert_eq!(entries[0], "[Block 1 Claude iter 1] fail");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_executable_rejects_non_executable_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin_path = dir.path().join("fakecli");
+        std::fs::write(&bin_path, "").unwrap();
+        std::fs::set_permissions(&bin_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let result = super::find_executable("fakecli", std::iter::once(dir.path().to_path_buf()));
+        assert!(!result, "non-executable file should not be detected as CLI");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_executable_accepts_executable_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin_path = dir.path().join("fakecli2");
+        std::fs::write(&bin_path, "").unwrap();
+        std::fs::set_permissions(&bin_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let result = super::find_executable("fakecli2", std::iter::once(dir.path().to_path_buf()));
+        assert!(result, "executable file should be detected as CLI");
     }
 }

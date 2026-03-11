@@ -16,6 +16,9 @@ pub enum AppError {
 
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+
+    #[error("Pipeline error: {0}")]
+    Pipeline(String),
 }
 
 #[cfg(test)]

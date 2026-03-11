@@ -407,12 +407,19 @@ pub fn pipeline_help_lines(tab: usize) -> &'static [Line<'static>] {
 // Shared overlay renderer
 // ---------------------------------------------------------------------------
 
-pub fn draw_help_overlay(f: &mut Frame, state: &HelpPopupState, lines: &[Line<'_>], title: &str) {
+fn draw_scrollable_popup(
+    f: &mut Frame,
+    title: &str,
+    border_color: Color,
+    lines: Vec<Line<'_>>,
+    scroll: u16,
+    hints: Line<'_>,
+) {
     let area = centered_rect(70, 70, f.area());
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(border_color));
 
     f.render_widget(ratatui::widgets::Clear, area);
     let inner = block.inner(area);
@@ -430,8 +437,6 @@ pub fn draw_help_overlay(f: &mut Frame, state: &HelpPopupState, lines: &[Line<'_
     let content_height = sections[0].height as usize;
     let content_width = sections[0].width as usize;
 
-    // Estimate visual line count accounting for word-wrap.
-    // Each logical line takes ceil(width / content_width) visual rows.
     let visual_lines: usize = if content_width > 0 {
         lines
             .iter()
@@ -448,14 +453,17 @@ pub fn draw_help_overlay(f: &mut Frame, state: &HelpPopupState, lines: &[Line<'_
         lines.len()
     };
     let max_scroll = visual_lines.saturating_sub(content_height);
-    let scroll = (state.scroll as usize).min(max_scroll) as u16;
+    let scroll = (scroll as usize).min(max_scroll) as u16;
 
-    let text = Paragraph::new(lines.to_vec())
+    let text = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
         .scroll((scroll, 0));
     f.render_widget(text, sections[0]);
 
-    // Bottom bar — Tab/Shift+Tab hint only when multi-tab
+    f.render_widget(Paragraph::new(hints), sections[1]);
+}
+
+pub fn draw_help_overlay(f: &mut Frame, state: &HelpPopupState, lines: &[Line<'_>], title: &str) {
     let mut hints = vec![
         Span::styled("j/k, arrows, PgUp/PgDn", Style::default().fg(Color::Yellow)),
         Span::raw(": scroll  "),
@@ -470,7 +478,14 @@ pub fn draw_help_overlay(f: &mut Frame, state: &HelpPopupState, lines: &[Line<'_
     hints.push(Span::styled("Esc/q/?", Style::default().fg(Color::Yellow)));
     hints.push(Span::raw(": close"));
 
-    f.render_widget(Paragraph::new(Line::from(hints)), sections[1]);
+    draw_scrollable_popup(
+        f,
+        title,
+        Color::Cyan,
+        lines.to_vec(),
+        state.scroll,
+        Line::from(hints),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -478,72 +493,41 @@ pub fn draw_help_overlay(f: &mut Frame, state: &HelpPopupState, lines: &[Line<'_
 // ---------------------------------------------------------------------------
 
 pub fn draw_setup_analysis_popup(f: &mut Frame, state: &SetupAnalysisState) {
-    let area = centered_rect(70, 70, f.area());
-    let block = Block::default()
-        .title(" Setup Analysis ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow));
-
-    f.render_widget(ratatui::widgets::Clear, area);
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
-    if inner.width == 0 || inner.height == 0 {
-        return;
-    }
-
-    let sections = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(1)])
-        .split(inner);
-
     if state.loading {
-        let loading =
-            Paragraph::new("Analyzing setup...").style(Style::default().fg(Color::Yellow));
-        f.render_widget(loading, sections[0]);
-        let hint = Paragraph::new(Line::from(vec![
+        let loading_line = Line::from(Span::styled(
+            "Analyzing setup...",
+            Style::default().fg(Color::Yellow),
+        ));
+        let hints = Line::from(vec![
             Span::styled("Esc/q", Style::default().fg(Color::Yellow)),
             Span::raw(": close"),
-        ]));
-        f.render_widget(hint, sections[1]);
+        ]);
+        draw_scrollable_popup(
+            f,
+            " Setup Analysis ",
+            Color::Yellow,
+            vec![loading_line],
+            0,
+            hints,
+        );
         return;
     }
 
-    let content_height = sections[0].height as usize;
-    let content_width = sections[0].width as usize;
     let rendered = render_markdown(&state.content);
-    let lines = rendered.lines;
-
-    let visual_lines: usize = if content_width > 0 {
-        lines
-            .iter()
-            .map(|line| {
-                let w = line.width();
-                if w <= content_width {
-                    1
-                } else {
-                    w.div_ceil(content_width)
-                }
-            })
-            .sum()
-    } else {
-        lines.len()
-    };
-    let max_scroll = visual_lines.saturating_sub(content_height);
-    let scroll = (state.scroll as usize).min(max_scroll) as u16;
-
-    let text = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .scroll((scroll, 0));
-    f.render_widget(text, sections[0]);
-
     let hints = Line::from(vec![
         Span::styled("j/k, arrows, PgUp/PgDn", Style::default().fg(Color::Yellow)),
         Span::raw(": scroll  "),
         Span::styled("Esc/q", Style::default().fg(Color::Yellow)),
         Span::raw(": close"),
     ]);
-    f.render_widget(Paragraph::new(hints), sections[1]);
+    draw_scrollable_popup(
+        f,
+        " Setup Analysis ",
+        Color::Yellow,
+        rendered.lines,
+        state.scroll,
+        hints,
+    );
 }
 
 // ---------------------------------------------------------------------------

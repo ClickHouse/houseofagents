@@ -212,12 +212,7 @@ impl CliProvider {
     }
 
     fn clip(s: &str, max_chars: usize) -> String {
-        let clipped: String = s.chars().take(max_chars).collect();
-        if s.chars().count() > max_chars {
-            format!("{clipped}...")
-        } else {
-            clipped
-        }
+        crate::execution::truncate_chars(s, max_chars)
     }
 
     fn short_session(id: &str) -> String {
@@ -690,10 +685,22 @@ impl Provider for CliProvider {
             ));
             self.emit_live_log(format!("exit {}", status));
             if stdout_result.truncated {
-                debug_logs.push(format!(
-                    "stdout truncated to {} bytes",
-                    CLI_STDOUT_MAX_BYTES
-                ));
+                if codex_output_path.is_some() {
+                    // Codex routes the real answer to the -o file; stdout is
+                    // JSONL telemetry that can safely exceed the cap.
+                    debug_logs.push(format!(
+                        "stdout truncated to {} bytes (codex output file available)",
+                        CLI_STDOUT_MAX_BYTES
+                    ));
+                } else {
+                    let msg = format!(
+                        "stdout truncated at {} bytes — response is incomplete",
+                        CLI_STDOUT_MAX_BYTES
+                    );
+                    debug_logs.push(msg.clone());
+                    self.history.pop(); // remove orphaned user turn
+                    return Err(Self::provider_error_with_debug(bin, msg, &debug_logs));
+                }
             }
             if stderr_result.truncated {
                 debug_logs.push(format!(
@@ -738,12 +745,28 @@ impl Provider for CliProvider {
 
             let content = if self.kind == ProviderKind::OpenAI {
                 if let Some(path) = codex_output_path.as_ref() {
-                    let text = fs::read_to_string(path)
-                        .await
-                        .unwrap_or_else(|_| stdout_text.clone());
-                    let _ = fs::remove_file(path).await;
-                    debug_logs.push(format!("codex output chars: {}", text.chars().count()));
-                    text
+                    match fs::read_to_string(path).await {
+                        Ok(text) => {
+                            let _ = fs::remove_file(path).await;
+                            debug_logs.push(format!("codex output chars: {}", text.chars().count()));
+                            text
+                        }
+                        Err(e) => {
+                            let _ = fs::remove_file(path).await;
+                            // Clear session state: we can't confirm the turn
+                            // completed locally, so resuming would create a
+                            // context gap.  Fall back to history-based mode.
+                            self.session_id = None;
+                            self.session_started = false;
+                            self.history.pop(); // remove orphaned user turn
+                            let msg = format!(
+                                "failed to read codex output file {}: {e}",
+                                path.display()
+                            );
+                            debug_logs.push(msg.clone());
+                            return Err(Self::provider_error_with_debug(bin, msg, &debug_logs));
+                        }
+                    }
                 } else {
                     stdout_text
                 }

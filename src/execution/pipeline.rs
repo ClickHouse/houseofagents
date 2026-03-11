@@ -13,8 +13,9 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 
+const MAX_TERMINAL_OUTPUTS_BYTES: usize = 512 * 1024; // 512 KB cap
+
 pub type BlockId = u32;
-#[allow(dead_code)]
 type ProviderPool = HashMap<(String, String), Arc<Mutex<Box<dyn provider::Provider>>>>;
 type PipelineAgentConfigs = HashMap<String, (ProviderKind, crate::config::ProviderConfig, bool)>;
 
@@ -452,7 +453,6 @@ impl PipelineDefinition {
 
 /// Blocks with no incoming regular connections (DAG roots).
 /// Loop connections are back-edges and excluded.
-#[allow(dead_code)]
 pub fn root_blocks(def: &PipelineDefinition) -> Vec<BlockId> {
     let has_incoming: HashSet<BlockId> = def.connections.iter().map(|c| c.to).collect();
     def.blocks
@@ -475,6 +475,8 @@ pub fn terminal_blocks(def: &PipelineDefinition) -> Vec<BlockId> {
 
 /// Direct predecessors of a block via regular connections only.
 /// Loop connections are back-edges and excluded.
+/// Uses the precomputed reverse adjacency from `RegularGraph` when available;
+/// falls back to linear scan for callers that don't have a graph handy.
 pub fn upstream_of(def: &PipelineDefinition, id: BlockId) -> Vec<BlockId> {
     def.connections
         .iter()
@@ -518,7 +520,7 @@ pub fn topological_layers(def: &PipelineDefinition) -> Result<Vec<Vec<BlockId>>,
         for &id in &layer {
             if let Some(children) = downstream.get(&id) {
                 for &child in children {
-                    let deg = in_degree.get_mut(&child).unwrap();
+                    let Some(deg) = in_degree.get_mut(&child) else { continue; };
                     *deg -= 1;
                     if *deg == 0 {
                         next_queue.push(child);
@@ -668,6 +670,7 @@ impl RegularGraph {
 }
 
 /// Sub-DAG for a single loop-back connection.
+#[derive(Clone)]
 pub(crate) struct LoopSubDag {
     pub blocks: HashSet<BlockId>,
     pub internal_in_degree: HashMap<BlockId, usize>,
@@ -763,7 +766,6 @@ fn build_loop_sub_dag(graph: &RegularGraph, blocks: HashSet<BlockId>, to: BlockI
 pub(crate) struct PreparedLoops {
     pub sub_dags: HashMap<(BlockId, BlockId), LoopSubDag>,
     pub block_to_loop: HashMap<BlockId, (BlockId, BlockId)>,
-    pub from_set: HashSet<BlockId>,
 }
 
 /// Prepare all loop sub-DAGs from a pipeline definition.
@@ -772,7 +774,6 @@ pub(crate) fn prepare_loops(def: &PipelineDefinition) -> Option<PreparedLoops> {
     let graph = RegularGraph::from_def(def);
     let mut sub_dags = HashMap::new();
     let mut block_to_loop = HashMap::new();
-    let mut from_set = HashSet::new();
 
     for lc in &def.loop_connections {
         let blocks = compute_loop_sub_dag(&graph, lc.from, lc.to)?;
@@ -781,14 +782,12 @@ pub(crate) fn prepare_loops(def: &PipelineDefinition) -> Option<PreparedLoops> {
         for &bid in &sub_dag.blocks {
             block_to_loop.insert(bid, key);
         }
-        from_set.insert(lc.from);
         sub_dags.insert(key, sub_dag);
     }
 
     Some(PreparedLoops {
         sub_dags,
         block_to_loop,
-        from_set,
     })
 }
 
@@ -823,15 +822,29 @@ pub fn loop_extra_tasks(def: &PipelineDefinition) -> usize {
 
 /// Scan grid left-to-right, top-to-bottom for first unoccupied slot.
 pub fn next_free_position(def: &PipelineDefinition) -> (u16, u16) {
+    if def.blocks.is_empty() {
+        return (0, 0);
+    }
     let occupied: HashSet<(u16, u16)> = def.blocks.iter().map(|b| b.position).collect();
-    for row in 0u16..100 {
-        for col in 0u16..100 {
+    let max_row = def.blocks.iter().map(|b| b.position.1).max().unwrap_or(0).min(99);
+    let max_col = def.blocks.iter().map(|b| b.position.0).max().unwrap_or(0).min(99);
+    // Search within existing bounds + 1 row, capped to prevent hangs on absurd coordinates
+    for row in 0..=max_row + 1 {
+        for col in 0..=max_col + 1 {
             if !occupied.contains(&(col, row)) {
                 return (col, row);
             }
         }
     }
-    (0, 0)
+    // Fallback: walk column 0 from row max_row+2 until we find an unoccupied cell
+    let mut fallback_row = max_row + 2;
+    while occupied.contains(&(0, fallback_row)) {
+        fallback_row = fallback_row.saturating_add(1);
+        if fallback_row == u16::MAX {
+            break;
+        }
+    }
+    (0, fallback_row)
 }
 
 // ---------------------------------------------------------------------------
@@ -1256,6 +1269,7 @@ where
 
     // Build adjacency structures with replica-weighted in-degree (regular connections only)
     let graph = RegularGraph::from_def(def);
+    let block_map: HashMap<BlockId, &PipelineBlock> = def.blocks.iter().map(|b| (b.id, b)).collect();
     let mut in_degree: HashMap<BlockId, usize> = def.blocks.iter().map(|b| (b.id, 0)).collect();
     let mut downstream: HashMap<BlockId, Vec<BlockId>> = HashMap::new();
     for conn in &def.connections {
@@ -1270,15 +1284,15 @@ where
         .as_ref()
         .map(|p| p.block_to_loop.clone())
         .unwrap_or_default();
-    let _from_set: HashSet<BlockId> = prepared
-        .as_ref()
-        .map(|p| p.from_set.clone())
-        .unwrap_or_default();
 
+    let terminals = terminal_blocks(def);
     let mut previous_terminal_outputs = String::new();
 
     for iteration in 1..=def.iterations {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            break;
+        }
+        if progress_tx.is_closed() {
             break;
         }
 
@@ -1303,18 +1317,15 @@ where
         let mut replica_outputs: HashMap<u32, String> = HashMap::new();
         let mut completed = 0usize;
 
-        // Loop runtime state per iteration
-        let mut loop_state: HashMap<(BlockId, BlockId), LoopRuntimeState> = if prepared.is_some() {
+        // Loop runtime state per iteration (clone from prepared sub_dags)
+        let mut loop_state: HashMap<(BlockId, BlockId), LoopRuntimeState> = if let Some(ref p) = prepared {
             def.loop_connections
                 .iter()
-                .map(|lc| {
+                .filter_map(|lc| {
                     let key = (lc.from, lc.to);
-                    // Re-build sub_dag for each iteration from prepared data
-                    let sub_dag_blocks =
-                        compute_loop_sub_dag(&graph, lc.from, lc.to).unwrap_or_default();
-                    let sub_dag = build_loop_sub_dag(&graph, sub_dag_blocks, lc.to);
+                    let sub_dag = p.sub_dags.get(&key)?.clone();
                     let extra = sub_dag.total_replicas * lc.count as usize;
-                    (
+                    Some((
                         key,
                         LoopRuntimeState {
                             remaining: lc.count,
@@ -1325,7 +1336,7 @@ where
                             extra_tasks_remaining: extra,
                             abandoned: false,
                         },
-                    )
+                    ))
                 })
                 .collect()
         } else {
@@ -1357,7 +1368,7 @@ where
                         break;
                     }
 
-                    let block = match def.blocks.iter().find(|b| b.id == block_id) {
+                    let block = match block_map.get(&block_id).copied() {
                         Some(b) => b,
                         None => {
                             let replica_count = rt.logical_to_runtime.get(&block_id)
@@ -1567,7 +1578,7 @@ where
                                     )
                                 }
                             } else {
-                                unreachable!("loop_pass > 0 but block not in a loop")
+                                return Err(AppError::Pipeline("loop_pass > 0 but block not in a loop".into()))
                             }
                         } else {
                             build_pipeline_block_message(
@@ -1610,6 +1621,7 @@ where
                                             }
                                         }
                                         if let Some(deg) = current_in_degree.get_mut(&child) {
+                                            debug_assert!(*deg > 0, "in-degree underflow for block {child}");
                                             *deg = deg.saturating_sub(1);
                                             if *deg == 0 {
                                                 let _ = ready_tx.send(child);
@@ -1639,8 +1651,8 @@ where
                         let sem_clone = concurrency_sem.clone();
                         let task_loop_pass = current_loop_pass;
                         let task_handle = tasks.spawn(async move {
-                            let mut guard = provider_arc.lock().await;
                             let _permit = sem_clone.acquire().await.expect("semaphore closed");
+                            let mut guard = provider_arc.lock().await;
 
                             let (live_tx, mut live_rx) = mpsc::unbounded_channel::<String>();
                             guard.set_live_log_sender(Some(live_tx));
@@ -1702,7 +1714,7 @@ where
                                         });
                                     }
                                     let path = task_output.run_dir().join(&task_filename);
-                                    if let Err(e) = std::fs::write(&path, &resp.content) {
+                                    if let Err(e) = tokio::fs::write(&path, &resp.content).await {
                                         let error = format!("Failed to write output: {e}");
                                         let _ = task_output.append_error(&format!(
                                             "runtime {rid} {task_agent_name} iter{iteration}: {error}"
@@ -1770,7 +1782,7 @@ where
                             (Some(sid), block_loop_pass.get(&sid).copied().unwrap_or(0))
                         }
                         Err(join_error) => {
-                            if let Some(metadata) = task_metadata.get(&join_error.id()).cloned() {
+                            if let Some(metadata) = task_metadata.remove(&join_error.id()) {
                                 let error = format!("Pipeline worker panicked: {join_error}");
                                 let _ = progress_tx.send(ProgressEvent::BlockError {
                                     block_id: metadata.runtime_id,
@@ -1940,6 +1952,7 @@ where
                                     if in_sub_dag {
                                         // Internal child: decrement normally
                                         if let Some(deg) = current_in_degree.get_mut(&child) {
+                                            debug_assert!(*deg > 0, "in-degree underflow for block {child}");
                                             *deg = deg.saturating_sub(1);
                                             if *deg == 0 {
                                                 let _ = ready_tx.send(child);
@@ -1954,10 +1967,12 @@ where
                         // CASE C: Block not in any loop — normal downstream propagation
                         if let Some(children) = downstream.get(&source_id) {
                             for &child in children {
-                                let deg = current_in_degree.get_mut(&child).unwrap();
-                                *deg -= 1;
-                                if *deg == 0 {
-                                    let _ = ready_tx.send(child);
+                                if let Some(deg) = current_in_degree.get_mut(&child) {
+                                    debug_assert!(*deg > 0, "in-degree underflow for block {child}");
+                                    *deg = deg.saturating_sub(1);
+                                    if *deg == 0 {
+                                        let _ = ready_tx.send(child);
+                                    }
                                 }
                             }
                         }
@@ -1970,14 +1985,11 @@ where
         let _ = progress_tx.send(ProgressEvent::IterationComplete { iteration });
 
         // Collect labeled terminal outputs for next iteration
-        let terminals = terminal_blocks(def);
         previous_terminal_outputs.clear();
         for &tid in &terminals {
             if let Some(rids) = rt.logical_to_runtime.get(&tid) {
-                let needs_label = def
-                    .blocks
-                    .iter()
-                    .find(|b| b.id == tid)
+                let needs_label = block_map
+                    .get(&tid)
                     .map(|b| b.replicas > 1 || b.agents.len() > 1)
                     .unwrap_or(false);
                 for &rid in rids {
@@ -1997,6 +2009,18 @@ where
                     }
                 }
             }
+        }
+
+        // Free full LLM responses now that terminal outputs have been collected
+        replica_outputs.clear();
+
+        if previous_terminal_outputs.len() > MAX_TERMINAL_OUTPUTS_BYTES {
+            // Floor to a char boundary to avoid panicking on multibyte UTF-8
+            let mut end = MAX_TERMINAL_OUTPUTS_BYTES;
+            while end > 0 && !previous_terminal_outputs.is_char_boundary(end) {
+                end -= 1;
+            }
+            previous_terminal_outputs.truncate(end);
         }
     }
 
@@ -5054,5 +5078,47 @@ keep_across_iterations = false
         def.blocks[0].replicas = 3;
         let graph = RegularGraph::from_def(&def);
         assert_eq!(graph.replicas[&1], 6); // 2 agents × 3 replicas
+    }
+
+    // -- regression: next_free_position with far-out coordinates --
+
+    #[test]
+    fn next_free_position_capped_with_extreme_coordinates() {
+        // A block at u16::MAX should not cause a hang; search is capped at 100×100
+        let d = def_with(vec![block(1, 60000, 60000)], vec![]);
+        let pos = next_free_position(&d);
+        assert_ne!(pos, (60000, 60000));
+        // The returned position must not collide with any existing block
+        assert!(!d.blocks.iter().any(|b| b.position == pos));
+    }
+
+    #[test]
+    fn next_free_position_fallback_avoids_occupied_out_of_range() {
+        // Fallback row (0, 101) is already occupied — must skip past it
+        let d = def_with(
+            vec![block(1, 60000, 60000), block(2, 0, 101)],
+            vec![],
+        );
+        let pos = next_free_position(&d);
+        assert!(!d.blocks.iter().any(|b| b.position == pos));
+    }
+
+    // -- regression: UTF-8 safe truncation --
+
+    #[test]
+    fn truncate_at_char_boundary_does_not_panic() {
+        // Simulate the pipeline truncation logic with multibyte content
+        let mut buf = "á".repeat(300_000); // 2 bytes each = 600KB > 512KB cap
+        let max = super::MAX_TERMINAL_OUTPUTS_BYTES;
+        if buf.len() > max {
+            let mut end = max;
+            while end > 0 && !buf.is_char_boundary(end) {
+                end -= 1;
+            }
+            buf.truncate(end);
+        }
+        assert!(buf.len() <= max);
+        // Verify it's still valid UTF-8
+        assert!(std::str::from_utf8(buf.as_bytes()).is_ok());
     }
 }

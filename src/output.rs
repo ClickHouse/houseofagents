@@ -24,10 +24,8 @@ const NOUNS: &[&str] = &[
 ];
 
 fn generate_random_name() -> String {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
-    let adj = ADJECTIVES[rng.gen_range(0..ADJECTIVES.len())];
-    let noun = NOUNS[rng.gen_range(0..NOUNS.len())];
+    let adj = ADJECTIVES[fastrand::usize(..ADJECTIVES.len())];
+    let noun = NOUNS[fastrand::usize(..NOUNS.len())];
     format!("{adj}-{noun}")
 }
 
@@ -61,16 +59,14 @@ fn is_old_timestamp_leaf(leaf: &str) -> bool {
 /// Check if a directory name matches the legacy flat format: YYYYMMDD_HHMMSS[_...]
 fn is_legacy_flat(dir_name: &str) -> bool {
     let mut parts = dir_name.splitn(3, '_');
-    let date_part = match parts.next() {
-        Some(p) if p.len() == 8 && p.bytes().all(|b| b.is_ascii_digit()) => p,
+    match parts.next() {
+        Some(p) if p.len() == 8 && p.bytes().all(|b| b.is_ascii_digit()) => {}
         _ => return false,
-    };
-    let time_part = match parts.next() {
-        Some(p) if p.len() == 6 && p.bytes().all(|b| b.is_ascii_digit()) => p,
+    }
+    match parts.next() {
+        Some(p) if p.len() == 6 && p.bytes().all(|b| b.is_ascii_digit()) => {}
         _ => return false,
-    };
-    let _ = date_part;
-    let _ = time_part;
+    }
     true
 }
 
@@ -185,8 +181,14 @@ impl OutputManager {
             return;
         };
         let link = base_dir.join("latest");
-        let _ = std::fs::remove_file(&link);
-        let _ = symlink(relative, &link);
+        if let Err(e) = std::fs::remove_file(&link) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                eprintln!("warning: failed to remove latest symlink: {e}");
+            }
+        }
+        if let Err(e) = symlink(relative, &link) {
+            eprintln!("warning: failed to create latest symlink: {e}");
+        }
     }
 
     fn append_run_index(base_dir: &Path, run_dir: &Path, session_name: Option<&str>) {
@@ -215,11 +217,14 @@ impl OutputManager {
             block.push_str(&format!("session_name = {name_val}\n"));
         }
 
-        let _ = std::fs::OpenOptions::new()
+        if let Err(e) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&index_path)
-            .and_then(|mut f| f.write_all(block.as_bytes()));
+            .and_then(|mut f| f.write_all(block.as_bytes()))
+        {
+            eprintln!("warning: failed to append to run index: {e}");
+        }
     }
 
     /// Enumerate all run directories under base_dir (legacy flat, old grouped
@@ -445,27 +450,6 @@ impl OutputManager {
     ) -> Result<PathBuf, AppError> {
         let sanitized = Self::sanitize_session_name(agent_name);
         let filename = format!("{}_iter{}.md", sanitized, iteration);
-        let path = self.run_dir.join(&filename);
-        std::fs::write(&path, content)?;
-        Ok(path)
-    }
-
-    #[allow(dead_code)]
-    pub fn write_block_output(
-        &self,
-        block_id: u32,
-        block_name: &str,
-        agent_name: &str,
-        iteration: u32,
-        content: &str,
-    ) -> Result<PathBuf, AppError> {
-        let name_key = if block_name.trim().is_empty() {
-            format!("block{}", block_id)
-        } else {
-            format!("{}_b{}", Self::sanitize_session_name(block_name), block_id)
-        };
-        let sanitized = Self::sanitize_session_name(agent_name);
-        let filename = format!("{}_{}_iter{}.md", name_key, sanitized, iteration);
         let path = self.run_dir.join(&filename);
         std::fs::write(&path, content)?;
         Ok(path)

@@ -4,7 +4,7 @@ pub mod gemini;
 pub mod openai;
 pub(crate) mod sse;
 
-use crate::config::{AgentConfig, ProviderConfig};
+use crate::config::ProviderConfig;
 use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -217,9 +217,13 @@ pub fn prune_history_bytes(history: &mut Vec<Message>, max_bytes: usize) {
         return;
     }
     let mut current = total;
-    while current > max_bytes && history.len() > 1 {
-        current -= history[0].content.len();
-        history.remove(0);
+    let mut drain_count = 0;
+    while current > max_bytes && drain_count < history.len() - 1 {
+        current -= history[drain_count].content.len();
+        drain_count += 1;
+    }
+    if drain_count > 0 {
+        history.drain(..drain_count);
     }
 }
 
@@ -288,26 +292,6 @@ pub fn create_provider(
         ProviderKind::OpenAI => Box::new(openai::OpenAIProvider::new(base)),
         ProviderKind::Gemini => Box::new(gemini::GeminiProvider::new(base)),
     }
-}
-
-#[allow(dead_code)]
-pub fn create_provider_from_agent(
-    agent: &AgentConfig,
-    client: reqwest::Client,
-    max_tokens: u32,
-    max_history_messages: usize,
-    max_history_bytes: usize,
-    cli_timeout_seconds: u64,
-) -> Box<dyn Provider> {
-    create_provider(
-        agent.provider,
-        &agent.to_provider_config(),
-        client,
-        max_tokens,
-        max_history_messages,
-        max_history_bytes,
-        cli_timeout_seconds,
-    )
 }
 
 pub fn validate_effort_config(

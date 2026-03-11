@@ -118,8 +118,6 @@ pub(super) fn start_pipeline_execution(app: &mut App) {
                 agent_name: info.agent.clone(),
                 provider,
                 status: crate::app::AgentRowStatus::Pending,
-                iteration: 0,
-                last_log: String::new(),
             }
         })
         .collect();
@@ -858,8 +856,6 @@ fn continue_single_execution(
             name: name.clone(),
             provider: agent_config.provider,
             status: crate::app::AgentRowStatus::Pending,
-            iteration: 0,
-            last_log: String::new(),
         });
         use_cli_by_agent.insert(name.clone(), agent_config.use_cli);
 

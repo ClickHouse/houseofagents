@@ -5,11 +5,11 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 #[derive(Debug)]
-#[allow(dead_code)]
 pub enum Event {
     Key(KeyEvent),
     Paste(String),
     Tick,
+    #[allow(dead_code)] // fields dispatched by crossterm; kept for future use
     Resize(u16, u16),
 }
 
@@ -38,7 +38,10 @@ impl EventHandler {
                 if worker_shutdown.load(Ordering::Relaxed) {
                     break;
                 }
-                if event::poll(poll_interval).unwrap_or(false) {
+                if event::poll(poll_interval).unwrap_or_else(|e| {
+                    eprintln!("terminal poll error: {e}");
+                    false
+                }) {
                     match event::read() {
                         Ok(CrosstermEvent::Key(key)) => {
                             if sender.send(Event::Key(key)).is_err() {
