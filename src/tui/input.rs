@@ -574,15 +574,17 @@ pub(super) fn handle_pipeline_key(app: &mut App, key: KeyEvent) {
                     } else if pipeline_mod::would_create_cycle(&app.pipeline.pipeline_def, from, to)
                     {
                         app.error_modal = Some("Would create a cycle".into());
-                    } else if app.pipeline.pipeline_def.loop_connections.iter()
-                        .any(|lc| (lc.from == from && lc.to == to) || (lc.from == to && lc.to == from))
-                    {
-                        app.error_modal = Some("A loop connection exists between these blocks".into());
                     } else {
                         app.pipeline
                             .pipeline_def
                             .connections
                             .push(pipeline_mod::PipelineConnection { from, to });
+                        let warnings = pipeline_mod::prune_invalid_loops(
+                            &mut app.pipeline.pipeline_def,
+                        );
+                        if !warnings.is_empty() {
+                            app.error_modal = Some(warnings.join("\n"));
+                        }
                         app.pipeline.pipeline_connecting_from = None;
                     }
                 }
@@ -1445,6 +1447,12 @@ pub(super) fn handle_pipeline_remove_conn_key(app: &mut App, key: KeyEvent) {
                 match conn_ref {
                     ConnRef::Regular(idx) => {
                         app.pipeline.pipeline_def.connections.remove(*idx);
+                        let warnings = pipeline_mod::prune_invalid_loops(
+                            &mut app.pipeline.pipeline_def,
+                        );
+                        if !warnings.is_empty() {
+                            app.error_modal = Some(warnings.join("\n"));
+                        }
                     }
                     ConnRef::Loop(idx) => {
                         app.pipeline.pipeline_def.loop_connections.remove(*idx);
@@ -1474,39 +1482,48 @@ fn handle_pipeline_loop_connect_key(app: &mut App, key: KeyEvent) {
                     .pipeline_def
                     .loop_connections
                     .iter()
-                    .any(|lc| {
-                        lc.from == from || lc.to == from || lc.from == to || lc.to == to
-                    })
+                    .any(|lc| lc.from == from || lc.to == from || lc.from == to || lc.to == to)
                 {
-                    app.error_modal = Some("Block already in a loop connection".into());
-                } else if app
-                    .pipeline
-                    .pipeline_def
-                    .connections
-                    .iter()
-                    .any(|c| {
-                        (c.from == from && c.to == to) || (c.from == to && c.to == from)
-                    })
-                {
-                    app.error_modal =
-                        Some("A regular connection exists between these blocks".into());
-                } else if pipeline_mod::would_create_cycle(
-                    &app.pipeline.pipeline_def,
-                    from,
-                    to,
-                ) {
-                    app.error_modal = Some("Would create a cycle".into());
+                    app.error_modal = Some("Block already a loop endpoint".into());
                 } else {
-                    app.pipeline
-                        .pipeline_def
-                        .loop_connections
-                        .push(pipeline_mod::LoopConnection {
-                            from,
-                            to,
-                            count: 1,
-                            prompt: String::new(),
-                        });
-                    app.pipeline.pipeline_loop_connecting_from = None;
+                    // Ancestry validation: `to` must be a regular-graph ancestor of `from`
+                    let graph = pipeline_mod::RegularGraph::from_def(&app.pipeline.pipeline_def);
+                    match pipeline_mod::compute_loop_sub_dag(&graph, from, to) {
+                        None => {
+                            app.error_modal = Some(
+                                "Target is not an ancestor of source via regular connections".into(),
+                            );
+                        }
+                        Some(sub_dag_blocks) => {
+                            // Check for overlapping sub-DAGs with existing loops
+                            let mut overlap = false;
+                            for existing_lc in &app.pipeline.pipeline_def.loop_connections {
+                                if let Some(existing_blocks) = pipeline_mod::compute_loop_sub_dag(
+                                    &graph, existing_lc.from, existing_lc.to,
+                                ) {
+                                    if sub_dag_blocks.iter().any(|b| existing_blocks.contains(b)) {
+                                        overlap = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if overlap {
+                                app.error_modal =
+                                    Some("Loop sub-DAGs would overlap".into());
+                            } else {
+                                app.pipeline
+                                    .pipeline_def
+                                    .loop_connections
+                                    .push(pipeline_mod::LoopConnection {
+                                        from,
+                                        to,
+                                        count: 1,
+                                        prompt: String::new(),
+                                    });
+                                app.pipeline.pipeline_loop_connecting_from = None;
+                            }
+                        }
+                    }
                 }
             }
         }

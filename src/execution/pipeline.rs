@@ -36,6 +36,8 @@ struct PipelineMessageContext<'a> {
     output: &'a OutputManager,
     prompt_context: &'a PromptRuntimeContext,
     runtime_table: &'a RuntimeReplicaTable,
+    block_to_loop: &'a HashMap<BlockId, (BlockId, BlockId)>,
+    block_loop_pass: &'a HashMap<BlockId, u32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -351,14 +353,11 @@ impl PipelineDefinition {
 // Graph utilities
 // ---------------------------------------------------------------------------
 
-/// Blocks with no incoming connections (DAG roots).
-/// Loop forward edges (from→to) count as incoming for `to`.
+/// Blocks with no incoming regular connections (DAG roots).
+/// Loop connections are back-edges and excluded.
 #[allow(dead_code)]
 pub fn root_blocks(def: &PipelineDefinition) -> Vec<BlockId> {
-    let mut has_incoming: HashSet<BlockId> = def.connections.iter().map(|c| c.to).collect();
-    for lc in &def.loop_connections {
-        has_incoming.insert(lc.to);
-    }
+    let has_incoming: HashSet<BlockId> = def.connections.iter().map(|c| c.to).collect();
     def.blocks
         .iter()
         .filter(|b| !has_incoming.contains(&b.id))
@@ -366,13 +365,10 @@ pub fn root_blocks(def: &PipelineDefinition) -> Vec<BlockId> {
         .collect()
 }
 
-/// Blocks with no outgoing connections (DAG terminals).
-/// Loop forward edges (from→to) count as outgoing for `from`.
+/// Blocks with no outgoing regular connections (DAG terminals).
+/// Loop connections are back-edges and excluded.
 pub fn terminal_blocks(def: &PipelineDefinition) -> Vec<BlockId> {
-    let mut has_outgoing: HashSet<BlockId> = def.connections.iter().map(|c| c.from).collect();
-    for lc in &def.loop_connections {
-        has_outgoing.insert(lc.from);
-    }
+    let has_outgoing: HashSet<BlockId> = def.connections.iter().map(|c| c.from).collect();
     def.blocks
         .iter()
         .filter(|b| !has_outgoing.contains(&b.id))
@@ -380,23 +376,18 @@ pub fn terminal_blocks(def: &PipelineDefinition) -> Vec<BlockId> {
         .collect()
 }
 
-/// Direct predecessors of a block.
-/// Includes loop forward edges: if block is `to` of a loop, `from` is upstream.
+/// Direct predecessors of a block via regular connections only.
+/// Loop connections are back-edges and excluded.
 pub fn upstream_of(def: &PipelineDefinition, id: BlockId) -> Vec<BlockId> {
-    let mut result: Vec<BlockId> = def.connections
+    def.connections
         .iter()
         .filter(|c| c.to == id)
         .map(|c| c.from)
-        .collect();
-    for lc in &def.loop_connections {
-        if lc.to == id {
-            result.push(lc.from);
-        }
-    }
-    result
+        .collect()
 }
 
 /// Kahn's algorithm: returns parallelizable layers or Err on cycle.
+/// Only considers regular connections. Loop connections are back-edges.
 pub fn topological_layers(def: &PipelineDefinition) -> Result<Vec<Vec<BlockId>>, CycleError> {
     let block_ids: HashSet<BlockId> = def.blocks.iter().map(|b| b.id).collect();
     let mut in_degree: HashMap<BlockId, usize> = block_ids.iter().map(|&id| (id, 0)).collect();
@@ -405,10 +396,6 @@ pub fn topological_layers(def: &PipelineDefinition) -> Result<Vec<Vec<BlockId>>,
     for conn in &def.connections {
         *in_degree.entry(conn.to).or_default() += 1;
         downstream.entry(conn.from).or_default().push(conn.to);
-    }
-    for lc in &def.loop_connections {
-        *in_degree.entry(lc.to).or_default() += 1;
-        downstream.entry(lc.from).or_default().push(lc.to);
     }
 
     let mut queue: VecDeque<BlockId> = in_degree
@@ -464,7 +451,7 @@ impl std::fmt::Display for CycleError {
 }
 
 /// DFS reachability: would adding `from → to` create a cycle?
-/// Checks if `from` is reachable from `to` in the existing graph.
+/// Only considers regular connections. Loop connections are back-edges.
 pub fn would_create_cycle(def: &PipelineDefinition, from: BlockId, to: BlockId) -> bool {
     if from == to {
         return true;
@@ -474,9 +461,6 @@ pub fn would_create_cycle(def: &PipelineDefinition, from: BlockId, to: BlockId) 
         let mut map: HashMap<BlockId, Vec<BlockId>> = HashMap::new();
         for conn in &def.connections {
             map.entry(conn.from).or_default().push(conn.to);
-        }
-        for lc in &def.loop_connections {
-            map.entry(lc.from).or_default().push(lc.to);
         }
         map
     };
@@ -497,6 +481,239 @@ pub fn would_create_cycle(def: &PipelineDefinition, from: BlockId, to: BlockId) 
         }
     }
     false
+}
+
+/// Remove loop connections whose sub-DAG is no longer valid after a graph edit.
+/// Checks both ancestry validity and pairwise sub-DAG disjointness.
+/// Returns descriptions of removed loops for user feedback.
+pub fn prune_invalid_loops(def: &mut PipelineDefinition) -> Vec<String> {
+    if def.loop_connections.is_empty() {
+        return Vec::new();
+    }
+    let graph = RegularGraph::from_def(def);
+    let mut removed = Vec::new();
+
+    // Phase 1: remove loops with broken ancestry
+    def.loop_connections.retain(|lc| {
+        if compute_loop_sub_dag(&graph, lc.from, lc.to).is_some() {
+            true
+        } else {
+            removed.push(format!(
+                "Loop {}→{} removed (ancestry broken by edge change)",
+                lc.from, lc.to
+            ));
+            false
+        }
+    });
+
+    // Phase 2: remove loops whose sub-DAGs overlap with an earlier loop
+    if def.loop_connections.len() > 1 {
+        let mut kept_sub_dags: Vec<((BlockId, BlockId), HashSet<BlockId>)> = Vec::new();
+        let mut overlap_indices: HashSet<usize> = HashSet::new();
+        for (i, lc) in def.loop_connections.iter().enumerate() {
+            if let Some(blocks) = compute_loop_sub_dag(&graph, lc.from, lc.to) {
+                let overlaps = kept_sub_dags.iter().any(|(_, existing)| {
+                    blocks.iter().any(|b| existing.contains(b))
+                });
+                if overlaps {
+                    removed.push(format!(
+                        "Loop {}→{} removed (sub-DAG overlaps with another loop after edge change)",
+                        lc.from, lc.to
+                    ));
+                    overlap_indices.insert(i);
+                } else {
+                    kept_sub_dags.push(((lc.from, lc.to), blocks));
+                }
+            }
+        }
+        if !overlap_indices.is_empty() {
+            let mut idx = 0;
+            def.loop_connections.retain(|_| {
+                let keep = !overlap_indices.contains(&idx);
+                idx += 1;
+                keep
+            });
+        }
+    }
+
+    removed
+}
+
+// ---------------------------------------------------------------------------
+// Loop-back analysis layer
+// ---------------------------------------------------------------------------
+
+/// Precomputed regular-graph adjacency (excludes loop connections).
+pub(crate) struct RegularGraph {
+    pub forward: HashMap<BlockId, Vec<BlockId>>,
+    pub reverse: HashMap<BlockId, Vec<BlockId>>,
+    pub replicas: HashMap<BlockId, u32>,
+}
+
+impl RegularGraph {
+    pub fn from_def(def: &PipelineDefinition) -> Self {
+        let mut forward: HashMap<BlockId, Vec<BlockId>> = HashMap::new();
+        let mut reverse: HashMap<BlockId, Vec<BlockId>> = HashMap::new();
+        let mut replicas: HashMap<BlockId, u32> = HashMap::new();
+        for block in &def.blocks {
+            replicas.insert(block.id, block.replicas);
+        }
+        for conn in &def.connections {
+            forward.entry(conn.from).or_default().push(conn.to);
+            reverse.entry(conn.to).or_default().push(conn.from);
+        }
+        RegularGraph { forward, reverse, replicas }
+    }
+}
+
+/// Sub-DAG for a single loop-back connection.
+pub(crate) struct LoopSubDag {
+    pub blocks: HashSet<BlockId>,
+    pub internal_in_degree: HashMap<BlockId, usize>,
+    pub total_replicas: usize,
+    pub deferred_external_edges: HashMap<BlockId, Vec<(BlockId, usize)>>,
+}
+
+/// Compute the set of blocks on all regular paths from `to` to `from`.
+/// Returns `None` if `to` is not a regular-graph ancestor of `from`.
+pub(crate) fn compute_loop_sub_dag(
+    graph: &RegularGraph,
+    from: BlockId,
+    to: BlockId,
+) -> Option<HashSet<BlockId>> {
+    // BFS forward from `to`
+    let mut forward_reachable = HashSet::new();
+    {
+        let mut queue = VecDeque::new();
+        queue.push_back(to);
+        forward_reachable.insert(to);
+        while let Some(node) = queue.pop_front() {
+            if let Some(children) = graph.forward.get(&node) {
+                for &child in children {
+                    if forward_reachable.insert(child) {
+                        queue.push_back(child);
+                    }
+                }
+            }
+        }
+    }
+    // BFS backward from `from`
+    let mut backward_reachable = HashSet::new();
+    {
+        let mut queue = VecDeque::new();
+        queue.push_back(from);
+        backward_reachable.insert(from);
+        while let Some(node) = queue.pop_front() {
+            if let Some(parents) = graph.reverse.get(&node) {
+                for &parent in parents {
+                    if backward_reachable.insert(parent) {
+                        queue.push_back(parent);
+                    }
+                }
+            }
+        }
+    }
+    let intersection: HashSet<BlockId> = forward_reachable
+        .intersection(&backward_reachable)
+        .copied()
+        .collect();
+    if intersection.contains(&to) && intersection.contains(&from) {
+        Some(intersection)
+    } else {
+        None
+    }
+}
+
+/// Build a full `LoopSubDag` from a block set.
+fn build_loop_sub_dag(
+    graph: &RegularGraph,
+    blocks: HashSet<BlockId>,
+    to: BlockId,
+) -> LoopSubDag {
+    let mut internal_in_degree: HashMap<BlockId, usize> = blocks.iter().map(|&b| (b, 0)).collect();
+    let mut deferred_external_edges: HashMap<BlockId, Vec<(BlockId, usize)>> = HashMap::new();
+    let mut total_replicas: usize = 0;
+
+    for &bid in &blocks {
+        let r = graph.replicas.get(&bid).copied().unwrap_or(1) as usize;
+        total_replicas += r;
+        if let Some(children) = graph.forward.get(&bid) {
+            for &child in children {
+                if blocks.contains(&child) {
+                    *internal_in_degree.entry(child).or_default() += r;
+                } else {
+                    deferred_external_edges
+                        .entry(bid)
+                        .or_default()
+                        .push((child, r));
+                }
+            }
+        }
+    }
+    // `to` always gets in-degree 0 (entry point)
+    internal_in_degree.insert(to, 0);
+
+    LoopSubDag {
+        blocks,
+        internal_in_degree,
+        total_replicas,
+        deferred_external_edges,
+    }
+}
+
+/// Fully prepared loop data for validation, execution, and progress.
+#[allow(dead_code)]
+pub(crate) struct PreparedLoops {
+    pub sub_dags: HashMap<(BlockId, BlockId), LoopSubDag>,
+    pub block_to_loop: HashMap<BlockId, (BlockId, BlockId)>,
+    pub from_set: HashSet<BlockId>,
+}
+
+/// Prepare all loop sub-DAGs from a pipeline definition.
+/// Returns `None` if any loop has invalid ancestry.
+pub(crate) fn prepare_loops(def: &PipelineDefinition) -> Option<PreparedLoops> {
+    let graph = RegularGraph::from_def(def);
+    let mut sub_dags = HashMap::new();
+    let mut block_to_loop = HashMap::new();
+    let mut from_set = HashSet::new();
+
+    for lc in &def.loop_connections {
+        let blocks = compute_loop_sub_dag(&graph, lc.from, lc.to)?;
+        let sub_dag = build_loop_sub_dag(&graph, blocks, lc.to);
+        let key = (lc.from, lc.to);
+        for &bid in &sub_dag.blocks {
+            block_to_loop.insert(bid, key);
+        }
+        from_set.insert(lc.from);
+        sub_dags.insert(key, sub_dag);
+    }
+
+    Some(PreparedLoops {
+        sub_dags,
+        block_to_loop,
+        from_set,
+    })
+}
+
+/// Compute total extra tasks from loop re-runs.
+/// Returns: Σ sub_dag.total_replicas × lc.count
+pub fn loop_extra_tasks(def: &PipelineDefinition) -> usize {
+    if def.loop_connections.is_empty() {
+        return 0;
+    }
+    let graph = RegularGraph::from_def(def);
+    def.loop_connections.iter().map(|lc| {
+        let sub_dag_blocks = compute_loop_sub_dag(&graph, lc.from, lc.to);
+        match sub_dag_blocks {
+            Some(blocks) => {
+                let total_replicas: usize = blocks.iter()
+                    .map(|b| graph.replicas.get(b).copied().unwrap_or(1) as usize)
+                    .sum();
+                total_replicas * lc.count as usize
+            }
+            None => 0,
+        }
+    }).sum()
 }
 
 // ---------------------------------------------------------------------------
@@ -534,6 +751,7 @@ pub fn ensure_pipelines_dir() -> io::Result<PathBuf> {
 }
 
 pub fn save_pipeline(def: &PipelineDefinition, path: &Path) -> Result<(), AppError> {
+    validate_pipeline(def)?;
     let mut normalized = def.clone();
     normalized.normalize_session_configs();
     let content = toml::to_string_pretty(&normalized)
@@ -547,8 +765,30 @@ pub fn load_pipeline(path: &Path) -> Result<PipelineDefinition, AppError> {
     let mut def: PipelineDefinition = toml::from_str(&content)
         .map_err(|e| AppError::Config(format!("Failed to parse pipeline: {e}")))?;
     def.normalize_session_configs();
+    migrate_loop_direction(&mut def);
     validate_pipeline(&def)?;
     Ok(def)
+}
+
+/// Migrate old-format loop connections where `from` was the upstream ancestor
+/// and `to` was the downstream target. New convention: `from` is the downstream
+/// feedback source, `to` is the upstream restart target. Swap if needed.
+fn migrate_loop_direction(def: &mut PipelineDefinition) {
+    if def.loop_connections.is_empty() {
+        return;
+    }
+    let graph = RegularGraph::from_def(def);
+    for lc in &mut def.loop_connections {
+        // Already valid in new direction
+        if compute_loop_sub_dag(&graph, lc.from, lc.to).is_some() {
+            continue;
+        }
+        // Old format: from was ancestor, to was downstream — swap
+        if compute_loop_sub_dag(&graph, lc.to, lc.from).is_some() {
+            std::mem::swap(&mut lc.from, &mut lc.to);
+        }
+        // If neither works, let validate_pipeline catch it
+    }
 }
 
 pub(crate) fn validate_replicas(def: &PipelineDefinition) -> Result<(), AppError> {
@@ -634,8 +874,8 @@ pub(crate) fn validate_pipeline(def: &PipelineDefinition) -> Result<(), AppError
 
     // --- Loop connection validation ---
     {
-        let mut loop_participants = HashSet::new();
         let mut seen_loops = HashSet::new();
+        let mut endpoint_set = HashSet::new();
 
         for lc in &def.loop_connections {
             // Self-edge
@@ -665,16 +905,16 @@ pub(crate) fn validate_pipeline(def: &PipelineDefinition) -> Result<(), AppError
                     lc.to
                 )));
             }
-            // One-loop-per-block
-            if !loop_participants.insert(lc.from) {
+            // Endpoint exclusivity: no block may be an endpoint of multiple loops
+            if !endpoint_set.insert(("endpoint", lc.from)) {
                 return Err(AppError::Config(format!(
-                    "Block {} is already in a loop connection",
+                    "Block {} is already a loop endpoint",
                     lc.from
                 )));
             }
-            if !loop_participants.insert(lc.to) {
+            if !endpoint_set.insert(("endpoint", lc.to)) {
                 return Err(AppError::Config(format!(
-                    "Block {} is already in a loop connection",
+                    "Block {} is already a loop endpoint",
                     lc.to
                 )));
             }
@@ -685,19 +925,46 @@ pub(crate) fn validate_pipeline(def: &PipelineDefinition) -> Result<(), AppError
                     lc.from, lc.to
                 )));
             }
-            // No regular/loop overlap (either direction)
-            if def.connections.iter().any(|c|
-                (c.from == lc.from && c.to == lc.to) || (c.from == lc.to && c.to == lc.from)
-            ) {
-                return Err(AppError::Config(format!(
-                    "Regular connection exists between loop blocks {} and {}",
-                    lc.from, lc.to
-                )));
+        }
+
+        // Ancestry check and sub-DAG overlap validation
+        if !def.loop_connections.is_empty() {
+            let graph = RegularGraph::from_def(def);
+            let mut all_sub_dags: Vec<((BlockId, BlockId), HashSet<BlockId>)> = Vec::new();
+
+            for lc in &def.loop_connections {
+                match compute_loop_sub_dag(&graph, lc.from, lc.to) {
+                    Some(blocks) => {
+                        all_sub_dags.push(((lc.from, lc.to), blocks));
+                    }
+                    None => {
+                        return Err(AppError::Config(format!(
+                            "Loop target (to={}) is not a regular-graph ancestor of feedback source (from={}). \
+                             Note: loop direction changed — 'from' is now the downstream feedback source, \
+                             'to' is the upstream restart target.",
+                            lc.to, lc.from
+                        )));
+                    }
+                }
+            }
+
+            // Pairwise disjointness check
+            for i in 0..all_sub_dags.len() {
+                for j in (i + 1)..all_sub_dags.len() {
+                    for bid in &all_sub_dags[i].1 {
+                        if all_sub_dags[j].1.contains(bid) {
+                            return Err(AppError::Config(format!(
+                                "Overlapping loop sub-DAGs: block {} is in multiple loop regions",
+                                bid
+                            )));
+                        }
+                    }
+                }
             }
         }
     }
 
-    // Check for cycles (topological_layers now includes loop forward edges)
+    // Check for cycles (regular connections only, loop connections are back-edges)
     topological_layers(def)
         .map_err(|_| AppError::Config("Pipeline contains a cycle".to_string()))?;
 
@@ -748,17 +1015,32 @@ struct LoopRuntimeState {
     remaining: u32,
     current_pass: u32,
     prompt: String,
-    from_replicas: u32,
-    to_replicas: u32,
-    to_completed_this_pass: u32,
-    from_completed_this_pass: u32,
+    sub_dag: LoopSubDag,
+    block_completed_this_pass: HashMap<BlockId, u32>,
+    extra_tasks_remaining: usize,
+    abandoned: bool,
 }
 
 impl LoopRuntimeState {
     /// Number of tasks that will never run because the loop was abandoned.
-    /// Call BEFORE setting remaining to 0.
+    /// On pass > 0, current-pass incomplete replicas are excluded because
+    /// they will be individually counted when processed via the skip path.
     fn abandoned_task_count(&self) -> usize {
-        self.remaining as usize * (self.from_replicas as usize + self.to_replicas as usize)
+        if self.current_pass == 0 {
+            // Pass 0 is the initial run, not counted in extra_tasks_remaining
+            self.extra_tasks_remaining
+        } else {
+            let completed_this_pass: u32 = self.block_completed_this_pass.values().sum();
+            let current_pass_remaining =
+                self.sub_dag.total_replicas.saturating_sub(completed_this_pass as usize);
+            self.extra_tasks_remaining
+                .saturating_sub(current_pass_remaining)
+        }
+    }
+
+    /// Check if all replicas of a block have completed this pass.
+    fn block_all_replicas_done(&self, block_id: BlockId, replicas: u32) -> bool {
+        self.block_completed_this_pass.get(&block_id).copied().unwrap_or(0) >= replicas
     }
 }
 
@@ -818,11 +1100,7 @@ where
     }
 
     // Account for loop re-runs in total task count
-    let loop_extra: usize = def.loop_connections.iter().map(|lc| {
-        let fr = def.blocks.iter().find(|b| b.id == lc.from).map(|b| b.replicas).unwrap_or(1);
-        let tr = def.blocks.iter().find(|b| b.id == lc.to).map(|b| b.replicas).unwrap_or(1);
-        lc.count as usize * (fr as usize + tr as usize)
-    }).sum();
+    let loop_extra = loop_extra_tasks(def);
     let total_tasks = rt.entries.len() + loop_extra;
 
     let concurrency_sem = Arc::new(tokio::sync::Semaphore::new(if max_block_concurrency == 0 {
@@ -843,25 +1121,24 @@ where
         }
     }
 
-    // Build adjacency structures with replica-weighted in-degree
+    // Build adjacency structures with replica-weighted in-degree (regular connections only)
+    let graph = RegularGraph::from_def(def);
     let mut in_degree: HashMap<BlockId, usize> = def.blocks.iter().map(|b| (b.id, 0)).collect();
     let mut downstream: HashMap<BlockId, Vec<BlockId>> = HashMap::new();
     for conn in &def.connections {
-        let from_block = def.blocks.iter().find(|b| b.id == conn.from).unwrap();
-        *in_degree.entry(conn.to).or_default() += from_block.replicas as usize;
+        let from_replicas = graph.replicas.get(&conn.from).copied().unwrap_or(1) as usize;
+        *in_degree.entry(conn.to).or_default() += from_replicas;
         downstream.entry(conn.from).or_default().push(conn.to);
     }
-    // Loop forward edges also contribute to adjacency
-    for lc in &def.loop_connections {
-        let from_block = def.blocks.iter().find(|b| b.id == lc.from).unwrap();
-        *in_degree.entry(lc.to).or_default() += from_block.replicas as usize;
-        downstream.entry(lc.from).or_default().push(lc.to);
-    }
-    // Loop lookup indexes
-    let loop_by_to: HashMap<BlockId, &LoopConnection> = def.loop_connections.iter()
-        .map(|lc| (lc.to, lc)).collect();
-    let loop_by_from: HashMap<BlockId, &LoopConnection> = def.loop_connections.iter()
-        .map(|lc| (lc.from, lc)).collect();
+
+    // Prepare loop data
+    let prepared = prepare_loops(def);
+    let block_to_loop: HashMap<BlockId, (BlockId, BlockId)> = prepared.as_ref()
+        .map(|p| p.block_to_loop.clone())
+        .unwrap_or_default();
+    let _from_set: HashSet<BlockId> = prepared.as_ref()
+        .map(|p| p.from_set.clone())
+        .unwrap_or_default();
 
     let mut previous_terminal_outputs = String::new();
 
@@ -892,22 +1169,27 @@ where
         let mut completed = 0usize;
 
         // Loop runtime state per iteration
-        let mut loop_state: HashMap<(BlockId, BlockId), LoopRuntimeState> =
+        let mut loop_state: HashMap<(BlockId, BlockId), LoopRuntimeState> = if prepared.is_some() {
             def.loop_connections.iter().map(|lc| {
-                let fr = def.blocks.iter().find(|b| b.id == lc.from).map(|b| b.replicas).unwrap_or(1);
-                let tr = def.blocks.iter().find(|b| b.id == lc.to).map(|b| b.replicas).unwrap_or(1);
-                ((lc.from, lc.to), LoopRuntimeState {
+                let key = (lc.from, lc.to);
+                // Re-build sub_dag for each iteration from prepared data
+                let sub_dag_blocks = compute_loop_sub_dag(&graph, lc.from, lc.to)
+                    .unwrap_or_default();
+                let sub_dag = build_loop_sub_dag(&graph, sub_dag_blocks, lc.to);
+                let extra = sub_dag.total_replicas * lc.count as usize;
+                (key, LoopRuntimeState {
                     remaining: lc.count,
                     current_pass: 0,
                     prompt: lc.prompt.clone(),
-                    from_replicas: fr,
-                    to_replicas: tr,
-                    to_completed_this_pass: 0,
-                    from_completed_this_pass: 0,
+                    sub_dag,
+                    block_completed_this_pass: HashMap::new(),
+                    extra_tasks_remaining: extra,
+                    abandoned: false,
                 })
-            }).collect();
-        let mut deferred_decrements: HashMap<BlockId, HashMap<BlockId, usize>> = HashMap::new();
-        let mut pass0_anchors: HashMap<BlockId, String> = HashMap::new();
+            }).collect()
+        } else {
+            HashMap::new()
+        };
         // Track current loop pass per block for progress events
         let mut block_loop_pass: HashMap<BlockId, u32> = HashMap::new();
 
@@ -946,10 +1228,8 @@ where
                     let replica_count = block.replicas as usize;
 
                     // Determine loop pass for this block
-                    let current_loop_pass = if let Some(lc) = loop_by_from.get(&block_id) {
-                        loop_state.get(&(lc.from, lc.to)).map(|ls| ls.current_pass).unwrap_or(0)
-                    } else if let Some(lc) = loop_by_to.get(&block_id) {
-                        loop_state.get(&(lc.from, lc.to)).map(|ls| ls.current_pass).unwrap_or(0)
+                    let current_loop_pass = if let Some(&key) = block_to_loop.get(&block_id) {
+                        loop_state.get(&key).map(|ls| ls.current_pass).unwrap_or(0)
                     } else {
                         0
                     };
@@ -980,32 +1260,55 @@ where
                         failed_logical.insert(block_id);
                         completed += replica_count;
                         // For loop failure: abandon loop and apply deferred decrements
-                        if let Some(lc) = loop_by_from.get(&block_id).or(loop_by_to.get(&block_id)) {
-                            let key = (lc.from, lc.to);
+                        let in_loop = block_to_loop.get(&block_id).copied();
+                        if let Some(key) = in_loop {
                             if let Some(ls) = loop_state.get_mut(&key) {
-                                completed += ls.abandoned_task_count();
-                                ls.remaining = 0;
-                            }
-                            let partner = if lc.from == block_id { lc.to } else { lc.from };
-                            failed_logical.insert(partner);
-                            // Apply deferred decrements for the loop's from block
-                            if let Some(deferred) = deferred_decrements.remove(&lc.from) {
-                                for (child, weight) in deferred {
-                                    if let Some(deg) = current_in_degree.get_mut(&child) {
-                                        *deg = deg.saturating_sub(weight);
-                                        if *deg == 0 {
-                                            let _ = ready_tx.send(child);
+                                if !ls.abandoned {
+                                    // First abandon: count remaining tasks, apply deferred edges
+                                    completed += ls.abandoned_task_count();
+                                    ls.extra_tasks_remaining = 0;
+                                    ls.remaining = 0;
+                                    ls.abandoned = true;
+                                    // Mark all sub-DAG blocks as failed
+                                    for &bid in &ls.sub_dag.blocks {
+                                        failed_logical.insert(bid);
+                                    }
+                                    // Apply all deferred external edges (once)
+                                    let all_deferred: Vec<(BlockId, usize)> = ls.sub_dag
+                                        .deferred_external_edges
+                                        .values()
+                                        .flatten()
+                                        .copied()
+                                        .collect();
+                                    for (child, weight) in all_deferred {
+                                        if let Some(deg) = current_in_degree.get_mut(&child) {
+                                            *deg = deg.saturating_sub(weight);
+                                            if *deg == 0 {
+                                                let _ = ready_tx.send(child);
+                                            }
                                         }
                                     }
                                 }
+                                // Already abandoned: just count this block's replicas (done above)
                             }
                         }
+                        // Propagate to downstream children
                         if let Some(children) = downstream.get(&block_id) {
                             for &child in children {
-                                let deg = current_in_degree.get_mut(&child).unwrap();
-                                *deg = deg.saturating_sub(replica_count);
-                                if *deg == 0 {
-                                    let _ = ready_tx.send(child);
+                                if let Some(key) = in_loop {
+                                    if let Some(ls) = loop_state.get(&key) {
+                                        if !ls.sub_dag.blocks.contains(&child) {
+                                            // External child: skip — handled by deferred edges
+                                            continue;
+                                        }
+                                    }
+                                }
+                                // Internal sub-DAG child or non-loop child: decrement
+                                if let Some(deg) = current_in_degree.get_mut(&child) {
+                                    *deg = deg.saturating_sub(replica_count);
+                                    if *deg == 0 {
+                                        let _ = ready_tx.send(child);
+                                    }
                                 }
                             }
                         }
@@ -1017,37 +1320,55 @@ where
                         .map(|(_, _, cli)| *cli)
                         .unwrap_or(false);
 
-                    // Build message: normal for pass 0, loop re-run for pass > 0
+                    // Build message based on block role and pass
                     let message = if current_loop_pass > 0 {
-                        let (partner_id, is_from) = if let Some(lc) = loop_by_from.get(&block_id) {
-                            (lc.to, true)
-                        } else if let Some(lc) = loop_by_to.get(&block_id) {
-                            (lc.from, false)
+                        if let Some(&(loop_from, loop_to)) = block_to_loop.get(&block_id) {
+                            if block_id == loop_to {
+                                // `to` (restart target) on re-run: get feedback from `from`
+                                let ls = loop_state.get(&(loop_from, loop_to)).unwrap();
+                                let lc = def.loop_connections.iter()
+                                    .find(|lc| lc.from == loop_from && lc.to == loop_to)
+                                    .unwrap();
+                                build_loop_rerun_message_v2(
+                                    block,
+                                    use_cli,
+                                    def,
+                                    &ls.sub_dag.blocks,
+                                    loop_from,
+                                    current_loop_pass,
+                                    lc.count + 1,
+                                    &ls.prompt,
+                                    &replica_outputs,
+                                    &rt,
+                                    output,
+                                    iteration,
+                                    &previous_terminal_outputs,
+                                    prompt_context,
+                                    &block_to_loop,
+                                    &block_loop_pass,
+                                )
+                            } else {
+                                // Intermediate or `from` block on re-run: normal message
+                                // with loop-aware upstream file resolution
+                                build_pipeline_block_message(
+                                    block,
+                                    use_cli,
+                                    &PipelineMessageContext {
+                                        def,
+                                        iteration,
+                                        block_outputs: &replica_outputs,
+                                        previous_terminal_outputs: &previous_terminal_outputs,
+                                        output,
+                                        prompt_context,
+                                        runtime_table: &rt,
+                                        block_to_loop: &block_to_loop,
+                                        block_loop_pass: &block_loop_pass,
+                                    },
+                                )
+                            }
                         } else {
                             unreachable!("loop_pass > 0 but block not in a loop")
-                        };
-                        let lc_key = if is_from {
-                            (block_id, partner_id)
-                        } else {
-                            (partner_id, block_id)
-                        };
-                        let ls = loop_state.get(&lc_key).unwrap();
-                        let lc = if is_from { loop_by_from.get(&block_id).unwrap() } else { loop_by_to.get(&block_id).unwrap() };
-                        build_loop_rerun_message(
-                            block,
-                            use_cli,
-                            partner_id,
-                            is_from,
-                            current_loop_pass,
-                            lc.count + 1,
-                            &ls.prompt,
-                            &pass0_anchors,
-                            &replica_outputs,
-                            &rt,
-                            output,
-                            iteration,
-                            prompt_context,
-                        )
+                        }
                     } else {
                         build_pipeline_block_message(
                             block,
@@ -1060,6 +1381,8 @@ where
                                 output,
                                 prompt_context,
                                 runtime_table: &rt,
+                                block_to_loop: &block_to_loop,
+                                block_loop_pass: &block_loop_pass,
                             },
                         )
                     };
@@ -1086,12 +1409,49 @@ where
                         }
                         failed_logical.insert(block_id);
                         completed += replica_count;
+                        // Loop-aware abandon + downstream propagation
+                        let in_loop = block_to_loop.get(&block_id).copied();
+                        if let Some(key) = in_loop {
+                            if let Some(ls) = loop_state.get_mut(&key) {
+                                if !ls.abandoned {
+                                    completed += ls.abandoned_task_count();
+                                    ls.extra_tasks_remaining = 0;
+                                    ls.remaining = 0;
+                                    ls.abandoned = true;
+                                    for &bid in &ls.sub_dag.blocks {
+                                        failed_logical.insert(bid);
+                                    }
+                                    let all_deferred: Vec<(BlockId, usize)> = ls.sub_dag
+                                        .deferred_external_edges
+                                        .values()
+                                        .flatten()
+                                        .copied()
+                                        .collect();
+                                    for (child, weight) in all_deferred {
+                                        if let Some(deg) = current_in_degree.get_mut(&child) {
+                                            *deg = deg.saturating_sub(weight);
+                                            if *deg == 0 {
+                                                let _ = ready_tx.send(child);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         if let Some(children) = downstream.get(&block_id) {
                             for &child in children {
-                                let deg = current_in_degree.get_mut(&child).unwrap();
-                                *deg = deg.saturating_sub(replica_count);
-                                if *deg == 0 {
-                                    let _ = ready_tx.send(child);
+                                if let Some(key) = in_loop {
+                                    if let Some(ls) = loop_state.get(&key) {
+                                        if !ls.sub_dag.blocks.contains(&child) {
+                                            continue;
+                                        }
+                                    }
+                                }
+                                if let Some(deg) = current_in_degree.get_mut(&child) {
+                                    *deg = deg.saturating_sub(replica_count);
+                                    if *deg == 0 {
+                                        let _ = ready_tx.send(child);
+                                    }
                                 }
                             }
                         }
@@ -1117,11 +1477,21 @@ where
                                 failed_replicas.insert(rid);
                                 completed += 1;
                                 if let Some(children) = downstream.get(&block_id) {
+                                    let in_loop = block_to_loop.get(&block_id).copied();
                                     for &child in children {
-                                        let deg = current_in_degree.get_mut(&child).unwrap();
-                                        *deg -= 1;
-                                        if *deg == 0 {
-                                            let _ = ready_tx.send(child);
+                                        // Skip external children if in a loop (deferred handles them)
+                                        if let Some(key) = in_loop {
+                                            if let Some(ls) = loop_state.get(&key) {
+                                                if !ls.sub_dag.blocks.contains(&child) {
+                                                    continue;
+                                                }
+                                            }
+                                        }
+                                        if let Some(deg) = current_in_degree.get_mut(&child) {
+                                            *deg = deg.saturating_sub(1);
+                                            if *deg == 0 {
+                                                let _ = ready_tx.send(child);
+                                            }
                                         }
                                     }
                                 }
@@ -1322,6 +1692,9 @@ where
                             }
                             Err(_) => {
                                 failed_replicas.insert(runtime_id);
+                                // Remove stale output so a previous pass's content
+                                // is not mistaken for current-pass feedback.
+                                replica_outputs.remove(&runtime_id);
                                 if let Some(rids) = rt.logical_to_runtime.get(&sid) {
                                     if rids.iter().all(|r| failed_replicas.contains(r)) {
                                         failed_logical.insert(sid);
@@ -1334,76 +1707,92 @@ where
                     // --- Shared loop-aware downstream propagation ---
                     let Some(source_id) = source_id else { continue };
 
-                    if let Some(lc) = loop_by_to.get(&source_id) {
-                        // CASE A: source_id is `to` of a loop
-                        let key = (lc.from, lc.to);
-                        let all_to_done = if let Some(ls) = loop_state.get_mut(&key) {
-                            ls.to_completed_this_pass += 1;
-                            ls.to_completed_this_pass >= ls.to_replicas
-                        } else {
-                            true
-                        };
+                    if let Some(&(loop_from, loop_to)) = block_to_loop.get(&source_id) {
+                        let key = (loop_from, loop_to);
+                        let source_replicas = graph.replicas.get(&source_id).copied().unwrap_or(1);
 
-                        if all_to_done {
-                            // Check for failure - abandon loop
-                            if failed_logical.contains(&source_id) || failed_logical.contains(&lc.from) {
-                                if let Some(ls) = loop_state.get_mut(&key) {
-                                    completed += ls.abandoned_task_count();
-                                    ls.remaining = 0;
-                                }
-                                // Apply deferred decrements
-                                if let Some(deferred) = deferred_decrements.remove(&lc.from) {
-                                    for (child, weight) in deferred {
-                                        if let Some(deg) = current_in_degree.get_mut(&child) {
-                                            *deg = deg.saturating_sub(weight);
-                                            if *deg == 0 {
-                                                let _ = ready_tx.send(child);
+                        // Track per-block completion
+                        if let Some(ls) = loop_state.get_mut(&key) {
+                            *ls.block_completed_this_pass.entry(source_id).or_default() += 1;
+                            // Decrement extra_tasks_remaining for re-run work
+                            if this_loop_pass > 0 {
+                                ls.extra_tasks_remaining = ls.extra_tasks_remaining.saturating_sub(1);
+                            }
+                        }
+
+                        if source_id == loop_from {
+                            // CASE A: `from` (feedback source) completed a replica
+                            let all_from_done = loop_state.get(&key)
+                                .map(|ls| ls.block_all_replicas_done(source_id, source_replicas))
+                                .unwrap_or(true);
+
+                            if all_from_done {
+                                let loop_failed = failed_logical.contains(&loop_from)
+                                    || loop_state.get(&key).map(|ls| {
+                                        ls.sub_dag.blocks.iter().any(|b| failed_logical.contains(b))
+                                    }).unwrap_or(false);
+
+                                if loop_failed {
+                                    // Abandon loop (only if not already abandoned)
+                                    if let Some(ls) = loop_state.get_mut(&key) {
+                                        if !ls.abandoned {
+                                            completed += ls.abandoned_task_count();
+                                            ls.extra_tasks_remaining = 0;
+                                            ls.remaining = 0;
+                                            ls.abandoned = true;
+                                            // Apply all deferred external edges (once)
+                                            let all_deferred: Vec<(BlockId, usize)> = ls.sub_dag
+                                                .deferred_external_edges
+                                                .values()
+                                                .flatten()
+                                                .copied()
+                                                .collect();
+                                            for (child, weight) in all_deferred {
+                                                if let Some(deg) = current_in_degree.get_mut(&child) {
+                                                    *deg = deg.saturating_sub(weight);
+                                                    if *deg == 0 {
+                                                        let _ = ready_tx.send(child);
+                                                    }
+                                                }
                                             }
                                         }
                                     }
-                                }
-                                // Propagate to to's downstream normally
-                                if let Some(children) = downstream.get(&source_id) {
-                                    for &child in children {
-                                        let replica_count = rt.logical_to_runtime.get(&source_id)
-                                            .map(|v| v.len()).unwrap_or(1);
-                                        let deg = current_in_degree.get_mut(&child).unwrap();
-                                        *deg = deg.saturating_sub(replica_count);
-                                        if *deg == 0 {
-                                            let _ = ready_tx.send(child);
-                                        }
-                                    }
-                                }
-                            } else if let Some(ls) = loop_state.get_mut(&key) {
-                                if ls.remaining > 0 {
-                                    // More loop passes needed
-                                    ls.remaining -= 1;
-                                    ls.current_pass += 1;
-                                    ls.to_completed_this_pass = 0;
-                                    ls.from_completed_this_pass = 0;
-                                    // Reset to's in-degree to from_replicas only
-                                    if let Some(deg) = current_in_degree.get_mut(&lc.to) {
-                                        *deg = ls.from_replicas as usize;
-                                    }
-                                    // Re-queue from
-                                    let _ = ready_tx.send(lc.from);
-                                    // Do NOT propagate to to's downstream
-                                } else {
-                                    // Loop complete - propagate to's downstream normally
-                                    if let Some(children) = downstream.get(&source_id) {
-                                        for &child in children {
-                                            let replica_count = rt.logical_to_runtime.get(&source_id)
-                                                .map(|v| v.len()).unwrap_or(1);
-                                            let deg = current_in_degree.get_mut(&child).unwrap();
-                                            *deg = deg.saturating_sub(replica_count);
-                                            if *deg == 0 {
-                                                let _ = ready_tx.send(child);
+                                } else if let Some(ls) = loop_state.get_mut(&key) {
+                                    if ls.remaining > 0 {
+                                        // More loop passes — reset sub-DAG and queue `to`
+                                        ls.remaining -= 1;
+                                        ls.current_pass += 1;
+                                        ls.block_completed_this_pass.clear();
+                                        // Clear stale failure/output state for sub-DAG blocks
+                                        // so that failures from pass N don't poison pass N+1.
+                                        // Keep `from`'s outputs — needed as feedback for `to`.
+                                        for &bid in &ls.sub_dag.blocks {
+                                            failed_logical.remove(&bid);
+                                            if let Some(rids) = rt.logical_to_runtime.get(&bid) {
+                                                for &rid in rids {
+                                                    failed_replicas.remove(&rid);
+                                                    if bid != loop_from {
+                                                        replica_outputs.remove(&rid);
+                                                    }
+                                                }
                                             }
                                         }
-                                    }
-                                    // Apply deferred decrements for from's regular children
-                                    if let Some(deferred) = deferred_decrements.remove(&lc.from) {
-                                        for (child, weight) in deferred {
+                                        // Reset all sub-DAG blocks' in-degrees
+                                        for (&bid, &deg) in &ls.sub_dag.internal_in_degree {
+                                            current_in_degree.insert(bid, deg);
+                                        }
+                                        // Queue `to` (in-degree 0)
+                                        let _ = ready_tx.send(loop_to);
+                                        // Do NOT propagate to from's external downstream
+                                    } else {
+                                        // Loop done — apply all deferred external edges
+                                        let all_deferred: Vec<(BlockId, usize)> = ls.sub_dag
+                                            .deferred_external_edges
+                                            .values()
+                                            .flatten()
+                                            .copied()
+                                            .collect();
+                                        for (child, weight) in all_deferred {
                                             if let Some(deg) = current_in_degree.get_mut(&child) {
                                                 *deg = deg.saturating_sub(weight);
                                                 if *deg == 0 {
@@ -1414,101 +1803,36 @@ where
                                     }
                                 }
                             }
-                        }
-                        // Individual to replicas don't propagate (wait for all)
-                    } else if let Some(lc) = loop_by_from.get(&source_id) {
-                        // CASE B/C: source_id is `from` of a loop
-                        let key = (lc.from, lc.to);
-                        if let Some(ls) = loop_state.get_mut(&key) {
-                            ls.from_completed_this_pass += 1;
-
-                            // Store pass-0 anchor when all from replicas complete their first pass
-                            if ls.current_pass == 0
-                                && ls.from_completed_this_pass >= ls.from_replicas
-                            {
-                                if let std::collections::hash_map::Entry::Vacant(e) = pass0_anchors.entry(source_id) {
-                                    let mut anchor = String::new();
-                                    if let Some(rids) = rt.logical_to_runtime.get(&source_id) {
-                                        for &rid in rids {
-                                            if let Some(content) = replica_outputs.get(&rid) {
-                                                if !anchor.is_empty() {
-                                                    anchor.push_str("\n---\n");
-                                                }
-                                                let truncated: String = content.chars().take(200).collect();
-                                                anchor.push_str(&truncated);
+                            // Individual from replicas don't propagate externally
+                        } else {
+                            // CASE B: `to` or intermediate sub-DAG block completed
+                            // Decrement internal children normally, skip external
+                            if let Some(children) = downstream.get(&source_id) {
+                                for &child in children {
+                                    let in_sub_dag = loop_state.get(&key)
+                                        .map(|ls| ls.sub_dag.blocks.contains(&child))
+                                        .unwrap_or(false);
+                                    if in_sub_dag {
+                                        // Internal child: decrement normally
+                                        if let Some(deg) = current_in_degree.get_mut(&child) {
+                                            *deg = deg.saturating_sub(1);
+                                            if *deg == 0 {
+                                                let _ = ready_tx.send(child);
                                             }
                                         }
                                     }
-                                    e.insert(anchor);
-                                }
-                            }
-                        }
-
-                        if this_loop_pass > 0 {
-                            // CASE B: loop re-run of from — only decrement to's in-degree
-                            if let Some(deg) = current_in_degree.get_mut(&lc.to) {
-                                *deg -= 1;
-                                if *deg == 0 {
-                                    let _ = ready_tx.send(lc.to);
-                                }
-                            }
-                        } else {
-                            // CASE C: initial run of from — decrement to normally, defer others
-                            if let Some(children) = downstream.get(&source_id) {
-                                for &child in children {
-                                    if child == lc.to {
-                                        // Decrement to's in-degree normally
-                                        let deg = current_in_degree.get_mut(&child).unwrap();
-                                        *deg -= 1;
-                                        if *deg == 0 {
-                                            let _ = ready_tx.send(child);
-                                        }
-                                    } else {
-                                        // Defer decrement for regular children
-                                        *deferred_decrements
-                                            .entry(source_id)
-                                            .or_default()
-                                            .entry(child)
-                                            .or_default() += 1;
-                                    }
+                                    // External children: deferred (handled at loop exit)
                                 }
                             }
                         }
                     } else {
-                        // CASE D: source_id not in any loop — existing behavior
+                        // CASE C: Block not in any loop — normal downstream propagation
                         if let Some(children) = downstream.get(&source_id) {
                             for &child in children {
                                 let deg = current_in_degree.get_mut(&child).unwrap();
                                 *deg -= 1;
                                 if *deg == 0 {
                                     let _ = ready_tx.send(child);
-                                }
-                            }
-                        }
-                    }
-
-                    // Store pass-0 anchor for `to` blocks
-                    if let Some(lc) = loop_by_to.get(&source_id) {
-                        let key = (lc.from, lc.to);
-                        if let Some(ls) = loop_state.get(&key) {
-                            if ls.current_pass == 0 || (ls.current_pass == 1 && ls.to_completed_this_pass == 0) {
-                                if let std::collections::hash_map::Entry::Vacant(e) = pass0_anchors.entry(source_id) {
-                                    if let Some(rids) = rt.logical_to_runtime.get(&source_id) {
-                                        let all_done = rids.iter().all(|r| replica_outputs.contains_key(r));
-                                        if all_done {
-                                            let mut anchor = String::new();
-                                            for &rid in rids {
-                                                if let Some(content) = replica_outputs.get(&rid) {
-                                                    if !anchor.is_empty() {
-                                                        anchor.push_str("\n---\n");
-                                                    }
-                                                    let truncated: String = content.chars().take(200).collect();
-                                                    anchor.push_str(&truncated);
-                                                }
-                                            }
-                                            e.insert(anchor);
-                                        }
-                                    }
                                 }
                             }
                         }
@@ -1592,7 +1916,10 @@ fn build_pipeline_block_message(
                 if let Some(rids) = context.runtime_table.logical_to_runtime.get(uid) {
                     for &rid in rids {
                         let info = &context.runtime_table.entries[rid as usize];
-                        let filename = replica_filename(info, context.iteration);
+                        let filename = loop_aware_upstream_filename(
+                            info, context.iteration, *uid,
+                            context.block_to_loop, context.block_loop_pass,
+                        );
                         let path = context.output.run_dir().join(&filename);
                         if path.exists() {
                             file_refs.push_str(&format!("- {}\n", path.display()));
@@ -1634,28 +1961,122 @@ fn build_pipeline_block_message(
         .augment_prompt_for_agent(&base_message, use_cli)
 }
 
+/// Loop-aware filename resolver for CLI upstream references.
+fn loop_aware_upstream_filename(
+    info: &RuntimeReplicaInfo,
+    iteration: u32,
+    upstream_block_id: BlockId,
+    block_to_loop: &HashMap<BlockId, (BlockId, BlockId)>,
+    block_loop_pass: &HashMap<BlockId, u32>,
+) -> String {
+    if block_to_loop.contains_key(&upstream_block_id) {
+        let pass = block_loop_pass.get(&upstream_block_id).copied().unwrap_or(0);
+        if pass == 0 {
+            replica_filename(info, iteration)
+        } else {
+            loop_replica_filename(info, iteration, pass)
+        }
+    } else {
+        replica_filename(info, iteration)
+    }
+}
+
+/// Message builder for `to` (restart target) block on re-run passes.
+/// Includes external upstream context + loop header + loop prompt + block prompt + `from`'s feedback.
 #[allow(clippy::too_many_arguments)]
-fn build_loop_rerun_message(
+fn build_loop_rerun_message_v2(
     block: &PipelineBlock,
     use_cli: bool,
-    partner_block_id: BlockId,
-    is_from: bool,
+    def: &PipelineDefinition,
+    loop_sub_dag_blocks: &HashSet<BlockId>,
+    from_block_id: BlockId,
     current_pass: u32,
     total_passes: u32,
     loop_prompt: &str,
-    pass0_anchors: &HashMap<BlockId, String>,
     replica_outputs: &HashMap<u32, String>,
     runtime_table: &RuntimeReplicaTable,
     output: &OutputManager,
     iteration: u32,
+    previous_terminal_outputs: &str,
     prompt_context: &PromptRuntimeContext,
+    block_to_loop: &HashMap<BlockId, (BlockId, BlockId)>,
+    block_loop_pass: &HashMap<BlockId, u32>,
 ) -> String {
     let mut message = String::new();
 
-    // Start with pass-0 anchor for context continuity
-    if let Some(anchor) = pass0_anchors.get(&block.id) {
-        message.push_str(anchor);
-        message.push_str("\n\n");
+    // External upstream context (parents outside the loop sub-DAG)
+    let external_parents: Vec<BlockId> = upstream_of(def, block.id)
+        .into_iter()
+        .filter(|uid| !loop_sub_dag_blocks.contains(uid))
+        .collect();
+
+    let is_root = upstream_of(def, block.id).is_empty();
+    if is_root {
+        // Root restart target: match build_pipeline_block_message root semantics.
+        // On iteration 1: initial_prompt is always included.
+        // On iteration > 1 with block prompt: only block.prompt + prev outputs
+        //   (initial_prompt omitted — block.prompt is appended later).
+        // On iteration > 1 without block prompt: initial_prompt + prev outputs.
+        if (iteration == 1 || block.prompt.is_empty()) && !def.initial_prompt.is_empty() {
+            message.push_str(&def.initial_prompt);
+            message.push_str("\n\n");
+        }
+        if iteration > 1 && !previous_terminal_outputs.is_empty() {
+            message.push_str("--- Previous iteration outputs ---\n");
+            message.push_str(previous_terminal_outputs);
+            message.push_str("\n\n");
+        }
+    } else if !external_parents.is_empty() {
+        // Non-root with external parents: include their outputs
+        if use_cli {
+            let mut file_refs = String::new();
+            for &uid in &external_parents {
+                if let Some(rids) = runtime_table.logical_to_runtime.get(&uid) {
+                    for &rid in rids {
+                        let info = &runtime_table.entries[rid as usize];
+                        let filename = loop_aware_upstream_filename(
+                            info, iteration, uid, block_to_loop, block_loop_pass,
+                        );
+                        let path = output.run_dir().join(&filename);
+                        if path.exists() {
+                            file_refs.push_str(&format!("- {}\n", path.display()));
+                        }
+                    }
+                }
+            }
+            if !file_refs.is_empty() {
+                message.push_str("Read these upstream output files:\n");
+                message.push_str(&file_refs);
+                message.push('\n');
+            }
+        } else {
+            let mut upstream_content = String::new();
+            for &uid in &external_parents {
+                if let Some(rids) = runtime_table.logical_to_runtime.get(&uid) {
+                    for &rid in rids {
+                        if let Some(content) = replica_outputs.get(&rid) {
+                            if !upstream_content.is_empty() {
+                                upstream_content.push_str("\n\n---\n\n");
+                            }
+                            let upstream_block = def.blocks.iter().find(|b| b.id == uid);
+                            if upstream_block.map(|b| b.replicas).unwrap_or(1) > 1 {
+                                let info = &runtime_table.entries[rid as usize];
+                                upstream_content.push_str(&format!(
+                                    "--- Output from {} ---\n{}", info.display_label, content
+                                ));
+                            } else {
+                                upstream_content.push_str(content);
+                            }
+                        }
+                    }
+                }
+            }
+            if !upstream_content.is_empty() {
+                message.push_str("--- Upstream context ---\n");
+                message.push_str(&upstream_content);
+                message.push_str("\n\n");
+            }
+        }
     }
 
     // Loop iteration header
@@ -1665,33 +2086,28 @@ fn build_loop_rerun_message(
         total_passes
     ));
 
-    // Loop prompt only on the back-edge (from side); to side keeps its own block prompt
-    let prompt = if is_from && !loop_prompt.is_empty() {
-        loop_prompt
-    } else {
-        &block.prompt
-    };
-    if !prompt.is_empty() {
-        message.push_str(prompt);
+    // Loop prompt if set
+    if !loop_prompt.is_empty() {
+        message.push_str(loop_prompt);
         message.push_str("\n\n");
     }
 
-    // Partner's latest outputs
-    if let Some(partner_rids) = runtime_table.logical_to_runtime.get(&partner_block_id) {
+    // Block's own prompt
+    if !block.prompt.is_empty() {
+        message.push_str(&block.prompt);
+        message.push_str("\n\n");
+    }
+
+    // `from`'s feedback (from previous pass)
+    if let Some(from_rids) = runtime_table.logical_to_runtime.get(&from_block_id) {
         if use_cli {
-            message.push_str("Read these loop partner output files:\n");
-            for &rid in partner_rids {
+            message.push_str("Read these feedback output files:\n");
+            for &rid in from_rids {
                 let info = &runtime_table.entries[rid as usize];
                 if replica_outputs.contains_key(&rid) {
-                    // Compute partner's file loop_pass:
-                    // from at pass P needs to's output from pass P-1
-                    // to at pass P needs from's output from pass P
-                    let partner_pass = if is_from {
-                        current_pass.saturating_sub(1)
-                    } else {
-                        current_pass
-                    };
-                    let filename = loop_replica_filename(info, iteration, partner_pass);
+                    // `to` on pass P needs `from`'s output from pass P-1
+                    let feedback_pass = current_pass.saturating_sub(1);
+                    let filename = loop_replica_filename(info, iteration, feedback_pass);
                     let path = output.run_dir().join(&filename);
                     if path.exists() {
                         message.push_str(&format!("- {}\n", path.display()));
@@ -1700,10 +2116,10 @@ fn build_loop_rerun_message(
             }
             message.push_str("\nRead each file before responding.");
         } else {
-            message.push_str("--- Loop partner outputs ---\n");
-            for &rid in partner_rids {
+            message.push_str("--- Feedback from previous pass ---\n");
+            for &rid in from_rids {
                 if let Some(content) = replica_outputs.get(&rid) {
-                    if partner_rids.len() > 1 {
+                    if from_rids.len() > 1 {
                         let info = &runtime_table.entries[rid as usize];
                         message.push_str(&format!(
                             "--- Output from {} ---\n{}",
@@ -2122,6 +2538,8 @@ to = 1
 
         let block_outputs = HashMap::new();
         let rt = build_runtime_table(&def);
+        let btl = HashMap::new();
+        let blp = HashMap::new();
         let message_context = PipelineMessageContext {
             def: &def,
             iteration: 1,
@@ -2130,6 +2548,8 @@ to = 1
             output: &output,
             prompt_context: &context,
             runtime_table: &rt,
+            block_to_loop: &btl,
+            block_loop_pass: &blp,
         };
         let cli_message = build_pipeline_block_message(&def.blocks[0], true, &message_context);
         let api_message = build_pipeline_block_message(&def.blocks[0], false, &message_context);
@@ -3023,25 +3443,63 @@ keep_across_iterations = false
 
     #[test]
     fn test_validate_rejects_block_in_two_loops() {
-        // Block 2 appears in two different loop connections
+        // Block 2 is `from` endpoint of two different loop connections
+        // A(1)→B(2)→C(3), loop_back(B,A) and loop_back(B,C) — B is from in both
         let def = def_with_loops(
             vec![block(1, 0, 0), block(2, 1, 0), block(3, 2, 0)],
-            vec![],
-            vec![lconn(1, 2, 1), lconn(2, 3, 1)],
+            vec![conn(1, 2), conn(2, 3)],
+            vec![lconn(2, 1, 1), lconn(2, 3, 1)],
         );
         let err = validate_pipeline(&def).unwrap_err();
-        assert!(err.to_string().contains("already in a loop"), "expected 'already in a loop', got: {err}");
+        assert!(err.to_string().contains("already a loop endpoint"), "expected 'already a loop endpoint', got: {err}");
     }
 
     #[test]
-    fn test_validate_rejects_loop_regular_overlap() {
+    fn test_validate_rejects_block_as_from_and_to_in_different_loops() {
+        // A(1)→B(2)→C(3)→D(4), loop_back(B,A) has B as from,
+        // loop_back(D,B) has B as to — B in two loops with different roles
+        let def = def_with_loops(
+            vec![block(1, 0, 0), block(2, 1, 0), block(3, 2, 0), block(4, 3, 0)],
+            vec![conn(1, 2), conn(2, 3), conn(3, 4)],
+            vec![lconn(2, 1, 1), lconn(4, 2, 1)],
+        );
+        let err = validate_pipeline(&def).unwrap_err();
+        assert!(err.to_string().contains("already a loop endpoint"), "expected 'already a loop endpoint', got: {err}");
+    }
+
+    #[test]
+    fn test_validate_allows_regular_between_loop_endpoints() {
+        // Regular A→B + loop_back(B, A) is valid under new semantics
         let def = def_with_loops(
             vec![block(1, 0, 0), block(2, 1, 0)],
             vec![conn(1, 2)],
-            vec![lconn(1, 2, 1)],
+            vec![lconn(2, 1, 1)],
+        );
+        assert!(validate_pipeline(&def).is_ok(), "regular connection between loop endpoints should be valid");
+    }
+
+    #[test]
+    fn test_validate_rejects_non_ancestor() {
+        // No regular path from to→from, so ancestry check fails
+        let def = def_with_loops(
+            vec![block(1, 0, 0), block(2, 1, 0)],
+            vec![],
+            vec![lconn(2, 1, 1)],
         );
         let err = validate_pipeline(&def).unwrap_err();
-        assert!(err.to_string().contains("Regular connection exists"), "expected 'Regular connection exists', got: {err}");
+        assert!(err.to_string().contains("not a regular-graph ancestor"), "expected ancestry error, got: {err}");
+    }
+
+    #[test]
+    fn test_validate_rejects_overlapping_sub_dags() {
+        // A(1)→B(2)→C(3)→D(4), loop_back(C,A,1) and loop_back(D,B,1) — B is in both sub-DAGs
+        let def = def_with_loops(
+            vec![block(1, 0, 0), block(2, 1, 0), block(3, 2, 0), block(4, 3, 0)],
+            vec![conn(1, 2), conn(2, 3), conn(3, 4)],
+            vec![lconn(3, 1, 1), lconn(4, 2, 1)],
+        );
+        let err = validate_pipeline(&def).unwrap_err();
+        assert!(err.to_string().contains("Overlapping loop sub-DAGs"), "expected overlap error, got: {err}");
     }
 
     #[test]
@@ -3058,81 +3516,166 @@ keep_across_iterations = false
     #[test]
     fn test_validate_rejects_duplicate_loop() {
         // Same (from, to) pair in two LoopConnections.
-        // The one-loop-per-block check fires before the duplicate-loop check for
-        // identical pairs, so we accept either rejection message.
+        // Endpoint exclusivity fires before duplicate-loop check.
         let def = def_with_loops(
             vec![block(1, 0, 0), block(2, 1, 0)],
-            vec![],
-            vec![lconn(1, 2, 1), lconn(1, 2, 1)],
+            vec![conn(1, 2)],
+            vec![lconn(2, 1, 1), lconn(2, 1, 1)],
         );
         let err = validate_pipeline(&def).unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("Duplicate loop") || msg.contains("already in a loop"),
+            msg.contains("Duplicate loop") || msg.contains("already a loop endpoint"),
             "expected duplicate/overlap rejection, got: {msg}"
         );
     }
 
-    // -- loop graph utility tests --
+    // -- loop migration / pruning tests --
 
     #[test]
-    fn test_root_excludes_loop_to() {
-        // Loop(A, B) means A->B forward edge, so B has incoming and is NOT a root
-        let def = def_with_loops(
+    fn test_migrate_loop_direction_swaps_old_format() {
+        // Old format: from=1 (ancestor), to=2 (downstream).
+        // After migration: from=2, to=1 (new convention).
+        let mut def = def_with_loops(
             vec![block(1, 0, 0), block(2, 1, 0)],
-            vec![],
-            vec![lconn(1, 2, 1)],
+            vec![conn(1, 2)],
+            vec![LoopConnection { from: 1, to: 2, count: 1, prompt: String::new() }],
         );
-        let roots = root_blocks(&def);
-        assert_eq!(roots, vec![1], "B (block 2) should not be a root when loop(A,B) exists");
+        migrate_loop_direction(&mut def);
+        assert_eq!(def.loop_connections[0].from, 2);
+        assert_eq!(def.loop_connections[0].to, 1);
     }
 
     #[test]
-    fn test_terminal_excludes_loop_from() {
-        // Loop(A, B) means A->B forward edge, so A has outgoing and is NOT a terminal
-        let def = def_with_loops(
+    fn test_migrate_loop_direction_keeps_new_format() {
+        // Already new format: from=2 (downstream), to=1 (upstream).
+        let mut def = def_with_loops(
             vec![block(1, 0, 0), block(2, 1, 0)],
-            vec![],
-            vec![lconn(1, 2, 1)],
+            vec![conn(1, 2)],
+            vec![lconn(2, 1, 1)],
         );
-        let terms = terminal_blocks(&def);
-        assert_eq!(terms, vec![2], "A (block 1) should not be terminal when loop(A,B) exists");
+        migrate_loop_direction(&mut def);
+        assert_eq!(def.loop_connections[0].from, 2);
+        assert_eq!(def.loop_connections[0].to, 1);
     }
 
     #[test]
-    fn test_upstream_includes_loop_from() {
-        let def = def_with_loops(
-            vec![block(1, 0, 0), block(2, 1, 0)],
-            vec![],
-            vec![lconn(1, 2, 1)],
+    fn test_prune_invalid_loops_removes_broken() {
+        // Chain: 1→2→3, loop from 3→1.
+        // Remove edge 2→3 → loop 3→1 broken (1 no longer ancestor of 3).
+        let mut def = def_with_loops(
+            vec![block(1, 0, 0), block(2, 1, 0), block(3, 2, 0)],
+            vec![conn(1, 2), conn(2, 3)],
+            vec![lconn(3, 1, 1)],
         );
-        let ups = upstream_of(&def, 2);
-        assert_eq!(ups, vec![1], "upstream_of(B) should include A when loop(A,B) exists");
+        def.connections.retain(|c| !(c.from == 2 && c.to == 3));
+        let warnings = prune_invalid_loops(&mut def);
+        assert_eq!(warnings.len(), 1);
+        assert!(def.loop_connections.is_empty());
     }
 
     #[test]
-    fn test_topo_layers_with_loop() {
+    fn test_prune_invalid_loops_keeps_valid() {
+        let mut def = def_with_loops(
+            vec![block(1, 0, 0), block(2, 1, 0)],
+            vec![conn(1, 2)],
+            vec![lconn(2, 1, 1)],
+        );
+        let warnings = prune_invalid_loops(&mut def);
+        assert!(warnings.is_empty());
+        assert_eq!(def.loop_connections.len(), 1);
+    }
+
+    #[test]
+    fn test_save_pipeline_rejects_invalid_loops() {
         let def = def_with_loops(
             vec![block(1, 0, 0), block(2, 1, 0)],
-            vec![],
-            vec![lconn(1, 2, 1)],
+            vec![], // No regular edge — loop ancestry broken
+            vec![lconn(2, 1, 1)],
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.toml");
+        let err = save_pipeline(&def, &path).unwrap_err();
+        assert!(err.to_string().contains("not a regular-graph ancestor"));
+    }
+
+    #[test]
+    fn test_prune_invalid_loops_removes_overlap() {
+        // Graph: 1→2→3, 2→4→5
+        // Loop A: from=3, to=1 (sub-DAG {1,2,3})
+        // Loop B: from=5, to=2 (sub-DAG {2,4,5})
+        // Block 2 is in both sub-DAGs → overlap → loop B pruned.
+        let mut def = def_with_loops(
+            vec![
+                block(1, 0, 0), block(2, 1, 0), block(3, 2, 0),
+                block(4, 1, 1), block(5, 2, 1),
+            ],
+            vec![conn(1, 2), conn(2, 3), conn(2, 4), conn(4, 5)],
+            vec![lconn(3, 1, 1), lconn(5, 2, 1)],
+        );
+        let warnings = prune_invalid_loops(&mut def);
+        assert_eq!(warnings.len(), 1, "one overlapping loop should be removed");
+        assert!(warnings[0].contains("overlaps"));
+        assert_eq!(def.loop_connections.len(), 1);
+        // The first loop (3→1) should survive
+        assert_eq!(def.loop_connections[0].from, 3);
+        assert_eq!(def.loop_connections[0].to, 1);
+    }
+
+    // -- loop graph utility tests (loop edges are back-edges, excluded from graph utilities) --
+
+    #[test]
+    fn test_loop_edges_not_in_upstream_of() {
+        // Loop back(B,A) should NOT make A appear in upstream_of(B)
+        // (only regular connections affect upstream_of)
+        let def = def_with_loops(
+            vec![block(1, 0, 0), block(2, 1, 0)],
+            vec![conn(1, 2)],
+            vec![lconn(2, 1, 1)],
+        );
+        let ups = upstream_of(&def, 1);
+        // Block 1 has no regular incoming (only a loop back-edge from 2)
+        assert!(ups.is_empty(), "upstream_of(A) should be empty — loop edge is not upstream");
+    }
+
+    #[test]
+    fn test_loop_edges_not_in_topo_layers() {
+        // Loop back(B,A) should not prevent topological sort
+        let def = def_with_loops(
+            vec![block(1, 0, 0), block(2, 1, 0)],
+            vec![conn(1, 2)],
+            vec![lconn(2, 1, 1)],
         );
         let layers = topological_layers(&def).unwrap();
-        assert_eq!(layers, vec![vec![1], vec![2]], "A should be in layer before B when loop(A,B) exists");
+        assert_eq!(layers, vec![vec![1], vec![2]], "topo layers should follow regular connections only");
     }
 
     #[test]
-    fn test_cycle_via_loop_edge() {
-        // Loop(A, B) creates forward edge A->B. Adding B->A should create a cycle.
+    fn test_loop_edges_not_in_cycle_detection() {
+        // Loop back(B,A) should NOT cause would_create_cycle to detect a cycle
         let def = def_with_loops(
             vec![block(1, 0, 0), block(2, 1, 0)],
-            vec![],
-            vec![lconn(1, 2, 1)],
+            vec![conn(1, 2)],
+            vec![lconn(2, 1, 1)],
         );
+        // Adding A→B regular edge would create a duplicate, but not a cycle
+        // The cycle check should not consider the loop back-edge
         assert!(
-            would_create_cycle(&def, 2, 1),
-            "adding B->A when loop(A,B) exists should detect a cycle"
+            !would_create_cycle(&def, 1, 2),
+            "loop back-edge should not be considered by cycle detection"
         );
+    }
+
+    #[test]
+    fn test_root_and_terminal_with_loop() {
+        // A(1)→B(2), loop_back(B,A) — A is still root, B is still terminal
+        let def = def_with_loops(
+            vec![block(1, 0, 0), block(2, 1, 0)],
+            vec![conn(1, 2)],
+            vec![lconn(2, 1, 1)],
+        );
+        assert_eq!(root_blocks(&def), vec![1], "A should be root (loop back-edge excluded)");
+        assert_eq!(terminal_blocks(&def), vec![2], "B should be terminal (loop back-edge excluded)");
     }
 
     // -- loop serialization test --
@@ -3163,15 +3706,15 @@ keep_across_iterations = false
 
     #[tokio::test]
     async fn test_loop_exec_basic() {
-        // Two blocks A(1) and B(2), loop(A, B, count=1).
-        // Expected: pass 0 runs A then B, then loop re-runs A then B (pass 1).
+        // A(1)→B(2) with loop_back(B, A, count=1).
+        // Expected: pass 0 runs A then B, loop re-runs A then B (pass 1).
         // Total BlockFinished events: 4 (2 per block, 2 passes each).
         let dir = tempfile::tempdir().unwrap();
         let output = OutputManager::new(dir.path(), Some("loop-exec-basic")).unwrap();
         let def = def_with_loops(
             vec![block(1, 0, 0), block(2, 1, 0)],
-            vec![],
-            vec![lconn(1, 2, 1)],
+            vec![conn(1, 2)],
+            vec![lconn(2, 1, 1)],
         );
 
         let agent_configs = HashMap::from([(
@@ -3232,14 +3775,15 @@ keep_across_iterations = false
 
     #[tokio::test]
     async fn test_loop_downstream_waits() {
-        // Three blocks: A(1), B(2), C(3). Loop(A, B, count=1). Connection B->C.
-        // C should only start after the loop completes (after B's final BlockFinished).
+        // A(1)→B(2)→C(3), loop_back(B, A, count=1).
+        // C should only start after the loop completes.
+        // B's external child (C) is deferred until loop exit.
         let dir = tempfile::tempdir().unwrap();
         let output = OutputManager::new(dir.path(), Some("loop-downstream-waits")).unwrap();
         let def = def_with_loops(
             vec![block(1, 0, 0), block(2, 1, 0), block(3, 2, 0)],
-            vec![conn(2, 3)],
-            vec![lconn(1, 2, 1)],
+            vec![conn(1, 2), conn(2, 3)],
+            vec![lconn(2, 1, 1)],
         );
 
         let agent_configs = HashMap::from([(
@@ -3304,21 +3848,20 @@ keep_across_iterations = false
 
     #[tokio::test]
     async fn test_loop_mixed_panic_replica_completes() {
-        // Regression: when one replica of the `from` block panics while the
-        // other succeeds, the loop must still advance passes and finish —
-        // the panic completion must increment pass counters just like normal.
+        // Regression: when one replica of the `from` (feedback source) block
+        // panics while the other succeeds, the loop must still advance passes.
         //
-        // Setup: A(1, replicas=2), B(2, replicas=1). Loop(A, B, count=1).
-        // One of A's replicas panics each pass; the other succeeds.
-        // Expected: loop still completes 2 passes, B finishes twice.
+        // Setup: A(1)→B(2, replicas=2), loop_back(B, A, count=1).
+        // B is the feedback source (from). One replica panics each pass.
+        // Expected: loop still completes 2 passes, A finishes twice.
         let dir = tempfile::tempdir().unwrap();
         let output = OutputManager::new(dir.path(), Some("loop-mixed-panic")).unwrap();
-        let mut a_block = block(1, 0, 0);
-        a_block.replicas = 2;
+        let mut b_block = block(2, 1, 0);
+        b_block.replicas = 2;
         let def = def_with_loops(
-            vec![a_block, block(2, 1, 0)],
-            vec![],
-            vec![lconn(1, 2, 1)],
+            vec![block(1, 0, 0), b_block],
+            vec![conn(1, 2)],
+            vec![lconn(2, 1, 1)],
         );
 
         let agent_configs = HashMap::from([(
@@ -3372,11 +3915,12 @@ keep_across_iterations = false
 
         let events = collect_progress_events(rx);
 
-        // B (runtime_id depends on replica expansion: A gets 0,1; B gets 2)
-        let b_finished = events.iter().filter(|e| matches!(
-            e, ProgressEvent::BlockFinished { block_id, .. } if *block_id == 2
+        // A gets runtime 0, B gets runtimes 1,2 (replicas=2)
+        // A (runtime 0) should finish twice (pass 0 + pass 1)
+        let a_finished = events.iter().filter(|e| matches!(
+            e, ProgressEvent::BlockFinished { block_id, .. } if *block_id == 0
         )).count();
-        assert_eq!(b_finished, 2, "B should finish twice (pass 0 + pass 1)");
+        assert_eq!(a_finished, 2, "A should finish twice (pass 0 + pass 1)");
 
         // At least one BlockError from the panicking replica
         assert!(events.iter().any(|e| matches!(
@@ -3388,20 +3932,19 @@ keep_across_iterations = false
 
     #[tokio::test]
     async fn test_loop_mixed_panic_on_to_side_completes() {
-        // Regression: same as test_loop_mixed_panic_replica_completes but
-        // the partial panic is on the `to` block instead of `from`.
+        // Regression: partial panic on the `to` (restart target) block.
         //
-        // Setup: A(1, replicas=1), B(2, replicas=2). Loop(A, B, count=1).
-        // One of B's replicas panics each pass; the other succeeds.
-        // Expected: loop still completes 2 passes, A finishes twice.
+        // Setup: A(1, replicas=2)→B(2), loop_back(B, A, count=1).
+        // A is the restart target with replicas=2. One replica panics.
+        // Expected: loop still completes, B finishes twice.
         let dir = tempfile::tempdir().unwrap();
         let output = OutputManager::new(dir.path(), Some("loop-to-panic")).unwrap();
-        let mut b_block = block(2, 1, 0);
-        b_block.replicas = 2;
+        let mut a_block = block(1, 0, 0);
+        a_block.replicas = 2;
         let def = def_with_loops(
-            vec![block(1, 0, 0), b_block],
-            vec![],
-            vec![lconn(1, 2, 1)],
+            vec![a_block, block(2, 1, 0)],
+            vec![conn(1, 2)],
+            vec![lconn(2, 1, 1)],
         );
 
         let agent_configs = HashMap::from([(
@@ -3455,16 +3998,17 @@ keep_across_iterations = false
 
         let events = collect_progress_events(rx);
 
-        // A (runtime_id 0) should finish twice (pass 0 + re-run at pass 1).
-        let a_finished = events.iter().filter(|e| matches!(
-            e, ProgressEvent::BlockFinished { block_id, .. } if *block_id == 0
+        // A gets runtimes 0,1 (replicas=2), B gets runtime 2
+        // B (runtime 2, feedback source) should finish twice (pass 0 + pass 1)
+        let b_finished = events.iter().filter(|e| matches!(
+            e, ProgressEvent::BlockFinished { block_id, .. } if *block_id == 2
         )).count();
-        assert_eq!(a_finished, 2, "A should finish twice (pass 0 + pass 1)");
+        assert_eq!(b_finished, 2, "B should finish twice (pass 0 + pass 1)");
 
-        // At least one BlockError from the panicking B replica
+        // At least one BlockError from the panicking A replica
         assert!(events.iter().any(|e| matches!(
             e, ProgressEvent::BlockError { error, .. } if error.contains("panicked")
-        )), "should have a panic error event from B replica");
+        )), "should have a panic error event from A replica");
 
         assert!(events.iter().any(|e| matches!(e, ProgressEvent::AllDone)));
     }
@@ -3494,5 +4038,299 @@ keep_across_iterations = false
         // pass=2 at iteration 3
         let pass2 = loop_replica_filename(&info, 3, 2);
         assert_eq!(pass2, "block1_claude_iter3_loop2.md");
+    }
+
+    // -- sub-DAG computation tests --
+
+    #[test]
+    fn test_compute_sub_dag_linear() {
+        // A(1)→B(2)→C(3), sub_dag(C,A) = {A,B,C}
+        let def = def_with(
+            vec![block(1, 0, 0), block(2, 1, 0), block(3, 2, 0)],
+            vec![conn(1, 2), conn(2, 3)],
+        );
+        let graph = RegularGraph::from_def(&def);
+        let sd = compute_loop_sub_dag(&graph, 3, 1).expect("should compute");
+        assert_eq!(sd.len(), 3);
+        assert!(sd.contains(&1) && sd.contains(&2) && sd.contains(&3));
+    }
+
+    #[test]
+    fn test_compute_sub_dag_diamond() {
+        // A(1)→{B(2),C(3)}→D(4), sub_dag(D,A) = {A,B,C,D}
+        let def = def_with(
+            vec![block(1, 0, 0), block(2, 1, 0), block(3, 1, 1), block(4, 2, 0)],
+            vec![conn(1, 2), conn(1, 3), conn(2, 4), conn(3, 4)],
+        );
+        let graph = RegularGraph::from_def(&def);
+        let sd = compute_loop_sub_dag(&graph, 4, 1).expect("should compute");
+        assert_eq!(sd.len(), 4);
+    }
+
+    #[test]
+    fn test_compute_sub_dag_partial() {
+        // A(1)→B(2)→C(3)→D(4), sub_dag(C,B) = {B,C}
+        let def = def_with(
+            vec![block(1, 0, 0), block(2, 1, 0), block(3, 2, 0), block(4, 3, 0)],
+            vec![conn(1, 2), conn(2, 3), conn(3, 4)],
+        );
+        let graph = RegularGraph::from_def(&def);
+        let sd = compute_loop_sub_dag(&graph, 3, 2).expect("should compute");
+        assert_eq!(sd.len(), 2);
+        assert!(sd.contains(&2) && sd.contains(&3));
+        assert!(!sd.contains(&1) && !sd.contains(&4));
+    }
+
+    #[test]
+    fn test_compute_sub_dag_not_ancestor() {
+        // A(1) and B(2) disconnected — no path
+        let def = def_with(
+            vec![block(1, 0, 0), block(2, 1, 0)],
+            vec![],
+        );
+        let graph = RegularGraph::from_def(&def);
+        assert!(compute_loop_sub_dag(&graph, 2, 1).is_none());
+    }
+
+    #[test]
+    fn test_compute_sub_dag_mixed_parents() {
+        // X(5)→B(2), A(1)→B(2)→C(3), sub_dag(C,A) = {A,B,C}, X excluded
+        let def = def_with(
+            vec![block(1, 0, 0), block(2, 1, 0), block(3, 2, 0), block(5, 0, 1)],
+            vec![conn(1, 2), conn(5, 2), conn(2, 3)],
+        );
+        let graph = RegularGraph::from_def(&def);
+        let sd = compute_loop_sub_dag(&graph, 3, 1).expect("should compute");
+        assert_eq!(sd.len(), 3);
+        assert!(sd.contains(&1) && sd.contains(&2) && sd.contains(&3));
+        assert!(!sd.contains(&5));
+    }
+
+    // -- intermediate re-run execution test --
+
+    #[tokio::test]
+    async fn test_loop_exec_intermediate_reruns() {
+        // A(1)→B(2)→C(3), loop_back(C, A, count=1).
+        // All three blocks are in the sub-DAG. B should re-run on pass 1.
+        let dir = tempfile::tempdir().unwrap();
+        let output = OutputManager::new(dir.path(), Some("loop-intermediate")).unwrap();
+        let def = def_with_loops(
+            vec![block(1, 0, 0), block(2, 1, 0), block(3, 2, 0)],
+            vec![conn(1, 2), conn(2, 3)],
+            vec![lconn(3, 1, 1)],
+        );
+
+        let agent_configs = HashMap::from([(
+            "Claude".to_string(),
+            (
+                ProviderKind::Anthropic,
+                ProviderConfig {
+                    api_key: String::new(),
+                    model: "test".to_string(),
+                    reasoning_effort: None,
+                    thinking_effort: None,
+                    use_cli: false,
+                    cli_print_mode: true,
+                    extra_cli_args: String::new(),
+                },
+                false,
+            ),
+        )]);
+        let context = PromptRuntimeContext::new(def.initial_prompt.clone(), false);
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let (tx, rx) = mpsc::unbounded_channel();
+
+        let recv_clone = received.clone();
+        run_pipeline_with_provider_factory(
+            &def,
+            0,
+            agent_configs,
+            &context,
+            &output,
+            tx,
+            Arc::new(AtomicBool::new(false)),
+            move |_kind, _cfg| {
+                Box::new(MockProvider::ok(
+                    ProviderKind::Anthropic,
+                    "intermediate output",
+                    recv_clone.clone(),
+                ))
+            },
+        )
+        .await
+        .expect("run");
+
+        let events = collect_progress_events(rx);
+
+        // Runtime IDs: 0=A, 1=B, 2=C
+        // All three should finish twice (pass 0 + pass 1)
+        for (rid, name) in [(0, "A"), (1, "B"), (2, "C")] {
+            let count = events.iter().filter(|e| matches!(
+                e, ProgressEvent::BlockFinished { block_id, .. } if *block_id == rid
+            )).count();
+            assert_eq!(count, 2, "{name} (runtime {rid}) should finish twice");
+        }
+        assert!(events.iter().any(|e| matches!(e, ProgressEvent::AllDone)));
+    }
+
+    #[tokio::test]
+    async fn test_loop_exec_external_deferred() {
+        // A(1)→B(2)→C(3), B(2)→E(4), loop_back(C, A, count=1).
+        // E is B's external child — deferred until loop done.
+        let dir = tempfile::tempdir().unwrap();
+        let output = OutputManager::new(dir.path(), Some("loop-external-deferred")).unwrap();
+        let def = def_with_loops(
+            vec![block(1, 0, 0), block(2, 1, 0), block(3, 2, 0), block(4, 2, 1)],
+            vec![conn(1, 2), conn(2, 3), conn(2, 4)],
+            vec![lconn(3, 1, 1)],
+        );
+
+        let agent_configs = HashMap::from([(
+            "Claude".to_string(),
+            (
+                ProviderKind::Anthropic,
+                ProviderConfig {
+                    api_key: String::new(),
+                    model: "test".to_string(),
+                    reasoning_effort: None,
+                    thinking_effort: None,
+                    use_cli: false,
+                    cli_print_mode: true,
+                    extra_cli_args: String::new(),
+                },
+                false,
+            ),
+        )]);
+        let context = PromptRuntimeContext::new(def.initial_prompt.clone(), false);
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let (tx, rx) = mpsc::unbounded_channel();
+
+        let recv_clone = received.clone();
+        run_pipeline_with_provider_factory(
+            &def,
+            0,
+            agent_configs,
+            &context,
+            &output,
+            tx,
+            Arc::new(AtomicBool::new(false)),
+            move |_kind, _cfg| {
+                Box::new(MockProvider::ok(
+                    ProviderKind::Anthropic,
+                    "output",
+                    recv_clone.clone(),
+                ))
+            },
+        )
+        .await
+        .expect("run");
+
+        let events = collect_progress_events(rx);
+
+        // Runtime IDs: 0=A, 1=B, 2=C, 3=E
+        // E (runtime 3) should start only after the loop completes
+        let e_started_idx = events.iter().position(|e| matches!(
+            e, ProgressEvent::BlockStarted { block_id, .. } if *block_id == 3
+        )).expect("E should have started");
+
+        // C (runtime 2, feedback source) last finished = loop completion
+        let c_last_finished_idx = events.iter().rposition(|e| matches!(
+            e, ProgressEvent::BlockFinished { block_id, .. } if *block_id == 2
+        )).expect("C should have finished");
+
+        assert!(
+            e_started_idx > c_last_finished_idx,
+            "E should start after loop completes (C's final finish)"
+        );
+        assert!(events.iter().any(|e| matches!(e, ProgressEvent::AllDone)));
+    }
+
+    #[tokio::test]
+    async fn test_loop_abort_with_external_downstream_completes() {
+        // Regression: loop abort must not double-release deferred external edges.
+        //
+        // Setup: A(1)→B(2)→C(3), B(2)→E(4), loop_back(C, A, count=1).
+        // A panics → B, C skipped → loop abandons → deferred releases E exactly once.
+        // Must complete without hanging.
+        let dir = tempfile::tempdir().unwrap();
+        let output = OutputManager::new(dir.path(), Some("loop-abort-ext")).unwrap();
+        let def = def_with_loops(
+            vec![block(1, 0, 0), block(2, 1, 0), block(3, 2, 0), block(4, 2, 1)],
+            vec![conn(1, 2), conn(2, 3), conn(2, 4)],
+            vec![lconn(3, 1, 1)],
+        );
+
+        let agent_configs = HashMap::from([(
+            "Claude".to_string(),
+            (
+                ProviderKind::Anthropic,
+                ProviderConfig {
+                    api_key: String::new(),
+                    model: "test".to_string(),
+                    reasoning_effort: None,
+                    thinking_effort: None,
+                    use_cli: false,
+                    cli_print_mode: true,
+                    extra_cli_args: String::new(),
+                },
+                false,
+            ),
+        )]);
+        let context = PromptRuntimeContext::new(def.initial_prompt.clone(), false);
+        let (tx, rx) = mpsc::unbounded_channel();
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let recv_clone = received.clone();
+
+        // Counter: first pool entry (A) panics, rest succeed
+        let call_counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = call_counter.clone();
+
+        run_pipeline_with_provider_factory(
+            &def,
+            0,
+            agent_configs,
+            &context,
+            &output,
+            tx,
+            Arc::new(AtomicBool::new(false)),
+            move |_kind, _cfg| {
+                let n = counter_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if n == 0 {
+                    // A (first pool entry) panics
+                    Box::new(PanicProvider::new(ProviderKind::Anthropic, "A fails"))
+                } else {
+                    Box::new(MockProvider::ok(
+                        ProviderKind::Anthropic,
+                        "output",
+                        recv_clone.clone(),
+                    ))
+                }
+            },
+        )
+        .await
+        .expect("run should complete despite A panicking");
+
+        let events = collect_progress_events(rx);
+
+        // A panics
+        assert!(events.iter().any(|e| matches!(
+            e, ProgressEvent::BlockError { error, .. } if error.contains("panicked")
+        )), "should have a panic error from A");
+
+        // E (runtime 3) should be skipped exactly once, not started or double-enqueued
+        let e_skipped = events.iter().filter(|e| matches!(
+            e, ProgressEvent::BlockSkipped { block_id, .. } if *block_id == 3
+        )).count();
+        assert_eq!(e_skipped, 1, "E should be skipped exactly once");
+
+        // E should NOT have a BlockStarted event
+        let e_started = events.iter().filter(|e| matches!(
+            e, ProgressEvent::BlockStarted { block_id, .. } if *block_id == 3
+        )).count();
+        assert_eq!(e_started, 0, "E should not be started when loop is abandoned");
+
+        // Must reach AllDone (no hang from double-release)
+        assert!(events.iter().any(|e| matches!(e, ProgressEvent::AllDone)),
+            "pipeline should reach AllDone after loop abort");
     }
 }

@@ -1908,16 +1908,19 @@ fn test_loop_connect_rejects_self_edge() {
 
 #[test]
 fn test_loop_connect_creates_loop() {
+    use crate::execution::pipeline::PipelineConnection;
     let mut app = pipeline_app_with_two_blocks();
-    // Enter loop connect mode from block 1
-    app.pipeline.pipeline_loop_connecting_from = Some(1);
-    // Navigate cursor to block 2
-    app.pipeline.pipeline_block_cursor = Some(2);
+    // Regular connection 1→2 so ancestry check passes
+    app.pipeline.pipeline_def.connections.push(PipelineConnection { from: 1, to: 2 });
+    // Enter loop connect mode from block 2 (downstream feedback source)
+    app.pipeline.pipeline_loop_connecting_from = Some(2);
+    // Cursor on block 1 (upstream restart target)
+    app.pipeline.pipeline_block_cursor = Some(1);
     handle_key(&mut app, key(KeyCode::Enter));
     assert_eq!(app.pipeline.pipeline_def.loop_connections.len(), 1);
     let lc = &app.pipeline.pipeline_def.loop_connections[0];
-    assert_eq!(lc.from, 1);
-    assert_eq!(lc.to, 2);
+    assert_eq!(lc.from, 2);
+    assert_eq!(lc.to, 1);
     assert_eq!(lc.count, 1);
     assert!(app.pipeline.pipeline_loop_connecting_from.is_none());
 }
@@ -1960,24 +1963,32 @@ fn test_x_includes_loop_connections() {
 }
 
 #[test]
-fn test_regular_c_rejects_when_loop_exists() {
+fn test_regular_connect_allows_loop_pair() {
     use crate::execution::pipeline::LoopConnection;
     let mut app = pipeline_app_with_two_blocks();
+    // Add a regular connection first (needed for loop ancestry)
+    app.pipeline
+        .pipeline_def
+        .connections
+        .push(crate::execution::pipeline::PipelineConnection { from: 1, to: 2 });
     app.pipeline
         .pipeline_def
         .loop_connections
         .push(LoopConnection {
-            from: 1,
-            to: 2,
+            from: 2,
+            to: 1,
             count: 1,
             prompt: String::new(),
         });
-    // Enter regular connect mode from block 1
+    // Adding another regular connection between loop endpoint blocks is allowed
+    // (as long as it doesn't create a cycle — but same-direction won't)
+    // Remove the existing regular connection first, then re-add via UI
+    app.pipeline.pipeline_def.connections.clear();
     app.pipeline.pipeline_connecting_from = Some(1);
     app.pipeline.pipeline_block_cursor = Some(2);
     handle_key(&mut app, key(KeyCode::Enter));
-    assert!(app.error_modal.is_some());
-    assert!(app.pipeline.pipeline_def.connections.is_empty());
+    assert!(app.error_modal.is_none());
+    assert_eq!(app.pipeline.pipeline_def.connections.len(), 1);
 }
 
 #[test]

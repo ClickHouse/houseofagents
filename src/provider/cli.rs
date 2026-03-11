@@ -105,6 +105,35 @@ impl CliProvider {
         }
     }
 
+    fn build_codex_args(&self) -> Result<(Vec<String>, PathBuf), AppError> {
+        let mut args = vec!["exec".to_string()];
+        if let Ok(cwd) = std::env::current_dir() {
+            args.push("-C".to_string());
+            args.push(cwd.display().to_string());
+        }
+        if self.session_id.is_some() {
+            args.push("resume".to_string());
+        }
+        if let Some(effort) = self.reasoning_effort.as_deref() {
+            args.push("-c".to_string());
+            args.push(format!("model_reasoning_effort=\"{effort}\""));
+        }
+        if !self.model.is_empty() {
+            args.push("--model".to_string());
+            args.push(self.model.clone());
+        }
+        let out_path = Self::codex_temp_output_path();
+        args.push("--json".to_string());
+        args.push("-o".to_string());
+        args.push(out_path.display().to_string());
+        if let Some(ref session_id) = self.session_id {
+            args.push(session_id.clone());
+        }
+        args.extend(self.parse_extra_cli_args()?);
+        args.push("-".to_string());
+        Ok((args, out_path))
+    }
+
     fn build_prompt_from_history(&self) -> String {
         let mut prompt = String::new();
         for msg in &self.history {
@@ -529,31 +558,8 @@ impl Provider for CliProvider {
                     args
                 }
                 ProviderKind::OpenAI => {
-                    let mut args = vec!["exec".to_string()];
-                    if let Ok(cwd) = std::env::current_dir() {
-                        args.push("-C".to_string());
-                        args.push(cwd.display().to_string());
-                    }
-                    if self.session_id.is_some() {
-                        args.push("resume".to_string());
-                    }
-                    if let Some(effort) = self.reasoning_effort.as_deref() {
-                        args.push("-c".to_string());
-                        args.push(format!("model_reasoning_effort=\"{effort}\""));
-                    }
-                    if !self.model.is_empty() {
-                        args.push("--model".to_string());
-                        args.push(self.model.clone());
-                    }
-                    let out_path = Self::codex_temp_output_path();
-                    args.push("--json".to_string());
-                    args.push("-o".to_string());
-                    args.push(out_path.display().to_string());
+                    let (args, out_path) = self.build_codex_args()?;
                     codex_output_path = Some(out_path);
-                    if let Some(ref session_id) = self.session_id {
-                        args.push(session_id.clone());
-                    }
-                    args.push("-".to_string());
                     args
                 }
                 ProviderKind::Gemini => vec![
@@ -568,7 +574,9 @@ impl Provider for CliProvider {
                 args.push("--model".to_string());
                 args.push(self.model.clone());
             }
-            args.extend(self.parse_extra_cli_args()?);
+            if self.kind != ProviderKind::OpenAI {
+                args.extend(self.parse_extra_cli_args()?);
+            }
             self.push_command_debug(&mut debug_logs, bin, &args);
             self.emit_live_log(format!("start {} (timeout {}s)", bin, self.timeout_seconds));
 
@@ -817,6 +825,38 @@ mod tests {
         let provider = provider_with_extra("--opt \"unterminated");
         let err = provider.parse_extra_cli_args().expect_err("should fail");
         assert!(err.to_string().contains("Invalid extra_cli_args"));
+    }
+
+    #[test]
+    fn codex_args_extra_cli_before_prompt_placeholder() {
+        let provider = CliProvider::new(
+            ProviderKind::OpenAI,
+            "o3".to_string(),
+            Some("high".to_string()),
+            None,
+            "--sandbox full".to_string(),
+            false,
+            Vec::new(),
+            30,
+            50,
+            0,
+        );
+        let (args, _path) = provider.build_codex_args().unwrap();
+        // The prompt placeholder "-" must always be the last argument.
+        assert_eq!(args.last().unwrap(), "-");
+        // extra_cli_args ("--sandbox", "full") must appear before "-".
+        let dash_pos = args.iter().position(|a| a == "-").unwrap();
+        let sandbox_pos = args.iter().position(|a| a == "--sandbox").unwrap();
+        assert!(
+            sandbox_pos < dash_pos,
+            "extra_cli_args must precede the prompt placeholder; got --sandbox at {sandbox_pos}, - at {dash_pos}"
+        );
+        // Verify overall layout: exec, -C, <cwd>, -c, reasoning, --model, --json, -o, <path>, --sandbox, full, -
+        assert_eq!(args[0], "exec");
+        let model_pos = args.iter().position(|a| a == "--model").unwrap();
+        let json_pos = args.iter().position(|a| a == "--json").unwrap();
+        assert!(model_pos < json_pos, "--model before --json");
+        assert!(json_pos < sandbox_pos, "--json before extra_cli_args");
     }
 
     #[test]

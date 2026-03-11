@@ -120,11 +120,7 @@ pub(super) fn start_pipeline_execution(app: &mut App) {
         })
         .collect();
 
-    let loop_extra: usize = app.pipeline.pipeline_def.loop_connections.iter().map(|lc| {
-        let fr = app.pipeline.pipeline_def.blocks.iter().find(|b| b.id == lc.from).map(|b| b.replicas).unwrap_or(1);
-        let tr = app.pipeline.pipeline_def.blocks.iter().find(|b| b.id == lc.to).map(|b| b.replicas).unwrap_or(1);
-        lc.count as usize * (fr as usize + tr as usize)
-    }).sum();
+    let loop_extra = crate::execution::pipeline::loop_extra_tasks(&app.pipeline.pipeline_def);
     app.running.expected_total_steps = (rt.entries.len() + loop_extra) * iterations as usize;
 
     // HTTP client
@@ -257,9 +253,13 @@ pub(super) fn pipeline_step_labels(def: &pipeline_mod::PipelineDefinition) -> Ve
     // Build set of block IDs participating in loops and their total passes
     let mut loop_passes: std::collections::HashMap<pipeline_mod::BlockId, u32> =
         std::collections::HashMap::new();
+    let graph = pipeline_mod::RegularGraph::from_def(def);
     for lc in &def.loop_connections {
-        loop_passes.insert(lc.from, lc.count + 1);
-        loop_passes.insert(lc.to, lc.count + 1);
+        if let Some(sub_dag) = pipeline_mod::compute_loop_sub_dag(&graph, lc.from, lc.to) {
+            for &block_id in &sub_dag {
+                loop_passes.insert(block_id, lc.count + 1);
+            }
+        }
     }
     let mut labels = Vec::new();
     for info in &rt.entries {
@@ -620,11 +620,7 @@ pub(super) fn start_multi_pipeline_execution(
                         );
                     }
                     let run_rt = crate::execution::pipeline::build_runtime_table(&pipeline_def);
-                    let run_loop_extra: usize = pipeline_def.loop_connections.iter().map(|lc| {
-                        let fr = pipeline_def.blocks.iter().find(|b| b.id == lc.from).map(|b| b.replicas).unwrap_or(1);
-                        let tr = pipeline_def.blocks.iter().find(|b| b.id == lc.to).map(|b| b.replicas).unwrap_or(1);
-                        lc.count as usize * (fr as usize + tr as usize)
-                    }).sum();
+                    let run_loop_extra = crate::execution::pipeline::loop_extra_tasks(&pipeline_def);
                     if let Err(e) = output.write_pipeline_session_info(
                         pipeline_def.blocks.len(),
                         pipeline_def.connections.len(),

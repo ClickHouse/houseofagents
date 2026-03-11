@@ -643,7 +643,7 @@ fn draw_canvas(f: &mut Frame, app: &App, area: Rect) {
 
     // Status line for connect/remove modes
     if app.pipeline.pipeline_loop_connecting_from.is_some() {
-        let status = Paragraph::new("Select target block (Enter=loop, Esc=cancel)")
+        let status = Paragraph::new("Select upstream restart target (Enter=loop, Esc=cancel)")
             .style(Style::default().fg(Color::Yellow));
         let sy = canvas_inner.y + canvas_inner.height.saturating_sub(1);
         f.render_widget(status, Rect::new(canvas_inner.x, sy, canvas_inner.width, 1));
