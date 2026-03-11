@@ -383,6 +383,7 @@ pub(super) struct ConsolidationRequest {
 
 impl ConsolidationRequest {
     #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         run_dir: std::path::PathBuf,
         target: ConsolidationTarget,
