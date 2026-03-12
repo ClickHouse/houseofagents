@@ -22,8 +22,7 @@ pub(super) fn maybe_start_diagnostics(app: &mut App) {
         Some(cfg) => cfg,
         None => {
             app.error_modal = Some(format!(
-                "Diagnostic agent '{}' is not configured",
-                diag_agent_name
+                "Diagnostic agent '{diag_agent_name}' is not configured"
             ));
             return;
         }
@@ -31,7 +30,7 @@ pub(super) fn maybe_start_diagnostics(app: &mut App) {
     let diagnostic_kind = agent_config.provider;
     if let Err(message) = validate_agent_runtime(
         app,
-        &format!("Diagnostic agent '{}'", diag_agent_name),
+        &format!("Diagnostic agent '{diag_agent_name}'"),
         &agent_config,
     ) {
         app.error_modal = Some(message);
@@ -60,6 +59,7 @@ pub(super) fn maybe_start_diagnostics(app: &mut App) {
         app.config.max_history_messages,
         app.config.max_history_bytes,
         app.effective_cli_timeout_seconds().max(1),
+        vec![],
     );
 
     app.record_progress(ProgressEvent::AgentLog {

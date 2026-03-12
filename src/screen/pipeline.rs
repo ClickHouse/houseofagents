@@ -1,5 +1,6 @@
 use crate::app::{
-    App, PipelineDialogMode, PipelineEditField, PipelineFocus, PipelineLoopEditField,
+    App, PipelineDialogMode, PipelineEditField, PipelineFeedEditField, PipelineFocus,
+    PipelineLoopEditField,
 };
 use crate::execution::pipeline::BlockId;
 use crate::execution::truncate_chars;
@@ -56,6 +57,48 @@ const WIRE_PALETTE: [Color; 6] = [
     Color::LightGreen,
 ];
 
+/// Given the current pipeline state and connection cursor, resolve which finalization
+/// connection (by global index) is highlighted. Returns `None` if the cursor does not
+/// point at a finalization connection.
+fn resolve_fin_conn_highlight(ps: &crate::app::PipelineState, removing: bool) -> Option<usize> {
+    if !removing {
+        return None;
+    }
+    let sel = ps.pipeline_block_cursor?;
+    let regular_count = ps
+        .pipeline_def
+        .connections
+        .iter()
+        .filter(|c| c.from == sel || c.to == sel)
+        .count();
+    let loop_count = ps
+        .pipeline_def
+        .loop_connections
+        .iter()
+        .filter(|lc| lc.from == sel || lc.to == sel)
+        .count();
+    let prefix = regular_count + loop_count;
+    if ps.pipeline_conn_cursor < prefix {
+        return None;
+    }
+    let fin_local = ps.pipeline_conn_cursor - prefix;
+    ps.pipeline_def
+        .finalization_connections
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.from == sel || c.to == sel)
+        .nth(fin_local)
+        .map(|(i, _)| i)
+}
+
+/// Compute the pixel Y offset of the separator line between execution and finalization blocks.
+/// Returns the separator Y in world coordinates (pixels).
+/// Finalization blocks' local Y coordinates are offset by this value + CELL_H.
+pub(crate) fn separator_y_offset(blocks: &[crate::execution::pipeline::PipelineBlock]) -> i16 {
+    let max_row = blocks.iter().map(|b| b.position.1).max().unwrap_or(0);
+    (max_row as i16 + 1) * CELL_H as i16
+}
+
 /// Choose arrow character based on the direction of a wire segment's endpoint.
 fn arrow_for_seg(seg: &WireSeg) -> char {
     let dx = seg.x2 - seg.x1;
@@ -102,6 +145,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
     if app.pipeline.pipeline_show_loop_edit {
         draw_loop_edit_popup(f, app, area);
+    }
+    if app.pipeline.pipeline_show_feed_edit {
+        draw_feed_edit_popup(f, app, area);
     }
     if app.help_popup.active {
         let tab = app.help_popup.tab;
@@ -188,6 +234,7 @@ fn draw_prompt_area(f: &mut Frame, app: &App, area: Rect) {
         || app.pipeline.pipeline_file_dialog.is_some()
         || app.pipeline.pipeline_show_session_config
         || app.pipeline.pipeline_show_loop_edit
+        || app.pipeline.pipeline_show_feed_edit
         || app.error_modal.is_some()
         || app.help_popup.active
         || app.setup_analysis.active;
@@ -319,7 +366,9 @@ fn draw_canvas(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    if app.pipeline.pipeline_def.blocks.is_empty() {
+    if app.pipeline.pipeline_def.blocks.is_empty()
+        && app.pipeline.pipeline_def.finalization_blocks.is_empty()
+    {
         let msg = Paragraph::new("Press 'a' to add a block")
             .style(Style::default().fg(Color::DarkGray))
             .alignment(ratatui::layout::Alignment::Center);
@@ -375,9 +424,9 @@ fn draw_canvas(f: &mut Frame, app: &App, area: Rect) {
         };
         let total_tasks = block.agents.len() as u32 * block.replicas;
         let title = if total_tasks > 1 {
-            format!(" {} \u{00d7}{} ", base_title, total_tasks)
+            format!(" {base_title} \u{00d7}{total_tasks} ")
         } else {
-            format!(" {} ", base_title)
+            format!(" {base_title} ")
         };
         let block_widget = Block::default()
             .title(title)
@@ -714,8 +763,328 @@ fn draw_canvas(f: &mut Frame, app: &App, area: Rect) {
         }
     }
 
+    // ── Finalization separator, blocks, feeds, and connections ──
+    if !app.pipeline.pipeline_def.finalization_blocks.is_empty() {
+        let sep_y = separator_y_offset(&app.pipeline.pipeline_def.blocks);
+        // Render separator dashed line
+        let screen_sep_y = canvas_inner.y as i16 + sep_y - oy;
+        if screen_sep_y >= canvas_inner.y as i16
+            && (screen_sep_y as u16) < canvas_inner.y + canvas_inner.height
+        {
+            let label = " Finalization ";
+            let label_len = label.len() as u16;
+            let dash_style = Style::default().fg(Color::Cyan);
+            let label_style = Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD);
+            let w = canvas_inner.width;
+            // Center the label
+            let label_start = if w > label_len {
+                (w - label_len) / 2
+            } else {
+                0
+            };
+            for col in 0..w {
+                let screen_x = canvas_inner.x + col;
+                let screen_y = screen_sep_y as u16;
+                if screen_y < canvas_inner.y + canvas_inner.height {
+                    if col >= label_start && col < label_start + label_len {
+                        let ch_idx = (col - label_start) as usize;
+                        if let Some(ch) = label.chars().nth(ch_idx) {
+                            let buf = f.buffer_mut();
+                            buf[(screen_x, screen_y)]
+                                .set_char(ch)
+                                .set_style(label_style);
+                        }
+                    } else {
+                        let buf = f.buffer_mut();
+                        buf[(screen_x, screen_y)]
+                            .set_char('\u{2500}')
+                            .set_style(dash_style);
+                    }
+                }
+            }
+        }
+
+        // Finalization block Y offset = sep_y + 1 row of gap
+        let fin_y_off = sep_y + CELL_H as i16 / 2;
+
+        // Draw finalization blocks
+        for block in &app.pipeline.pipeline_def.finalization_blocks {
+            let sx = block.position.0 as i16 * CELL_W as i16 - ox;
+            let sy = block.position.1 as i16 * CELL_H as i16 + fin_y_off - oy;
+
+            if sx + BLOCK_W as i16 <= 0 || sy + BLOCK_H as i16 <= 0 {
+                continue;
+            }
+            let rx = canvas_inner.x as i16 + sx;
+            let ry = canvas_inner.y as i16 + sy;
+            if rx < canvas_inner.x as i16
+                || ry < canvas_inner.y as i16
+                || rx as u16 + BLOCK_W > canvas_inner.x + canvas_inner.width
+                || ry as u16 + BLOCK_H > canvas_inner.y + canvas_inner.height
+            {
+                continue;
+            }
+            let block_area = Rect::new(rx as u16, ry as u16, BLOCK_W, BLOCK_H);
+
+            let is_selected = app.pipeline.pipeline_block_cursor == Some(block.id);
+            let is_feed_connect_src =
+                app.pipeline.pipeline_feed_connecting_from.is_some() && is_selected;
+
+            let border_type = if is_selected {
+                BorderType::Double
+            } else {
+                BorderType::Rounded
+            };
+            let border_color = if is_feed_connect_src {
+                Color::Green
+            } else if is_selected {
+                Color::Yellow
+            } else {
+                Color::Magenta
+            };
+
+            let base_title = if block.name.is_empty() {
+                block.primary_agent().to_string()
+            } else {
+                block.name.clone()
+            };
+            let total_tasks = block.agents.len() as u32 * block.replicas;
+            let title = if total_tasks > 1 {
+                format!(" {base_title} \u{00d7}{total_tasks} ")
+            } else {
+                format!(" {base_title} ")
+            };
+            let block_widget = Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_type(border_type)
+                .border_style(Style::default().fg(border_color));
+            let inner = block_widget.inner(block_area);
+            f.render_widget(block_widget, block_area);
+
+            // Line 1: Agent name(s)
+            if inner.height > 0 && inner.width > 0 {
+                let agent_text = if block.agents.len() > 1 {
+                    format!("Multiple ({})", block.agents.len())
+                } else {
+                    block.primary_agent().to_string()
+                };
+                let agent_display = truncate_chars(&agent_text, inner.width as usize);
+                let agent_p = Paragraph::new(Span::styled(
+                    agent_display,
+                    Style::default().fg(Color::White),
+                ));
+                f.render_widget(agent_p, Rect::new(inner.x, inner.y, inner.width, 1));
+            }
+
+            // Line 2: Prompt status
+            if inner.height > 1 && inner.width > 0 {
+                let prompt_label = if block.prompt.is_empty() {
+                    "Prompt: no"
+                } else {
+                    "Prompt: yes"
+                };
+                let prompt_p = Paragraph::new(Span::styled(
+                    prompt_label,
+                    Style::default().fg(Color::DarkGray),
+                ));
+                f.render_widget(prompt_p, Rect::new(inner.x, inner.y + 1, inner.width, 1));
+            }
+
+            // Line 3: Session ID (if present)
+            if inner.height > 2 && inner.width > 0 {
+                if let Some(ref sid) = block.session_id {
+                    let sess_display = truncate_chars(sid, inner.width.saturating_sub(6) as usize);
+                    let sess_p = Paragraph::new(Span::styled(
+                        format!("sess: {sess_display}"),
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                    f.render_widget(sess_p, Rect::new(inner.x, inner.y + 2, inner.width, 1));
+                }
+            }
+        }
+
+        // ── Data feed wires (dashed yellow from execution blocks to finalization blocks) ──
+        let feed_style = Style::default().fg(Color::Yellow);
+        let exec_blocks = &app.pipeline.pipeline_def.blocks;
+        let fin_blocks = &app.pipeline.pipeline_def.finalization_blocks;
+        for feed in &app.pipeline.pipeline_def.data_feeds {
+            // Determine source blocks
+            let sources: Vec<&crate::execution::pipeline::PipelineBlock> =
+                if feed.from == crate::execution::pipeline::WILDCARD_BLOCK_ID {
+                    exec_blocks.iter().collect()
+                } else {
+                    exec_blocks.iter().filter(|b| b.id == feed.from).collect()
+                };
+            let target = fin_blocks.iter().find(|b| b.id == feed.to);
+            let Some(target) = target else { continue };
+
+            for src in &sources {
+                // Source bottom center (execution block)
+                let src_cx = src.position.0 as i16 * CELL_W as i16 + BLOCK_W as i16 / 2;
+                let src_by = src.position.1 as i16 * CELL_H as i16 + BLOCK_H as i16;
+                // Target top center (finalization block, offset by fin_y_off)
+                let tgt_cx = target.position.0 as i16 * CELL_W as i16 + BLOCK_W as i16 / 2;
+                let tgt_ty = target.position.1 as i16 * CELL_H as i16 + fin_y_off;
+
+                // Draw dashed vertical-ish wire: go down from src, horizontal to align, then down to target
+                let mid_y = (src_by + tgt_ty) / 2;
+                // Vertical from src bottom to mid
+                let (y_lo, y_hi) = (src_by, mid_y);
+                for y in y_lo..=y_hi {
+                    let dash = if (y - y_lo) % 2 == 0 { '\u{2506}' } else { ' ' };
+                    if dash != ' ' {
+                        put_char(f, canvas_inner, src_cx - ox, y - oy, dash, feed_style);
+                    }
+                }
+                // Horizontal from src_cx to tgt_cx at mid_y
+                if src_cx != tgt_cx {
+                    let (x_lo, x_hi) = if src_cx < tgt_cx {
+                        (src_cx, tgt_cx)
+                    } else {
+                        (tgt_cx, src_cx)
+                    };
+                    for x in x_lo..=x_hi {
+                        let dash = if (x - x_lo) % 2 == 0 { '\u{2504}' } else { ' ' };
+                        if dash != ' ' {
+                            put_char(f, canvas_inner, x - ox, mid_y - oy, dash, feed_style);
+                        }
+                    }
+                }
+                // Vertical from mid_y to target top
+                for y in mid_y..tgt_ty {
+                    let dash = if (y - mid_y) % 2 == 0 {
+                        '\u{2506}'
+                    } else {
+                        ' '
+                    };
+                    if dash != ' ' {
+                        put_char(f, canvas_inner, tgt_cx - ox, y - oy, dash, feed_style);
+                    }
+                }
+                // Arrow at target top
+                put_char(
+                    f,
+                    canvas_inner,
+                    tgt_cx - ox,
+                    tgt_ty - oy,
+                    '\u{25bc}',
+                    feed_style,
+                );
+            }
+        }
+
+        // ── Finalization connections (within finalization phase) ──
+        if !app
+            .pipeline
+            .pipeline_def
+            .finalization_connections
+            .is_empty()
+        {
+            // Build position map with offset applied for finalization blocks
+            let fin_blocks_offset: Vec<crate::execution::pipeline::PipelineBlock> =
+                app.pipeline.pipeline_def.finalization_blocks.to_vec();
+            let fin_grid_occ = grid_occupancy(&fin_blocks_offset);
+            let fin_lanes = assign_lanes(
+                &app.pipeline.pipeline_def.finalization_connections,
+                &fin_blocks_offset,
+            );
+            let fin_ports = assign_ports(
+                &app.pipeline.pipeline_def.finalization_connections,
+                &fin_blocks_offset,
+            );
+
+            // Resolve highlighted finalization connection
+            let fin_highlighted_global_idx =
+                resolve_fin_conn_highlight(&app.pipeline, app.pipeline.pipeline_removing_conn);
+
+            for (ci, conn) in app
+                .pipeline
+                .pipeline_def
+                .finalization_connections
+                .iter()
+                .enumerate()
+            {
+                let fb = fin_blocks_offset.iter().find(|b| b.id == conn.from);
+                let tb = fin_blocks_offset.iter().find(|b| b.id == conn.to);
+                let (Some(fb), Some(tb)) = (fb, tb) else {
+                    continue;
+                };
+
+                let removing = app.pipeline.pipeline_removing_conn
+                    && is_conn_for_selected(app, conn.from, conn.to);
+                let highlighted = fin_highlighted_global_idx == Some(ci);
+                let color = if highlighted {
+                    Color::Red
+                } else if removing {
+                    Color::Yellow
+                } else {
+                    WIRE_PALETTE[ci % WIRE_PALETTE.len()]
+                };
+
+                let (exit_y_off, entry_y_off) = fin_ports[ci];
+                let segs = route_wire(
+                    fb.position,
+                    tb.position,
+                    &fin_grid_occ,
+                    fin_lanes[ci],
+                    exit_y_off,
+                    entry_y_off,
+                );
+                let mut conn_map: ConnectionRaster = HashMap::new();
+                for seg in &segs {
+                    rasterize_seg(seg, color, &mut conn_map);
+                }
+                if let Some(last) = segs.last() {
+                    let arrow_ch = arrow_for_seg(last);
+                    if let Some(cell) = conn_map.get_mut(&(last.x2, last.y2)) {
+                        cell.is_arrow = true;
+                        cell.arrow_char = arrow_ch;
+                    } else {
+                        conn_map.insert(
+                            (last.x2, last.y2),
+                            WireCell {
+                                dirs: 0,
+                                color,
+                                is_arrow: true,
+                                arrow_char: arrow_ch,
+                                is_loop: false,
+                            },
+                        );
+                    }
+                }
+                // Paint finalization connection wires (offset by fin_y_off)
+                for (&(wx, wy), cell) in &conn_map {
+                    if pixel_hits_block(wx, wy, &fin_blocks_offset) {
+                        continue;
+                    }
+                    let ch = if cell.is_arrow {
+                        cell.arrow_char
+                    } else {
+                        dirs_to_char(cell.dirs)
+                    };
+                    put_char(
+                        f,
+                        canvas_inner,
+                        wx - ox,
+                        wy + fin_y_off - oy,
+                        ch,
+                        Style::default().fg(cell.color),
+                    );
+                }
+            }
+        }
+    }
+
     // Status line for connect/remove modes
-    if app.pipeline.pipeline_loop_connecting_from.is_some() {
+    if app.pipeline.pipeline_feed_connecting_from.is_some() {
+        let status = Paragraph::new("Select finalization block target (Enter=feed, Esc=cancel)")
+            .style(Style::default().fg(Color::Yellow));
+        let sy = canvas_inner.y + canvas_inner.height.saturating_sub(1);
+        f.render_widget(status, Rect::new(canvas_inner.x, sy, canvas_inner.width, 1));
+    } else if app.pipeline.pipeline_loop_connecting_from.is_some() {
         let status = Paragraph::new("Select upstream restart target (Enter=loop, Esc=cancel)")
             .style(Style::default().fg(Color::Yellow));
         let sy = canvas_inner.y + canvas_inner.height.saturating_sub(1);
@@ -1167,9 +1536,9 @@ pub(crate) fn render_dag_readonly(
         };
         let total_tasks = block.agents.len() as u32 * block.replicas;
         let title = if total_tasks > 1 {
-            format!(" {} \u{00d7}{} ", base_title, total_tasks)
+            format!(" {base_title} \u{00d7}{total_tasks} ")
         } else {
-            format!(" {} ", base_title)
+            format!(" {base_title} ")
         };
         let block_widget = Block::default()
             .title(title)
@@ -1390,7 +1759,9 @@ pub(crate) fn render_dag_readonly(
 }
 
 fn draw_help_bar(f: &mut Frame, app: &App, area: Rect) {
-    let help = if app.pipeline.pipeline_loop_connecting_from.is_some() {
+    let help = if app.pipeline.pipeline_feed_connecting_from.is_some() {
+        "Arrows: navigate to finalization block | Enter: create feed | Esc: cancel"
+    } else if app.pipeline.pipeline_loop_connecting_from.is_some() {
         "Arrows: navigate | Enter: loop | Esc: cancel"
     } else if app.pipeline.pipeline_connecting_from.is_some() {
         "Arrows: navigate | Enter: connect | Esc: cancel"
@@ -1402,7 +1773,7 @@ fn draw_help_bar(f: &mut Frame, app: &App, area: Rect) {
     ) {
         "Tab: next field | F5: run | Ctrl+E: analyze | Esc: back"
     } else {
-        "Arrows/hjkl: select | Shift+Arrows/HJKL: move block | Ctrl+Arrows: scroll | a: add | d: delete | e: edit | c: connect | x: disconnect | o: loop | s: sessions | Ctrl+S: save | Ctrl+L: load | Ctrl+E: analyze | F5: run | ?: help | Esc: back"
+        "a: add | A: add finalization | d: del | e: edit | c: connect | x: disconnect | o: loop | f: feed | F: rm feed | s: sessions | ?: help | Esc: back"
     };
     let help_p = Paragraph::new(help)
         .style(Style::default().fg(Color::DarkGray))
@@ -1551,20 +1922,33 @@ fn draw_edit_popup(f: &mut Frame, app: &App, area: Rect) {
         f.set_cursor_position((cx, cy));
     }
 
-    // Session ID
-    let sess_focus = app.pipeline.pipeline_edit_field == PipelineEditField::SessionId;
-    let sess_style = if sess_focus {
-        Style::default().fg(Color::Cyan)
+    // Session ID (hidden for finalization blocks — they use runtime-managed sessions)
+    let is_fin_block = app
+        .pipeline
+        .pipeline_block_cursor
+        .map(|sel| app.pipeline.pipeline_def.is_finalization_block(sel))
+        .unwrap_or(false);
+    if is_fin_block {
+        let sess_line = Line::from(vec![
+            Span::styled("Session ID: ", Style::default().fg(Color::White)),
+            Span::styled("(managed by runtime)", Style::default().fg(Color::DarkGray)),
+        ]);
+        f.render_widget(Paragraph::new(sess_line), chunks[6]);
     } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    let sess_line = Line::from(vec![
-        Span::styled("Session ID: ", Style::default().fg(Color::White)),
-        Span::styled("[", sess_style),
-        Span::raw(&app.pipeline.pipeline_edit_session_buf),
-        Span::styled("]", sess_style),
-    ]);
-    f.render_widget(Paragraph::new(sess_line), chunks[6]);
+        let sess_focus = app.pipeline.pipeline_edit_field == PipelineEditField::SessionId;
+        let sess_style = if sess_focus {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        let sess_line = Line::from(vec![
+            Span::styled("Session ID: ", Style::default().fg(Color::White)),
+            Span::styled("[", sess_style),
+            Span::raw(&app.pipeline.pipeline_edit_session_buf),
+            Span::styled("]", sess_style),
+        ]);
+        f.render_widget(Paragraph::new(sess_line), chunks[6]);
+    }
 
     // Replicas
     let rep_focus = app.pipeline.pipeline_edit_field == PipelineEditField::Replicas;
@@ -1591,7 +1975,7 @@ fn draw_edit_popup(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(" too many agents (max 32)", Style::default().fg(Color::Red)),
         ])
     } else {
-        let rep_hint = format!(" (1-{})", max_replicas);
+        let rep_hint = format!(" (1-{max_replicas})");
         Line::from(vec![
             Span::styled("Replicas: ", Style::default().fg(Color::White)),
             Span::styled("[", rep_style),
@@ -1786,10 +2170,10 @@ fn draw_session_config_popup(f: &mut Frame, app: &App, area: Rect) {
         };
 
         let row = Line::from(vec![
-            Span::styled(format!("{:<15}", agent_col), style),
-            Span::styled(format!("{:<17}", label_col), style),
+            Span::styled(format!("{agent_col:<15}"), style),
+            Span::styled(format!("{label_col:<17}"), style),
             Span::styled(
-                format!("{:<6}", keep_col),
+                format!("{keep_col:<6}"),
                 if session.keep_across_iterations {
                     style.fg(if is_selected {
                         Color::Black
@@ -1854,7 +2238,7 @@ fn draw_loop_edit_popup(f: &mut Frame, app: &App, area: Rect) {
             ("?".into(), "?".into())
         };
 
-    let title = format!(" Loop: {} \u{2192} {} ", from_name, to_name);
+    let title = format!(" Loop: {from_name} \u{2192} {to_name} ");
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
@@ -1942,6 +2326,130 @@ fn draw_loop_edit_popup(f: &mut Frame, app: &App, area: Rect) {
     )
     .style(Style::default().fg(Color::DarkGray));
     f.render_widget(hint, chunks[3]);
+}
+
+fn draw_feed_edit_popup(f: &mut Frame, app: &App, area: Rect) {
+    let popup = centered_rect(50, 30, area);
+    f.render_widget(Clear, popup);
+
+    let (from_name, to_name) =
+        if let Some((from_id, to_id)) = app.pipeline.pipeline_feed_edit_target {
+            let fname = if from_id == 0 {
+                "All execution blocks".to_string()
+            } else {
+                app.pipeline
+                    .pipeline_def
+                    .blocks
+                    .iter()
+                    .find(|b| b.id == from_id)
+                    .map(|b| {
+                        if b.name.is_empty() {
+                            format!("Block {}", b.id)
+                        } else {
+                            b.name.clone()
+                        }
+                    })
+                    .unwrap_or_else(|| format!("#{from_id}"))
+            };
+            let tname = app
+                .pipeline
+                .pipeline_def
+                .finalization_blocks
+                .iter()
+                .find(|b| b.id == to_id)
+                .map(|b| {
+                    if b.name.is_empty() {
+                        format!("Block {}", b.id)
+                    } else {
+                        b.name.clone()
+                    }
+                })
+                .unwrap_or_else(|| format!("#{to_id}"));
+            (fname, tname)
+        } else {
+            ("?".into(), "?".into())
+        };
+
+    let title = format!(" Feed: {from_name} \u{2192} {to_name} ");
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    if inner.width < 10 || inner.height < 5 {
+        return;
+    }
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2), // Collection
+            Constraint::Length(1), // spacer
+            Constraint::Length(2), // Granularity
+            Constraint::Length(1), // spacer
+            Constraint::Length(1), // hint
+        ])
+        .split(inner);
+
+    // Find the current feed values
+    let (cur_collection, cur_granularity) = app
+        .pipeline
+        .pipeline_feed_edit_target
+        .and_then(|(from_id, to_id)| {
+            app.pipeline
+                .pipeline_def
+                .data_feeds
+                .iter()
+                .find(|f| f.from == from_id && f.to == to_id)
+                .map(|f| (f.collection, f.granularity))
+        })
+        .unwrap_or((
+            crate::execution::pipeline::FeedCollection::LastIteration,
+            crate::execution::pipeline::FeedGranularity::PerRun,
+        ));
+
+    // Collection field
+    let coll_focus = app.pipeline.pipeline_feed_edit_field == PipelineFeedEditField::Collection;
+    let coll_style = if coll_focus {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let coll_value = cur_collection.as_str();
+    let coll_line = Line::from(vec![
+        Span::styled("Collection: ", Style::default().fg(Color::White)),
+        Span::styled(format!("< {coll_value} >"), coll_style),
+        Span::styled(
+            "  (Space/Enter to toggle)",
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]);
+    f.render_widget(Paragraph::new(coll_line), chunks[0]);
+
+    // Granularity field
+    let gran_focus = app.pipeline.pipeline_feed_edit_field == PipelineFeedEditField::Granularity;
+    let gran_style = if gran_focus {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let gran_value = cur_granularity.as_str();
+    let gran_line = Line::from(vec![
+        Span::styled("Granularity: ", Style::default().fg(Color::White)),
+        Span::styled(format!("< {gran_value} >"), gran_style),
+        Span::styled(
+            "  (Space/Enter to toggle)",
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]);
+    f.render_widget(Paragraph::new(gran_line), chunks[2]);
+
+    // Hint
+    let hint = Paragraph::new("  Tab: switch field  Space/Enter: toggle value  Esc: close")
+        .style(Style::default().fg(Color::DarkGray));
+    f.render_widget(hint, chunks[4]);
 }
 
 fn draw_error_modal(f: &mut Frame, message: &str) {

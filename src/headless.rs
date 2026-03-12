@@ -103,10 +103,7 @@ const ERROR_LEDGER_LIMIT: usize = 200;
 /// Fails closed: if `_errors.log` exists but cannot be stat'd (permissions,
 /// transient I/O), we assume errors rather than silently reporting success.
 fn has_nonempty_error_log(run_dir: &str) -> bool {
-    match std::path::Path::new(run_dir)
-        .join("_errors.log")
-        .metadata()
-    {
+    match std::path::Path::new(run_dir).join("_errors.log").metadata() {
         Ok(m) => m.len() > 0,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
         Err(_) => true, // Can't verify — assume errors for safety
@@ -319,6 +316,23 @@ impl ProgressLogger {
                     }
                 }
             }
+            BatchProgressEvent::BatchStageStarted { ref label } => {
+                if !self.quiet {
+                    eprintln!("[{now}] [Batch] {label} started");
+                }
+            }
+            BatchProgressEvent::BatchStageFinished {
+                ref label,
+                ref error,
+            } => {
+                if !self.quiet {
+                    if let Some(err) = error {
+                        eprintln!("[{now}] [Batch] {label} finished: FAILED - {err}");
+                    } else {
+                        eprintln!("[{now}] [Batch] {label} finished: ok");
+                    }
+                }
+            }
             BatchProgressEvent::AllRunsDone => {}
         }
         self.accumulate_batch_finish_errors(event);
@@ -365,6 +379,24 @@ impl ProgressLogger {
                         "event": "run_finished",
                         "run_id": run_id,
                         "status": status,
+                        "error": error,
+                    });
+                    eprintln!("{}", serde_json::to_string(&obj).unwrap_or_default());
+                }
+                BatchProgressEvent::BatchStageStarted { ref label } => {
+                    let obj = serde_json::json!({
+                        "event": "batch_stage_started",
+                        "label": label,
+                    });
+                    eprintln!("{}", serde_json::to_string(&obj).unwrap_or_default());
+                }
+                BatchProgressEvent::BatchStageFinished {
+                    ref label,
+                    ref error,
+                } => {
+                    let obj = serde_json::json!({
+                        "event": "batch_stage_finished",
+                        "label": label,
                         "error": error,
                     });
                     eprintln!("{}", serde_json::to_string(&obj).unwrap_or_default());
@@ -868,7 +900,8 @@ pub(crate) async fn run(args: HeadlessArgs, config: AppConfig) -> i32 {
                 let msg = format!("Failed to load pipeline: {e}");
                 match args.output_format {
                     OutputFormat::Json => {
-                        let obj = serde_json::json!({"event": "result", "status": "error", "error": msg});
+                        let obj =
+                            serde_json::json!({"event": "result", "status": "error", "error": msg});
                         println!("{}", serde_json::to_string(&obj).unwrap_or_default());
                     }
                     OutputFormat::Text => eprintln!("Error: {msg}"),
@@ -887,7 +920,8 @@ pub(crate) async fn run(args: HeadlessArgs, config: AppConfig) -> i32 {
             let msg = e.to_string();
             match args.output_format {
                 OutputFormat::Json => {
-                    let obj = serde_json::json!({"event": "result", "status": "error", "error": msg});
+                    let obj =
+                        serde_json::json!({"event": "result", "status": "error", "error": msg});
                     println!("{}", serde_json::to_string(&obj).unwrap_or_default());
                 }
                 OutputFormat::Text => eprintln!("Error: {msg}"),
@@ -1014,6 +1048,7 @@ struct RunSummary {
     #[allow(dead_code)]
     failed_runs: Vec<u32>,
     base_errors: Vec<String>,
+    pipeline_has_finalization: bool,
 }
 
 struct PostRunResult {
@@ -1064,6 +1099,8 @@ async fn run_single_standard(
         .map(|a| (a.name.clone(), a.use_cli))
         .collect();
 
+    let output_dir = config.resolved_output_dir();
+    let add_dirs = vec![output_dir.display().to_string()];
     let providers: Vec<(String, Box<dyn provider::Provider>)> = resolved
         .iter()
         .map(|a| {
@@ -1075,6 +1112,7 @@ async fn run_single_standard(
                 config.max_history_messages,
                 config.max_history_bytes,
                 cli_timeout_secs,
+                add_dirs.clone(),
             );
             (a.name.clone(), p)
         })
@@ -1082,7 +1120,6 @@ async fn run_single_standard(
 
     let prompt_context =
         PromptRuntimeContext::new(prompt.clone(), config.diagnostic_provider.is_some());
-    let output_dir = config.resolved_output_dir();
     let output = OutputManager::new(&output_dir, args.session_name.as_deref())
         .map_err(|e| format!("Failed to create output directory: {e}"))?;
     let run_dir = output.run_dir().display().to_string();
@@ -1185,13 +1222,10 @@ async fn run_single_standard(
     let has_agent_errors = logger.has_errors();
     let has_error_log = has_nonempty_error_log(&run_dir);
     let failed = task_result.is_err() || has_agent_errors || has_error_log;
-    let error = task_result
-        .err()
-        .map(|e| e.to_string())
-        .or_else(|| {
-            (has_agent_errors || has_error_log)
-                .then(|| "One or more agents reported errors".to_string())
-        });
+    let error = task_result.err().map(|e| e.to_string()).or_else(|| {
+        (has_agent_errors || has_error_log)
+            .then(|| "One or more agents reported errors".to_string())
+    });
 
     Ok(RunSummary {
         run_dir: Some(run_dir),
@@ -1203,6 +1237,7 @@ async fn run_single_standard(
         successful_runs: if failed { vec![] } else { vec![1] },
         failed_runs: if failed { vec![1] } else { vec![] },
         base_errors: logger.drain_errors(),
+        pipeline_has_finalization: false,
     })
 }
 
@@ -1219,8 +1254,12 @@ async fn run_single_pipeline(
     let cli_available = rs::detect_cli_availability();
     let session_overrides = rs::compute_session_overrides(&config.agents, &cli_available);
 
-    // Validate all referenced agents
-    for block in &pipeline_def.blocks {
+    // Validate all referenced agents (execution + finalization blocks)
+    for block in pipeline_def
+        .blocks
+        .iter()
+        .chain(pipeline_def.finalization_blocks.iter())
+    {
         for agent_name in &block.agents {
             let agent_config =
                 rs::resolve_agent_config(agent_name, &session_overrides, &config.agents)
@@ -1273,22 +1312,29 @@ async fn run_single_pipeline(
                 .map(|p| p.to_string_lossy().to_string())
                 .as_deref(),
         )
-        .map_err(|e| HeadlessError::Execution(format!("Failed to write pipeline session metadata: {e}")))?;
+        .map_err(|e| {
+            HeadlessError::Execution(format!("Failed to write pipeline session metadata: {e}"))
+        })?;
 
     // Write pipeline.toml snapshot
     match toml::to_string_pretty(&pipeline_def) {
         Ok(toml_str) => {
             if let Err(e) = std::fs::write(output.run_dir().join("pipeline.toml"), &toml_str) {
                 let _ = output.append_error(&format!("Failed to write pipeline.toml: {e}"));
-                return Err(HeadlessError::Execution(format!("Failed to write pipeline.toml: {e}")));
+                return Err(HeadlessError::Execution(format!(
+                    "Failed to write pipeline.toml: {e}"
+                )));
             }
         }
         Err(e) => {
             let _ = output.append_error(&format!("Failed to serialize pipeline.toml: {e}"));
-            return Err(HeadlessError::Execution(format!("Failed to serialize pipeline.toml: {e}")));
+            return Err(HeadlessError::Execution(format!(
+                "Failed to serialize pipeline.toml: {e}"
+            )));
         }
     }
 
+    let has_finalization = pipeline_def.has_finalization();
     let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
     let mut logger =
         ProgressLogger::new(args.output_format, args.quiet, pipeline_def.iterations, 1);
@@ -1298,24 +1344,96 @@ async fn run_single_pipeline(
         let pipeline_def = pipeline_def.clone();
         let config = config.clone();
         let prompt_context = prompt_context.clone();
+        let run_dir_path = PathBuf::from(&run_dir);
         async move {
-            let result = pipeline_mod::run_pipeline(
-                &pipeline_def,
-                &config,
-                agent_configs,
-                client,
-                cli_timeout_secs,
-                &prompt_context,
-                &output,
-                progress_tx.clone(),
-                task_cancel,
-            )
-            .await;
-            if let Err(e) = &result {
+            if has_finalization {
+                // Proxy channel pattern: withhold AllDone, run finalization
+                let (inner_tx, mut inner_rx) = mpsc::unbounded_channel();
+                let fwd_tx = progress_tx.clone();
+                let fwd = tokio::spawn(async move {
+                    while let Some(event) = inner_rx.recv().await {
+                        if matches!(event, ProgressEvent::AllDone) {
+                            return;
+                        }
+                        let _ = fwd_tx.send(event);
+                    }
+                });
+
+                let exec_rt = pipeline_mod::build_runtime_table(&pipeline_def);
+                let result = pipeline_mod::run_pipeline(
+                    &pipeline_def,
+                    &config,
+                    agent_configs.clone(),
+                    client.clone(),
+                    cli_timeout_secs,
+                    &prompt_context,
+                    &output,
+                    inner_tx.clone(),
+                    task_cancel.clone(),
+                )
+                .await;
+
+                if result.is_err() {
+                    let _ = inner_tx.send(ProgressEvent::AllDone);
+                }
+                drop(inner_tx);
+                let _ = fwd.await;
+
+                if result.is_ok() {
+                    let fin_scope = pipeline_mod::FinalizationRunScope::SingleRun {
+                        run_id: 1,
+                        run_dir: run_dir_path,
+                    };
+                    if let Err(e) = pipeline_mod::run_pipeline_finalization(
+                        &pipeline_def,
+                        fin_scope,
+                        &exec_rt,
+                        agent_configs,
+                        output.run_dir(),
+                        progress_tx.clone(),
+                        task_cancel,
+                        |kind, cfg| {
+                            provider::create_provider(
+                                kind,
+                                cfg,
+                                client.clone(),
+                                config.default_max_tokens,
+                                config.max_history_messages,
+                                config.max_history_bytes,
+                                cli_timeout_secs,
+                                vec![output.run_dir().display().to_string()],
+                            )
+                        },
+                    )
+                    .await
+                    {
+                        let _ = output.append_error(&format!("Finalization failed: {e}"));
+                    }
+                } else if let Err(ref e) = result {
+                    let _ = output.append_error(&format!("Pipeline failed: {e}"));
+                }
+
                 let _ = progress_tx.send(ProgressEvent::AllDone);
-                let _ = output.append_error(&format!("Pipeline failed: {e}"));
+                result
+            } else {
+                let result = pipeline_mod::run_pipeline(
+                    &pipeline_def,
+                    &config,
+                    agent_configs,
+                    client,
+                    cli_timeout_secs,
+                    &prompt_context,
+                    &output,
+                    progress_tx.clone(),
+                    task_cancel,
+                )
+                .await;
+                if let Err(e) = &result {
+                    let _ = progress_tx.send(ProgressEvent::AllDone);
+                    let _ = output.append_error(&format!("Pipeline failed: {e}"));
+                }
+                result
             }
-            result
         }
     });
 
@@ -1331,13 +1449,10 @@ async fn run_single_pipeline(
     let has_agent_errors = logger.has_errors();
     let has_error_log = has_nonempty_error_log(&run_dir);
     let failed = task_result.is_err() || has_agent_errors || has_error_log;
-    let error = task_result
-        .err()
-        .map(|e| e.to_string())
-        .or_else(|| {
-            (has_agent_errors || has_error_log)
-                .then(|| "One or more agents reported errors".to_string())
-        });
+    let error = task_result.err().map(|e| e.to_string()).or_else(|| {
+        (has_agent_errors || has_error_log)
+            .then(|| "One or more agents reported errors".to_string())
+    });
 
     Ok(RunSummary {
         run_dir: Some(run_dir),
@@ -1349,6 +1464,7 @@ async fn run_single_pipeline(
         successful_runs: if failed { vec![] } else { vec![1] },
         failed_runs: if failed { vec![1] } else { vec![] },
         base_errors: logger.drain_errors(),
+        pipeline_has_finalization: has_finalization,
     })
 }
 
@@ -1402,10 +1518,7 @@ async fn run_batch_standard(
     let mode = args.mode;
     let forward_prompt = args.forward_prompt;
     let keep_session = args.keep_session;
-    let session_name: Option<Arc<str>> = args
-        .session_name
-        .as_deref()
-        .map(Arc::from);
+    let session_name: Option<Arc<str>> = args.session_name.as_deref().map(Arc::from);
     let runs = args.runs;
     let http_timeout_secs = config.http_timeout_seconds.max(1);
     let cli_timeout_secs = config.cli_timeout_seconds.max(1);
@@ -1491,6 +1604,7 @@ async fn run_batch_standard(
                         .map(|a| (a.name.clone(), a.use_cli))
                         .collect();
 
+                    let run_add_dirs = vec![output.run_dir().display().to_string()];
                     let providers: Vec<(String, Box<dyn provider::Provider>)> = resolved
                         .iter()
                         .map(|a| {
@@ -1502,6 +1616,7 @@ async fn run_batch_standard(
                                 config.max_history_messages,
                                 config.max_history_bytes,
                                 cli_timeout_secs,
+                                run_add_dirs.clone(),
                             );
                             (a.name.clone(), p)
                         })
@@ -1550,11 +1665,7 @@ async fn run_batch_standard(
                     // Executors send AllDone on Ok(()); only send on Err.
                     match result {
                         Ok(()) => {
-                            let has_errors = match output
-                                .run_dir()
-                                .join("_errors.log")
-                                .metadata()
-                            {
+                            let has_errors = match output.run_dir().join("_errors.log").metadata() {
                                 Ok(m) => m.len() > 0,
                                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
                                 Err(_) => true, // Can't verify — assume errors for safety
@@ -1626,6 +1737,7 @@ async fn run_batch_standard(
         successful_runs,
         failed_runs,
         base_errors: logger.drain_errors(),
+        pipeline_has_finalization: false,
     })
 }
 
@@ -1642,7 +1754,11 @@ async fn run_batch_pipeline(
     let cli_available = rs::detect_cli_availability();
     let session_overrides = rs::compute_session_overrides(&config.agents, &cli_available);
 
-    for block in &pipeline_def.blocks {
+    for block in pipeline_def
+        .blocks
+        .iter()
+        .chain(pipeline_def.finalization_blocks.iter())
+    {
         for agent_name in &block.agents {
             let agent_config =
                 rs::resolve_agent_config(agent_name, &session_overrides, &config.agents)
@@ -1657,7 +1773,7 @@ async fn run_batch_pipeline(
     }
 
     let concurrency = rs::effective_concurrency(args.runs, args.concurrency);
-    let step_labels = pipeline_mod::pipeline_step_labels(&pipeline_def);
+    let step_labels = pipeline_mod::pipeline_step_labels(&pipeline_def, false);
 
     let output_dir = config.resolved_output_dir();
     let batch_root = OutputManager::new_batch_parent(&output_dir, args.session_name.as_deref())
@@ -1699,6 +1815,7 @@ async fn run_batch_pipeline(
         toml::to_string_pretty(&pipeline_def)
             .map_err(|e| format!("Failed to serialize pipeline: {e}"))?,
     );
+    let has_finalization = pipeline_def.has_finalization();
     let pipeline_def = Arc::new(pipeline_def);
     let batch_root_dir = batch_root.run_dir().to_path_buf();
     let pipeline_path_clone = args.pipeline_path.clone();
@@ -1711,130 +1828,237 @@ async fn run_batch_pipeline(
         .build()
         .map_err(|e| format!("HTTP client error: {e}"))?;
 
-    let handle = tokio::spawn(async move {
-        run_multi(
-            runs,
-            concurrency,
-            batch_tx,
-            task_cancel,
-            move |run_id, progress_tx, run_cancel| {
-                let client = client.clone();
-                let config = config_clone.clone();
-                let pipeline_def = pipeline_def.clone();
-                let agent_configs = agent_configs.clone();
-                let batch_root_dir = batch_root_dir.clone();
-                let pipeline_path = pipeline_path_clone.clone();
-                let pipeline_toml_str = pipeline_toml_str.clone();
-                async move {
-                    let parent_output = match OutputManager::from_existing(batch_root_dir.clone()) {
-                        Ok(o) => o,
-                        Err(e) => {
-                            let _ = progress_tx.send(ProgressEvent::AllDone);
-                            return (RunOutcome::Failed, Some(format!("Output error: {e}")));
-                        }
-                    };
-                    let output = match parent_output.new_run_subdir(run_id) {
-                        Ok(o) => o,
-                        Err(e) => {
-                            let _ = progress_tx.send(ProgressEvent::AllDone);
-                            return (RunOutcome::Failed, Some(format!("Output error: {e}")));
-                        }
-                    };
+    // Shared closure for each run — identical regardless of finalization.
+    let make_run_closure = {
+        let client = client.clone();
+        let config_clone = config_clone.clone();
+        let pipeline_def = pipeline_def.clone();
+        let agent_configs = agent_configs.clone();
+        let batch_root_dir = batch_root_dir.clone();
+        let pipeline_path_clone = pipeline_path_clone.clone();
+        let pipeline_toml_str = pipeline_toml_str.clone();
+        move |run_id: u32,
+              progress_tx: mpsc::UnboundedSender<ProgressEvent>,
+              run_cancel: Arc<AtomicBool>| {
+            let client = client.clone();
+            let config = config_clone.clone();
+            let pipeline_def = pipeline_def.clone();
+            let agent_configs = agent_configs.clone();
+            let batch_root_dir = batch_root_dir.clone();
+            let pipeline_path = pipeline_path_clone.clone();
+            let pipeline_toml_str = pipeline_toml_str.clone();
+            async move {
+                let parent_output = match OutputManager::from_existing(batch_root_dir.clone()) {
+                    Ok(o) => o,
+                    Err(e) => {
+                        let _ = progress_tx.send(ProgressEvent::AllDone);
+                        return (RunOutcome::Failed, Some(format!("Output error: {e}")));
+                    }
+                };
+                let output = match parent_output.new_run_subdir(run_id) {
+                    Ok(o) => o,
+                    Err(e) => {
+                        let _ = progress_tx.send(ProgressEvent::AllDone);
+                        return (RunOutcome::Failed, Some(format!("Output error: {e}")));
+                    }
+                };
 
-                    let prompt_context = PromptRuntimeContext::new(
-                        pipeline_def.initial_prompt.clone(),
-                        config.diagnostic_provider.is_some(),
+                let prompt_context = PromptRuntimeContext::new(
+                    pipeline_def.initial_prompt.clone(),
+                    config.diagnostic_provider.is_some(),
+                );
+
+                if let Err(e) = output.write_prompt(prompt_context.raw_prompt()) {
+                    let _ = progress_tx.send(ProgressEvent::AllDone);
+                    return (
+                        RunOutcome::Failed,
+                        Some(format!("Failed to write prompt: {e}")),
                     );
+                }
+                if let Err(e) = output.write_pipeline_session_info(
+                    pipeline_def.blocks.len(),
+                    pipeline_def.connections.len(),
+                    pipeline_def.loop_connections.len(),
+                    pipeline_def.iterations,
+                    total_tasks,
+                    pipeline_path
+                        .as_deref()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .as_deref(),
+                ) {
+                    let _ = progress_tx.send(ProgressEvent::AllDone);
+                    return (
+                        RunOutcome::Failed,
+                        Some(format!("Failed to write pipeline session metadata: {e}")),
+                    );
+                }
 
-                    if let Err(e) = output.write_prompt(prompt_context.raw_prompt()) {
-                        let _ = progress_tx.send(ProgressEvent::AllDone);
-                        return (
-                            RunOutcome::Failed,
-                            Some(format!("Failed to write prompt: {e}")),
-                        );
-                    }
-                    if let Err(e) = output.write_pipeline_session_info(
-                        pipeline_def.blocks.len(),
-                        pipeline_def.connections.len(),
-                        pipeline_def.loop_connections.len(),
-                        pipeline_def.iterations,
-                        total_tasks,
-                        pipeline_path
-                            .as_deref()
-                            .map(|p| p.to_string_lossy().to_string())
-                            .as_deref(),
-                    ) {
-                        let _ = progress_tx.send(ProgressEvent::AllDone);
-                        return (
-                            RunOutcome::Failed,
-                            Some(format!("Failed to write pipeline session metadata: {e}")),
-                        );
-                    }
+                if let Err(e) =
+                    std::fs::write(output.run_dir().join("pipeline.toml"), &*pipeline_toml_str)
+                {
+                    let _ = output.append_error(&format!("Failed to write pipeline.toml: {e}"));
+                    let _ = progress_tx.send(ProgressEvent::AllDone);
+                    return (
+                        RunOutcome::Failed,
+                        Some(format!("Failed to write pipeline.toml: {e}")),
+                    );
+                }
 
-                    if let Err(e) =
-                        std::fs::write(output.run_dir().join("pipeline.toml"), &*pipeline_toml_str)
-                    {
-                        let _ = output
-                            .append_error(&format!("Failed to write pipeline.toml: {e}"));
-                        let _ = progress_tx.send(ProgressEvent::AllDone);
-                        return (
-                            RunOutcome::Failed,
-                            Some(format!("Failed to write pipeline.toml: {e}")),
-                        );
-                    }
+                let result = pipeline_mod::run_pipeline(
+                    &pipeline_def,
+                    &config,
+                    (*agent_configs).clone(),
+                    client,
+                    cli_timeout_secs,
+                    &prompt_context,
+                    &output,
+                    progress_tx.clone(),
+                    run_cancel.clone(),
+                )
+                .await;
 
-                    let result = pipeline_mod::run_pipeline(
-                        &pipeline_def,
-                        &config,
-                        (*agent_configs).clone(),
-                        client,
-                        cli_timeout_secs,
-                        &prompt_context,
-                        &output,
-                        progress_tx.clone(),
-                        run_cancel.clone(),
-                    )
-                    .await;
+                if run_cancel.load(Ordering::Relaxed) {
+                    return (RunOutcome::Cancelled, None);
+                }
 
-                    if run_cancel.load(Ordering::Relaxed) {
-                        return (RunOutcome::Cancelled, None);
-                    }
-
-                    // Executors send AllDone on Ok(()); only send on Err.
-                    match result {
-                        Ok(()) => {
-                            let has_errors = match output
-                                .run_dir()
-                                .join("_errors.log")
-                                .metadata()
-                            {
-                                Ok(m) => m.len() > 0,
-                                Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-                                Err(_) => true, // Can't verify — assume errors for safety
-                            };
-                            if has_errors {
-                                (
-                                    RunOutcome::Failed,
-                                    Some("One or more agents reported errors".to_string()),
-                                )
-                            } else {
-                                (RunOutcome::Done, None)
-                            }
+                // Executors send AllDone on Ok(()); only send on Err.
+                match result {
+                    Ok(()) => {
+                        let has_errors = match output.run_dir().join("_errors.log").metadata() {
+                            Ok(m) => m.len() > 0,
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+                            Err(_) => true,
+                        };
+                        if has_errors {
+                            (
+                                RunOutcome::Failed,
+                                Some("One or more agents reported errors".to_string()),
+                            )
+                        } else {
+                            (RunOutcome::Done, None)
                         }
-                        Err(e) => {
-                            let _ = output.append_error(&format!("Pipeline failed: {e}"));
-                            let _ = progress_tx.send(ProgressEvent::AllDone);
-                            (RunOutcome::Failed, Some(e.to_string()))
-                        }
+                    }
+                    Err(e) => {
+                        let _ = output.append_error(&format!("Pipeline failed: {e}"));
+                        let _ = progress_tx.send(ProgressEvent::AllDone);
+                        (RunOutcome::Failed, Some(e.to_string()))
                     }
                 }
-            },
-        )
-        .await;
-    });
+            }
+        }
+    };
+
+    let handle = if has_finalization {
+        // Proxy channel pattern: intercept AllRunsDone, collect successful runs,
+        // run finalization, then emit outer AllRunsDone.
+        let (inner_batch_tx, mut inner_batch_rx) = mpsc::unbounded_channel();
+        let outer_tx = batch_tx.clone();
+        let batch_root_for_fwd = batch_root_dir.clone();
+
+        let fwd = tokio::spawn(async move {
+            let mut successful_runs: Vec<(u32, PathBuf)> = Vec::new();
+            while let Some(event) = inner_batch_rx.recv().await {
+                if let BatchProgressEvent::RunFinished {
+                    run_id,
+                    outcome: RunOutcome::Done,
+                    ..
+                } = &event
+                {
+                    successful_runs
+                        .push((*run_id, batch_root_for_fwd.join(format!("run_{run_id}"))));
+                }
+                if matches!(event, BatchProgressEvent::AllRunsDone) {
+                    return successful_runs;
+                }
+                let _ = outer_tx.send(event);
+            }
+            successful_runs
+        });
+
+        let pipeline_def_for_fin = pipeline_def.clone();
+        let agent_configs_for_fin = agent_configs.clone();
+        let config_for_fin = config.clone();
+        let cancel_for_fin = task_cancel.clone();
+        let client_for_fin = client.clone();
+        let batch_root_for_fin = batch_root_dir.clone();
+
+        tokio::spawn(async move {
+            run_multi(
+                runs,
+                concurrency,
+                inner_batch_tx,
+                task_cancel,
+                make_run_closure,
+            )
+            .await;
+
+            let mut successful_runs = fwd.await.unwrap_or_default();
+            successful_runs.sort_by_key(|(id, _)| *id);
+
+            if !successful_runs.is_empty() {
+                let _ = batch_tx.send(BatchProgressEvent::BatchStageStarted {
+                    label: "Finalization".into(),
+                });
+
+                let exec_rt = pipeline_mod::build_runtime_table(&pipeline_def_for_fin);
+                let (fin_tx, mut fin_rx) = mpsc::unbounded_channel();
+                let drain = tokio::spawn(async move { while fin_rx.recv().await.is_some() {} });
+
+                let fin_client = client_for_fin.clone();
+                let fin_result = pipeline_mod::run_pipeline_finalization(
+                    &pipeline_def_for_fin,
+                    pipeline_mod::FinalizationRunScope::Batch { successful_runs },
+                    &exec_rt,
+                    (*agent_configs_for_fin).clone(),
+                    &batch_root_for_fin,
+                    fin_tx,
+                    cancel_for_fin,
+                    |kind, cfg| {
+                        provider::create_provider(
+                            kind,
+                            cfg,
+                            fin_client.clone(),
+                            config_for_fin.default_max_tokens,
+                            config_for_fin.max_history_messages,
+                            config_for_fin.max_history_bytes,
+                            cli_timeout_secs,
+                            vec![batch_root_for_fin.display().to_string()],
+                        )
+                    },
+                )
+                .await;
+                let _ = drain.await;
+
+                let error = fin_result.err().map(|e| {
+                    let msg = e.to_string();
+                    let err_path = batch_root_for_fin.join("_errors.log");
+                    let _ = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&err_path)
+                        .and_then(|mut f| {
+                            use std::io::Write;
+                            writeln!(f, "Finalization failed: {msg}")
+                        });
+                    msg
+                });
+                let _ = batch_tx.send(BatchProgressEvent::BatchStageFinished {
+                    label: "Finalization".into(),
+                    error,
+                });
+            }
+
+            let _ = batch_tx.send(BatchProgressEvent::AllRunsDone);
+        })
+    } else {
+        tokio::spawn(async move {
+            run_multi(runs, concurrency, batch_tx, task_cancel, make_run_closure).await;
+        })
+    };
 
     let mut successful_runs = Vec::new();
     let mut failed_runs = Vec::new();
+    let mut finalization_error: Option<String> = None;
     while let Some(event) = batch_rx.recv().await {
         let is_done = matches!(event, BatchProgressEvent::AllRunsDone);
         if let BatchProgressEvent::RunFinished {
@@ -1845,6 +2069,13 @@ async fn run_batch_pipeline(
                 RunOutcome::Done => successful_runs.push(*run_id),
                 RunOutcome::Failed | RunOutcome::Cancelled => failed_runs.push(*run_id),
             }
+        }
+        if let BatchProgressEvent::BatchStageFinished {
+            error: ref error @ Some(_),
+            ..
+        } = event
+        {
+            finalization_error = error.clone();
         }
         logger.log_batch_progress(&event);
         if is_done {
@@ -1858,7 +2089,7 @@ async fn run_batch_pipeline(
     // Sort for deterministic consolidation order (completion order is arbitrary).
     successful_runs.sort_unstable();
     failed_runs.sort_unstable();
-    let failed = !failed_runs.is_empty();
+    let failed = !failed_runs.is_empty() || finalization_error.is_some();
 
     Ok(RunSummary {
         run_dir: Some(batch_dir),
@@ -1866,18 +2097,26 @@ async fn run_batch_pipeline(
         agents: vec![],
         runs: args.runs,
         failed,
-        error: if failed {
+        error: if let (false, Some(fin_err)) = (failed_runs.is_empty(), &finalization_error) {
+            Some(format!(
+                "{} of {} runs failed; finalization also failed: {}",
+                failed_runs.len(),
+                args.runs,
+                fin_err
+            ))
+        } else if !failed_runs.is_empty() {
             Some(format!(
                 "{} of {} runs failed",
                 failed_runs.len(),
                 args.runs
             ))
         } else {
-            None
+            finalization_error.map(|fin_err| format!("Finalization failed: {fin_err}"))
         },
         successful_runs,
         failed_runs,
         base_errors: logger.drain_errors(),
+        pipeline_has_finalization: has_finalization,
     })
 }
 
@@ -1912,12 +2151,16 @@ async fn run_post_steps(
     // Consolidation — for single runs, `run_consolidation_steps` discovers
     // outputs and skips if there aren't enough. This matches TUI behavior
     // where partial failures (e.g. 2 of 3 swarm agents) still consolidate.
+    // Skip consolidation for pipelines with finalization (finalization replaces it).
     let mut consolidation_error = None;
     if let Some(ref agent_name) = args.consolidate_agent {
-        if let Err(e) =
-            run_consolidation_steps(&run_dir, args, config, summary, agent_name, &mut result).await
-        {
-            consolidation_error = Some(e);
+        if !summary.pipeline_has_finalization {
+            if let Err(e) =
+                run_consolidation_steps(&run_dir, args, config, summary, agent_name, &mut result)
+                    .await
+            {
+                consolidation_error = Some(e);
+            }
         }
     }
 
@@ -2073,6 +2316,7 @@ async fn run_diagnostics_step(
         config.max_history_messages,
         config.max_history_bytes,
         cli_timeout_secs,
+        vec![],
     );
 
     if !quiet {
@@ -2134,6 +2378,7 @@ async fn run_consolidation(
                 max_history_messages,
                 max_history_bytes,
                 cli_timeout_secs,
+                vec![run_dir.display().to_string()],
             )
         },
     )

@@ -16,6 +16,8 @@ use tokio::sync::{mpsc, Mutex};
 const MAX_TERMINAL_OUTPUTS_BYTES: usize = 512 * 1024; // 512 KB cap
 
 pub type BlockId = u32;
+/// Sentinel value for wildcard data feeds: "all execution blocks".
+pub const WILDCARD_BLOCK_ID: BlockId = 0;
 type ProviderPool = HashMap<(String, String), Arc<Mutex<Box<dyn provider::Provider>>>>;
 pub(crate) type PipelineAgentConfigs =
     HashMap<String, (ProviderKind, crate::config::ProviderConfig, bool)>;
@@ -46,10 +48,19 @@ struct PipelineMessageContext<'a> {
 // Runtime Replica Table
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RuntimePhase {
+    Execution,
+    Finalization,
+}
+
 pub(crate) struct RuntimeReplicaInfo {
     pub runtime_id: u32,
     pub source_block_id: BlockId,
     pub replica_index: u32,
+    #[allow(dead_code)]
+    pub phase: RuntimePhase,
+    pub run_scope: Option<u32>,
     pub agent: String,
     pub display_label: String,
     pub session_key: String,
@@ -98,7 +109,7 @@ pub(crate) fn build_runtime_table(def: &PipelineDefinition) -> RuntimeReplicaTab
                 let display_label = match (multi_agent, multi_replica) {
                     (false, false) => blabel.clone(),
                     (false, true) => format!("{} (r{})", blabel, ri + 1),
-                    (true, false) => format!("{} ({})", blabel, agent),
+                    (true, false) => format!("{blabel} ({agent})"),
                     (true, true) => format!("{} ({} r{})", blabel, agent, ri + 1),
                 };
 
@@ -109,11 +120,11 @@ pub(crate) fn build_runtime_table(def: &PipelineDefinition) -> RuntimeReplicaTab
                 };
 
                 let filename_stem = match (multi_agent, multi_replica) {
-                    (false, false) => format!("{}_{}", block_name_key, agent_file_key),
+                    (false, false) => format!("{block_name_key}_{agent_file_key}"),
                     (false, true) => {
                         format!("{}_{}_r{}", block_name_key, agent_file_key, ri + 1)
                     }
-                    (true, false) => format!("{}_{}", block_name_key, agent_file_key),
+                    (true, false) => format!("{block_name_key}_{agent_file_key}"),
                     (true, true) => {
                         format!("{}_{}_r{}", block_name_key, agent_file_key, ri + 1)
                     }
@@ -125,6 +136,8 @@ pub(crate) fn build_runtime_table(def: &PipelineDefinition) -> RuntimeReplicaTab
                     runtime_id,
                     source_block_id: block.id,
                     replica_index: ri,
+                    phase: RuntimePhase::Execution,
+                    run_scope: None,
                     agent: agent.clone(),
                     display_label,
                     session_key,
@@ -148,7 +161,16 @@ pub(crate) fn build_runtime_table(def: &PipelineDefinition) -> RuntimeReplicaTab
 // Pipeline step labels (shared between TUI and headless)
 // ---------------------------------------------------------------------------
 
-pub(crate) fn pipeline_step_labels(def: &PipelineDefinition) -> Vec<String> {
+/// Build step labels for pipeline progress tracking.
+///
+/// When `include_finalization` is true, finalization labels are appended
+/// (appropriate for single-run where finalization is part of the run).
+/// Batch callers should pass `false` because finalization is batch-scope,
+/// not per-run, and is tracked separately via `BatchStageStarted/Finished`.
+pub(crate) fn pipeline_step_labels(
+    def: &PipelineDefinition,
+    include_finalization: bool,
+) -> Vec<String> {
     let rt = build_runtime_table(def);
     // Build set of block IDs participating in loops and their total passes
     let mut loop_passes: HashMap<BlockId, u32> = HashMap::new();
@@ -173,6 +195,22 @@ pub(crate) fn pipeline_step_labels(def: &PipelineDefinition) -> Vec<String> {
                 ));
             }
         } else {
+            labels.push(format_block_step_label(
+                info.runtime_id,
+                &info.display_label,
+                &info.agent,
+            ));
+        }
+    }
+    // Append finalization labels only for single-run progress
+    if include_finalization && def.has_finalization() {
+        let fin_scope = FinalizationRunScope::SingleRun {
+            run_id: 1,
+            run_dir: PathBuf::new(),
+        };
+        let fin_entries =
+            build_finalization_runtime_entries(def, &fin_scope, rt.entries.len() as u32);
+        for info in &fin_entries {
             labels.push(format_block_step_label(
                 info.runtime_id,
                 &info.display_label,
@@ -265,8 +303,7 @@ impl<'de> Deserialize<'de> for PipelineBlock {
             (Some(v), _) if !v.is_empty() => {
                 if let Some(blank) = v.iter().find(|a| a.trim().is_empty()) {
                     return Err(serde::de::Error::custom(format!(
-                        "block has a blank agent name '{}' in 'agents' list",
-                        blank
+                        "block has a blank agent name '{blank}' in 'agents' list"
                     )));
                 }
                 v
@@ -335,6 +372,49 @@ pub struct LoopConnection {
     pub prompt: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataFeed {
+    /// 0 = wildcard: all execution blocks
+    pub from: BlockId,
+    pub to: BlockId,
+    pub collection: FeedCollection,
+    pub granularity: FeedGranularity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FeedCollection {
+    #[default]
+    LastIteration,
+    AllIterations,
+}
+
+impl FeedCollection {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FeedCollection::LastIteration => "last_iteration",
+            FeedCollection::AllIterations => "all_iterations",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FeedGranularity {
+    #[default]
+    PerRun,
+    AllRuns,
+}
+
+impl FeedGranularity {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FeedGranularity::PerRun => "per_run",
+            FeedGranularity::AllRuns => "all_runs",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionConfig {
     pub agent: String,
@@ -367,6 +447,12 @@ pub struct PipelineDefinition {
     pub session_configs: Vec<SessionConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub loop_connections: Vec<LoopConnection>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub finalization_blocks: Vec<PipelineBlock>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub finalization_connections: Vec<PipelineConnection>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub data_feeds: Vec<DataFeed>,
 }
 
 fn default_iterations() -> u32 {
@@ -386,6 +472,9 @@ impl Default for PipelineDefinition {
             connections: Vec::new(),
             session_configs: Vec::new(),
             loop_connections: Vec::new(),
+            finalization_blocks: Vec::new(),
+            finalization_connections: Vec::new(),
+            data_feeds: Vec::new(),
         }
     }
 }
@@ -484,11 +573,57 @@ impl PipelineDefinition {
         }
     }
 
+    pub fn has_finalization(&self) -> bool {
+        !self.finalization_blocks.is_empty()
+    }
+
+    pub fn execution_block_ids(&self) -> HashSet<BlockId> {
+        self.blocks.iter().map(|b| b.id).collect()
+    }
+
+    pub fn finalization_block_ids(&self) -> HashSet<BlockId> {
+        self.finalization_blocks.iter().map(|b| b.id).collect()
+    }
+
+    pub fn is_finalization_block(&self, id: BlockId) -> bool {
+        self.finalization_blocks.iter().any(|b| b.id == id)
+    }
+
+    /// A finalization block is per_run if:
+    /// 1. It has a direct DataFeed with FeedGranularity::PerRun, OR
+    /// 2. Any upstream finalization predecessor (via finalization_connections) is per_run
+    pub fn is_per_run_finalization_block(&self, id: BlockId) -> bool {
+        // Seed: blocks with direct PerRun feeds
+        let mut per_run: HashSet<BlockId> = self
+            .data_feeds
+            .iter()
+            .filter(|f| f.granularity == FeedGranularity::PerRun)
+            .map(|f| f.to)
+            .collect();
+        // Propagate forward over finalization_connections
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for conn in &self.finalization_connections {
+                if per_run.contains(&conn.from) && per_run.insert(conn.to) {
+                    changed = true;
+                }
+            }
+        }
+        per_run.contains(&id)
+    }
+
+    /// All blocks from both phases, for iteration patterns
+    pub fn all_blocks(&self) -> impl Iterator<Item = &PipelineBlock> {
+        self.blocks.iter().chain(self.finalization_blocks.iter())
+    }
+
     pub fn normalize_session_configs(&mut self) {
         // Collect valid effective session keys
         let valid: HashSet<(String, String)> = self
             .blocks
             .iter()
+            .chain(self.finalization_blocks.iter())
             .flat_map(|b| {
                 let sk = b.effective_session_key();
                 b.agents.iter().map(move |a| (a.clone(), sk.clone()))
@@ -615,15 +750,15 @@ impl std::fmt::Display for CycleError {
 }
 
 /// DFS reachability: would adding `from → to` create a cycle?
-/// Only considers regular connections. Loop connections are back-edges.
-pub fn would_create_cycle(def: &PipelineDefinition, from: BlockId, to: BlockId) -> bool {
+/// Accepts an explicit connection slice so it works for both execution and finalization connections.
+pub fn would_create_cycle(connections: &[PipelineConnection], from: BlockId, to: BlockId) -> bool {
     if from == to {
         return true;
     }
     // BFS from `to` — if we reach `from`, adding from→to would create a cycle
     let downstream: HashMap<BlockId, Vec<BlockId>> = {
         let mut map: HashMap<BlockId, Vec<BlockId>> = HashMap::new();
-        for conn in &def.connections {
+        for conn in connections {
             map.entry(conn.from).or_default().push(conn.to);
         }
         map
@@ -886,20 +1021,19 @@ pub fn loop_extra_tasks(def: &PipelineDefinition) -> usize {
 // ---------------------------------------------------------------------------
 
 /// Scan grid left-to-right, top-to-bottom for first unoccupied slot.
-pub fn next_free_position(def: &PipelineDefinition) -> (u16, u16) {
-    if def.blocks.is_empty() {
+/// Accepts an explicit block slice so it works for both execution and finalization blocks.
+pub fn next_free_position(blocks: &[PipelineBlock]) -> (u16, u16) {
+    if blocks.is_empty() {
         return (0, 0);
     }
-    let occupied: HashSet<(u16, u16)> = def.blocks.iter().map(|b| b.position).collect();
-    let max_row = def
-        .blocks
+    let occupied: HashSet<(u16, u16)> = blocks.iter().map(|b| b.position).collect();
+    let max_row = blocks
         .iter()
         .map(|b| b.position.1)
         .max()
         .unwrap_or(0)
         .min(99);
-    let max_col = def
-        .blocks
+    let max_col = blocks
         .iter()
         .map(|b| b.position.0)
         .max()
@@ -983,7 +1117,7 @@ fn migrate_loop_direction(def: &mut PipelineDefinition) {
 }
 
 pub(crate) fn validate_replicas(def: &PipelineDefinition) -> Result<(), AppError> {
-    for block in &def.blocks {
+    for block in def.all_blocks() {
         if block.replicas < 1 {
             return Err(AppError::Config(format!(
                 "Block '{}' has replicas < 1",
@@ -1005,10 +1139,11 @@ pub(crate) fn validate_replicas(def: &PipelineDefinition) -> Result<(), AppError
         }
     }
     // Session sharing restriction: blocks with replicas > 1 cannot share session_id
-    for block in &def.blocks {
+    let all_blocks: Vec<&PipelineBlock> = def.all_blocks().collect();
+    for block in &all_blocks {
         if block.replicas > 1 {
             if let Some(ref sid) = block.session_id {
-                for other in &def.blocks {
+                for other in &all_blocks {
                     if other.id != block.id && other.session_id.as_deref() == Some(sid) {
                         return Err(AppError::Config(format!(
                             "Session '{}' is used by replicated block '{}' and cannot be shared",
@@ -1023,9 +1158,15 @@ pub(crate) fn validate_replicas(def: &PipelineDefinition) -> Result<(), AppError
 }
 
 pub(crate) fn validate_pipeline(def: &PipelineDefinition) -> Result<(), AppError> {
-    // Check duplicate block IDs
+    // Rule 1: Block IDs unique across both blocks and finalization_blocks.
+    // Block ID 0 is reserved as WILDCARD_BLOCK_ID for data feed sources.
     let mut seen = HashSet::new();
-    for block in &def.blocks {
+    for block in def.all_blocks() {
+        if block.id == WILDCARD_BLOCK_ID {
+            return Err(AppError::Config(format!(
+                "Block ID {WILDCARD_BLOCK_ID} is reserved (wildcard sentinel); use a different ID"
+            )));
+        }
         if !seen.insert(block.id) {
             return Err(AppError::Config(format!(
                 "Duplicate block ID: {}",
@@ -1034,15 +1175,18 @@ pub(crate) fn validate_pipeline(def: &PipelineDefinition) -> Result<(), AppError
         }
     }
 
-    // Check dangling connection references
+    let exec_ids = def.execution_block_ids();
+    let fin_ids = def.finalization_block_ids();
+
+    // Rule 2: connections only reference execution blocks
     for conn in &def.connections {
-        if !seen.contains(&conn.from) {
+        if !exec_ids.contains(&conn.from) {
             return Err(AppError::Config(format!(
                 "Connection references non-existent block: {}",
                 conn.from
             )));
         }
-        if !seen.contains(&conn.to) {
+        if !exec_ids.contains(&conn.to) {
             return Err(AppError::Config(format!(
                 "Connection references non-existent block: {}",
                 conn.to
@@ -1070,7 +1214,42 @@ pub(crate) fn validate_pipeline(def: &PipelineDefinition) -> Result<(), AppError
         }
     }
 
-    // --- Loop connection validation ---
+    // Rule 3: finalization_connections only reference finalization blocks
+    for conn in &def.finalization_connections {
+        if !fin_ids.contains(&conn.from) {
+            return Err(AppError::Config(format!(
+                "Finalization connection references non-finalization block: {}",
+                conn.from
+            )));
+        }
+        if !fin_ids.contains(&conn.to) {
+            return Err(AppError::Config(format!(
+                "Finalization connection references non-finalization block: {}",
+                conn.to
+            )));
+        }
+    }
+
+    // Rule 7: No self-edges or duplicates in finalization_connections
+    {
+        let mut seen_fin_conns = HashSet::new();
+        for conn in &def.finalization_connections {
+            if conn.from == conn.to {
+                return Err(AppError::Config(format!(
+                    "Finalization self-edge on block {}",
+                    conn.from
+                )));
+            }
+            if !seen_fin_conns.insert((conn.from, conn.to)) {
+                return Err(AppError::Config(format!(
+                    "Duplicate finalization connection from {} to {}",
+                    conn.from, conn.to
+                )));
+            }
+        }
+    }
+
+    // Rule 4: loop_connections only reference execution blocks
     {
         let mut seen_loops = HashSet::new();
         let mut endpoint_set = HashSet::new();
@@ -1090,16 +1269,16 @@ pub(crate) fn validate_pipeline(def: &PipelineDefinition) -> Result<(), AppError
                     lc.count
                 )));
             }
-            // Dangling refs
-            if !seen.contains(&lc.from) {
+            // Dangling refs — must be execution blocks
+            if !exec_ids.contains(&lc.from) {
                 return Err(AppError::Config(format!(
-                    "Loop references non-existent block: {}",
+                    "Loop references non-execution block: {}",
                     lc.from
                 )));
             }
-            if !seen.contains(&lc.to) {
+            if !exec_ids.contains(&lc.to) {
                 return Err(AppError::Config(format!(
-                    "Loop references non-existent block: {}",
+                    "Loop references non-execution block: {}",
                     lc.to
                 )));
             }
@@ -1152,13 +1331,117 @@ pub(crate) fn validate_pipeline(def: &PipelineDefinition) -> Result<(), AppError
                     for bid in &all_sub_dags[i].1 {
                         if all_sub_dags[j].1.contains(bid) {
                             return Err(AppError::Config(format!(
-                                "Overlapping loop sub-DAGs: block {} is in multiple loop regions",
-                                bid
+                                "Overlapping loop sub-DAGs: block {bid} is in multiple loop regions"
                             )));
                         }
                     }
                 }
             }
+        }
+    }
+
+    // Rule 5 & 6: data_feeds validation
+    for feed in &def.data_feeds {
+        // Rule 5: from must be 0 (wildcard) or a valid execution block
+        if feed.from != WILDCARD_BLOCK_ID && !exec_ids.contains(&feed.from) {
+            return Err(AppError::Config(format!(
+                "Data feed 'from' must be 0 (wildcard) or a valid execution block, got {}",
+                feed.from
+            )));
+        }
+        // Rule 6: to must be a finalization block
+        if !fin_ids.contains(&feed.to) {
+            return Err(AppError::Config(format!(
+                "Data feed 'to' must be a finalization block, got {}",
+                feed.to
+            )));
+        }
+    }
+
+    // Rule 8: No duplicate (from, to) feed pairs.
+    // Each (from, to) pair allows exactly one feed; collection/granularity are set
+    // via the feed edit popup. This keeps the TUI builder and validation in sync.
+    {
+        let mut seen_feeds = HashSet::new();
+        for feed in &def.data_feeds {
+            let key = (feed.from, feed.to);
+            if !seen_feeds.insert(key) {
+                return Err(AppError::Config(format!(
+                    "Duplicate data feed ({} → {})",
+                    feed.from, feed.to
+                )));
+            }
+        }
+    }
+
+    // Rule 10: Wildcard feed (from=0) must not coexist with block-specific feeds
+    // targeting the same finalization block.
+    {
+        let mut wildcard_targets: HashSet<BlockId> = HashSet::new();
+        let mut specific_targets: HashSet<BlockId> = HashSet::new();
+        for feed in &def.data_feeds {
+            if feed.from == WILDCARD_BLOCK_ID {
+                wildcard_targets.insert(feed.to);
+            } else {
+                specific_targets.insert(feed.to);
+            }
+        }
+        for &target in &wildcard_targets {
+            if specific_targets.contains(&target) {
+                return Err(AppError::Config(format!(
+                    "Wildcard feed conflicts with block-specific feed targeting finalization block {target}"
+                )));
+            }
+        }
+    }
+
+    // Rule 11: No finalization connection from an all-runs block to a per-run block.
+    // An all-runs block runs once after all runs complete, so it cannot feed into a
+    // per-run block that runs per successful run.
+    for conn in &def.finalization_connections {
+        let from_is_per_run = def.is_per_run_finalization_block(conn.from);
+        let to_is_per_run = def.is_per_run_finalization_block(conn.to);
+        if !from_is_per_run && to_is_per_run {
+            return Err(AppError::Config(format!(
+                "Finalization connection from all-runs block {} to per-run block {} is unsatisfiable",
+                conn.from, conn.to
+            )));
+        }
+    }
+
+    // Rule 9: finalization_connections must be acyclic
+    if !def.finalization_connections.is_empty() {
+        let fin_block_ids: HashSet<BlockId> = fin_ids.clone();
+        let mut in_degree: HashMap<BlockId, usize> =
+            fin_block_ids.iter().map(|&id| (id, 0)).collect();
+        let mut downstream: HashMap<BlockId, Vec<BlockId>> = HashMap::new();
+        for conn in &def.finalization_connections {
+            *in_degree.entry(conn.to).or_default() += 1;
+            downstream.entry(conn.from).or_default().push(conn.to);
+        }
+        let mut queue: VecDeque<BlockId> = in_degree
+            .iter()
+            .filter(|(_, &deg)| deg == 0)
+            .map(|(&id, _)| id)
+            .collect();
+        let mut visited = 0usize;
+        while let Some(node) = queue.pop_front() {
+            visited += 1;
+            if let Some(children) = downstream.get(&node) {
+                for &child in children {
+                    if let Some(deg) = in_degree.get_mut(&child) {
+                        *deg -= 1;
+                        if *deg == 0 {
+                            queue.push_back(child);
+                        }
+                    }
+                }
+            }
+        }
+        if visited != fin_block_ids.len() {
+            return Err(AppError::Config(
+                "Finalization connections contain a cycle".to_string(),
+            ));
         }
     }
 
@@ -1179,8 +1462,8 @@ pub(crate) fn validate_pipeline(def: &PipelineDefinition) -> Result<(), AppError
         }
     }
 
-    // Check for empty or duplicate agents within a block
-    for block in &def.blocks {
+    // Rule 12: Finalization blocks follow same agent/replica rules as execution blocks
+    for block in def.all_blocks() {
         if block.agents.is_empty() {
             return Err(AppError::Config(format!(
                 "Block {} has no agents",
@@ -1296,6 +1579,7 @@ pub async fn run_pipeline(
                 config.max_history_messages,
                 config.max_history_bytes,
                 cli_timeout_secs,
+                vec![output.run_dir().display().to_string()],
             )
         },
     )
@@ -2392,6 +2676,1060 @@ fn build_loop_rerun_message_v2(
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+// Finalization
+// ---------------------------------------------------------------------------
+
+pub(crate) enum FinalizationRunScope {
+    SingleRun {
+        run_id: u32,
+        run_dir: PathBuf,
+    },
+    Batch {
+        successful_runs: Vec<(u32, PathBuf)>,
+    },
+}
+
+/// Build runtime entries for finalization blocks.
+/// For single-run or per-run within a batch, `run_scope_id` is `Some(run_id)`.
+/// For all-runs batch blocks, `run_scope` is `None`.
+pub(crate) fn build_finalization_runtime_entries(
+    def: &PipelineDefinition,
+    run_scope: &FinalizationRunScope,
+    next_id_start: u32,
+) -> Vec<RuntimeReplicaInfo> {
+    let mut entries = Vec::new();
+    let mut next_id = next_id_start;
+
+    // Determine per-run block set
+    let per_run_ids: HashSet<BlockId> = def
+        .finalization_blocks
+        .iter()
+        .filter(|b| def.is_per_run_finalization_block(b.id))
+        .map(|b| b.id)
+        .collect();
+
+    // Determine successful runs
+    let runs: Vec<(u32, &PathBuf)> = match run_scope {
+        FinalizationRunScope::SingleRun { run_id, run_dir } => vec![(*run_id, run_dir)],
+        FinalizationRunScope::Batch { successful_runs } => {
+            successful_runs.iter().map(|(id, p)| (*id, p)).collect()
+        }
+    };
+
+    for block in &def.finalization_blocks {
+        let is_per_run = per_run_ids.contains(&block.id);
+        let blabel = block_label(block);
+        let block_name_key = if block.name.trim().is_empty() {
+            format!("block{}", block.id)
+        } else {
+            format!(
+                "{}_b{}",
+                OutputManager::sanitize_session_name(&block.name),
+                block.id
+            )
+        };
+        let num_agents = block.agents.len();
+        let num_replicas = block.replicas;
+        let multi_agent = num_agents > 1;
+        let multi_replica = num_replicas > 1;
+
+        // For per-run blocks, create entries per run; for all-runs blocks, one set
+        let scope_list: Vec<Option<u32>> = if is_per_run {
+            runs.iter().map(|(id, _)| Some(*id)).collect()
+        } else {
+            vec![None]
+        };
+
+        for scope_id in &scope_list {
+            for agent in &block.agents {
+                let agent_file_key = OutputManager::sanitize_session_name(agent);
+                for ri in 0..num_replicas {
+                    let runtime_id = next_id;
+                    next_id += 1;
+
+                    let scope_suffix = scope_id
+                        .map(|id| format!(" [run {id}]"))
+                        .unwrap_or_default();
+                    let display_label = match (multi_agent, multi_replica) {
+                        (false, false) => format!("Fin: {blabel}{scope_suffix}"),
+                        (false, true) => {
+                            format!("Fin: {} (r{}){}", blabel, ri + 1, scope_suffix)
+                        }
+                        (true, false) => {
+                            format!("Fin: {blabel} ({agent}){scope_suffix}")
+                        }
+                        (true, true) => {
+                            format!("Fin: {} ({} r{}){}", blabel, agent, ri + 1, scope_suffix)
+                        }
+                    };
+
+                    let session_key = format!("__fin_block_{}", block.id);
+
+                    // Add _run{id} suffix in batch mode so each run's output
+                    // is distinguishable, even if only one run succeeded.
+                    // Single-run mode omits the suffix since there's only one run.
+                    let is_batch = matches!(run_scope, FinalizationRunScope::Batch { .. });
+                    let run_suffix = if is_batch {
+                        scope_id.map(|id| format!("_run{id}")).unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
+                    let filename_stem = match (multi_agent, multi_replica) {
+                        (false, false) => {
+                            format!("{block_name_key}_{agent_file_key}{run_suffix}")
+                        }
+                        (false, true) => {
+                            format!(
+                                "{}_{}_r{}{}",
+                                block_name_key,
+                                agent_file_key,
+                                ri + 1,
+                                run_suffix
+                            )
+                        }
+                        (true, false) => {
+                            format!("{block_name_key}_{agent_file_key}{run_suffix}")
+                        }
+                        (true, true) => {
+                            format!(
+                                "{}_{}_r{}{}",
+                                block_name_key,
+                                agent_file_key,
+                                ri + 1,
+                                run_suffix
+                            )
+                        }
+                    };
+
+                    entries.push(RuntimeReplicaInfo {
+                        runtime_id,
+                        source_block_id: block.id,
+                        replica_index: ri,
+                        phase: RuntimePhase::Finalization,
+                        run_scope: *scope_id,
+                        agent: agent.clone(),
+                        display_label,
+                        session_key,
+                        filename_stem,
+                    });
+                }
+            }
+        }
+    }
+    entries
+}
+
+/// Count finalization tasks for step accounting.
+pub(crate) fn finalization_task_count(def: &PipelineDefinition) -> usize {
+    if !def.has_finalization() {
+        return 0;
+    }
+    def.finalization_blocks
+        .iter()
+        .map(|b| b.agents.len() * b.replicas.max(1) as usize)
+        .sum()
+}
+
+/// Collect data from execution outputs for a finalization block's data feed.
+fn collect_feed_data(
+    feed: &DataFeed,
+    def: &PipelineDefinition,
+    exec_runtime_table: &RuntimeReplicaTable,
+    run_scope: &FinalizationRunScope,
+    run_id: Option<u32>,
+) -> Result<String, AppError> {
+    use crate::post_run;
+
+    // Step 1: Determine source block IDs
+    let exec_ids = def.execution_block_ids();
+    let source_ids: Vec<BlockId> = if feed.from == WILDCARD_BLOCK_ID {
+        let mut ids: Vec<BlockId> = exec_ids.into_iter().collect();
+        ids.sort();
+        ids
+    } else {
+        vec![feed.from]
+    };
+
+    // Step 2: Get filename stems from runtime table
+    let filename_stems: Vec<&str> = exec_runtime_table
+        .entries
+        .iter()
+        .filter(|e| source_ids.contains(&e.source_block_id))
+        .map(|e| e.filename_stem.as_str())
+        .collect();
+
+    // Step 3: Determine run directories to scan
+    let run_dirs: Vec<(u32, &Path)> = match (&feed.granularity, run_scope) {
+        (
+            FeedGranularity::PerRun,
+            FinalizationRunScope::SingleRun {
+                run_id: id,
+                run_dir,
+            },
+        ) => {
+            vec![(*id, run_dir.as_path())]
+        }
+        (FeedGranularity::PerRun, FinalizationRunScope::Batch { successful_runs }) => {
+            if let Some(target_run) = run_id {
+                successful_runs
+                    .iter()
+                    .filter(|(id, _)| *id == target_run)
+                    .map(|(id, p)| (*id, p.as_path()))
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        }
+        (FeedGranularity::AllRuns, FinalizationRunScope::Batch { successful_runs }) => {
+            successful_runs
+                .iter()
+                .map(|(id, p)| (*id, p.as_path()))
+                .collect()
+        }
+        (
+            FeedGranularity::AllRuns,
+            FinalizationRunScope::SingleRun {
+                run_id: id,
+                run_dir,
+            },
+        ) => {
+            vec![(*id, run_dir.as_path())]
+        }
+    };
+
+    let mut assembled = String::new();
+    let budget = MAX_TERMINAL_OUTPUTS_BYTES;
+
+    for (dir_run_id, dir_path) in &run_dirs {
+        let entries = match std::fs::read_dir(dir_path) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        // Step 4: Collect matching files
+        let mut matched_files: Vec<(String, PathBuf)> = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if !name.ends_with(".md") {
+                continue;
+            }
+            // Check if this file matches any of the expected filename stems.
+            // Require `_iter` after the stem to avoid prefix collisions (e.g.
+            // stem "Builder_b1_Claude" must not match "Builder_b1_Claude_r1_iter1.md").
+            let matches_stem = filename_stems
+                .iter()
+                .any(|stem| name.starts_with(stem) && name[stem.len()..].starts_with("_iter"));
+            if !matches_stem {
+                continue;
+            }
+            // Verify it has an iteration marker
+            if post_run::parse_pipeline_iteration_filename(name).is_none() {
+                continue;
+            }
+            matched_files.push((name.to_string(), path));
+        }
+
+        // Step 5: Apply collection filter
+        match feed.collection {
+            FeedCollection::LastIteration => {
+                // Compute max iteration per filename stem so that each source
+                // block contributes its own latest iteration.  A single global
+                // max would drop sources that completed fewer iterations.
+                let stem_matches = |name: &str, stem: &str| -> bool {
+                    name.starts_with(stem) && name[stem.len()..].starts_with("_iter")
+                };
+                let mut max_per_stem: HashMap<&str, u32> = HashMap::new();
+                for (name, _) in &matched_files {
+                    if let Some(iter) = post_run::parse_pipeline_iteration_filename(name) {
+                        for stem in &filename_stems {
+                            if stem_matches(name, stem) {
+                                let entry = max_per_stem.entry(*stem).or_insert(0);
+                                if iter > *entry {
+                                    *entry = iter;
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+                matched_files.retain(|(name, _)| {
+                    if let Some(iter) = post_run::parse_pipeline_iteration_filename(name) {
+                        filename_stems.iter().any(|stem| {
+                            stem_matches(name, stem)
+                                && max_per_stem.get(stem).copied() == Some(iter)
+                        })
+                    } else {
+                        false
+                    }
+                });
+            }
+            FeedCollection::AllIterations => {
+                // Keep all iterations
+            }
+        }
+
+        // Step 6: Apply loop pass deduplication
+        matched_files = post_run::keep_highest_loop_pass(matched_files);
+
+        // Step 7: Sort for determinism
+        matched_files.sort_by(|a, b| post_run::natural_cmp(&a.0, &b.0));
+
+        // Step 8: Read contents and assemble
+        for (name, path) in &matched_files {
+            if assembled.len() >= budget {
+                assembled.push_str("\n[... feed data truncated at 512 KB budget ...]\n");
+                break;
+            }
+            if let Ok(content) = std::fs::read_to_string(path) {
+                let run_label = if run_dirs.len() > 1 {
+                    format!("(run {dir_run_id}) ")
+                } else {
+                    String::new()
+                };
+                assembled.push_str(&format!("### {run_label}{name}\n{content}\n\n"));
+            }
+        }
+    }
+
+    Ok(assembled)
+}
+
+/// Construct the message for a finalization block.
+fn build_finalization_message(
+    block: &PipelineBlock,
+    feed_payloads: &[(String, String)],
+    upstream_outputs: &[(String, String)],
+) -> String {
+    let mut message = String::new();
+
+    // Block prompt
+    if !block.prompt.is_empty() {
+        message.push_str(&block.prompt);
+    }
+
+    // Feed inputs
+    if !feed_payloads.is_empty() {
+        if !message.is_empty() {
+            message.push_str("\n\n");
+        }
+        message.push_str("--- Feed Inputs ---\n");
+        for (label, content) in feed_payloads {
+            message.push_str(&format!("### {label}\n{content}\n\n"));
+        }
+    }
+
+    // Upstream finalization outputs (same budget as feed data)
+    if !upstream_outputs.is_empty() {
+        if !message.is_empty() {
+            message.push_str("\n\n");
+        }
+        message.push_str("--- Upstream Finalization Outputs ---\n");
+        let budget = MAX_TERMINAL_OUTPUTS_BYTES;
+        let mut upstream_bytes = 0usize;
+        for (label, content) in upstream_outputs {
+            upstream_bytes += label.len() + content.len();
+            if upstream_bytes > budget {
+                message.push_str("\n[... upstream outputs truncated at 512 KB budget ...]\n");
+                break;
+            }
+            message.push_str(&format!("### {label}\n{content}\n\n"));
+        }
+    }
+
+    message
+}
+
+/// Write finalization metadata file.
+fn write_finalization_toml(
+    fin_dir: &Path,
+    def: &PipelineDefinition,
+    run_scope: &FinalizationRunScope,
+    pipeline_source: Option<&str>,
+) -> Result<(), AppError> {
+    let successful_run_ids: Vec<u32> = match run_scope {
+        FinalizationRunScope::SingleRun { run_id, .. } => vec![*run_id],
+        FinalizationRunScope::Batch { successful_runs } => {
+            successful_runs.iter().map(|(id, _)| *id).collect()
+        }
+    };
+
+    #[derive(Serialize)]
+    struct FinalizationMeta {
+        finalization_blocks: usize,
+        finalization_connections: usize,
+        data_feeds: usize,
+        successful_run_ids: Vec<u32>,
+        pipeline_source: String,
+    }
+
+    let meta = FinalizationMeta {
+        finalization_blocks: def.finalization_blocks.len(),
+        finalization_connections: def.finalization_connections.len(),
+        data_feeds: def.data_feeds.len(),
+        successful_run_ids,
+        pipeline_source: pipeline_source.unwrap_or("").to_string(),
+    };
+
+    let content = toml::to_string_pretty(&meta).map_err(|e| io::Error::other(e.to_string()))?;
+    std::fs::write(fin_dir.join("finalization.toml"), content)?;
+    Ok(())
+}
+
+/// Core finalization runner. Executes the finalization DAG after the execution phase completes.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_pipeline_finalization<F>(
+    def: &PipelineDefinition,
+    run_scope: FinalizationRunScope,
+    exec_runtime_table: &RuntimeReplicaTable,
+    agent_configs: PipelineAgentConfigs,
+    output_root: &Path,
+    progress_tx: mpsc::UnboundedSender<ProgressEvent>,
+    cancel: Arc<AtomicBool>,
+    provider_factory: F,
+) -> Result<(), AppError>
+where
+    F: Fn(ProviderKind, &crate::config::ProviderConfig) -> Box<dyn provider::Provider>,
+{
+    if def.finalization_blocks.is_empty() {
+        return Ok(());
+    }
+
+    // Create finalization output directory
+    let fin_dir = output_root.join("finalization");
+    std::fs::create_dir_all(&fin_dir)?;
+
+    // Classify blocks
+    let per_run_ids: HashSet<BlockId> = def
+        .finalization_blocks
+        .iter()
+        .filter(|b| def.is_per_run_finalization_block(b.id))
+        .map(|b| b.id)
+        .collect();
+
+    let all_runs_ids: HashSet<BlockId> = def
+        .finalization_blocks
+        .iter()
+        .filter(|b| !per_run_ids.contains(&b.id))
+        .map(|b| b.id)
+        .collect();
+
+    // Build the finalization block map
+    let fin_block_map: HashMap<BlockId, &PipelineBlock> =
+        def.finalization_blocks.iter().map(|b| (b.id, b)).collect();
+
+    // Build finalization adjacency (downstream)
+    let mut fin_downstream: HashMap<BlockId, Vec<BlockId>> = HashMap::new();
+    for conn in &def.finalization_connections {
+        fin_downstream.entry(conn.from).or_default().push(conn.to);
+    }
+
+    // Determine successful runs for scoping
+    let successful_runs: Vec<(u32, PathBuf)> = match &run_scope {
+        FinalizationRunScope::SingleRun { run_id, run_dir } => {
+            vec![(*run_id, run_dir.clone())]
+        }
+        FinalizationRunScope::Batch { successful_runs } => successful_runs.clone(),
+    };
+    // Collect all finalization outputs keyed by (block_id, run_scope_id)
+    type FinOutputMap = HashMap<(BlockId, Option<u32>), Vec<(String, String)>>;
+    let mut fin_outputs: FinOutputMap = HashMap::new();
+    let mut block_error_count: usize = 0;
+    // Track blocks that fully failed (all replicas errored) so dependents can be skipped
+    let mut failed_blocks: HashSet<(BlockId, Option<u32>)> = HashSet::new();
+
+    // Build runtime entries for finalization
+    let exec_entry_count = exec_runtime_table.entries.len() as u32;
+    let fin_entries = build_finalization_runtime_entries(def, &run_scope, exec_entry_count);
+
+    // Pipeline source for metadata.
+    // For single-run, pipeline.toml lives in output_root (the run dir).
+    // For batch, it lives inside each run subdir — check the first successful run.
+    let pipeline_source = {
+        let candidate = if output_root.join("pipeline.toml").exists() {
+            true
+        } else {
+            successful_runs
+                .first()
+                .map(|(_, dir)| dir.join("pipeline.toml").exists())
+                .unwrap_or(false)
+        };
+        candidate.then_some("pipeline.toml")
+    };
+
+    // -----------------------------------------------------------------------
+    // PHASE 1: Per-run finalization
+    // -----------------------------------------------------------------------
+    if !per_run_ids.is_empty() {
+        for &(run_id, ref _run_dir) in &successful_runs {
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
+
+            // Compute in-degree for per-run sub-DAG (within this run)
+            let mut in_degree: HashMap<BlockId, usize> =
+                per_run_ids.iter().map(|&id| (id, 0)).collect();
+            for conn in &def.finalization_connections {
+                if per_run_ids.contains(&conn.from) && per_run_ids.contains(&conn.to) {
+                    let from_block = fin_block_map.get(&conn.from);
+                    let from_replicas = from_block
+                        .map(|b| b.agents.len() * b.replicas.max(1) as usize)
+                        .unwrap_or(1);
+                    *in_degree.entry(conn.to).or_default() += from_replicas;
+                }
+            }
+
+            // Also account for data feed in-degree (one feed = one input, not replica-weighted)
+            // Data feeds don't add to in-degree in the same way; they are always available at start
+
+            // Execute per-run sub-DAG using topological order
+            let mut ready: VecDeque<BlockId> = in_degree
+                .iter()
+                .filter(|(_, &deg)| deg == 0)
+                .map(|(&id, _)| id)
+                .collect();
+            let mut sorted: Vec<BlockId> = ready.drain(..).collect();
+            sorted.sort();
+            ready.extend(sorted);
+
+            while let Some(block_id) = ready.pop_front() {
+                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+
+                let block = match fin_block_map.get(&block_id) {
+                    Some(b) => *b,
+                    None => continue,
+                };
+
+                // Skip if any upstream finalization block fully failed
+                let upstream_failed = def
+                    .finalization_connections
+                    .iter()
+                    .filter(|c| c.to == block_id && per_run_ids.contains(&c.from))
+                    .any(|c| failed_blocks.contains(&(c.from, Some(run_id))));
+                if upstream_failed {
+                    failed_blocks.insert((block_id, Some(run_id)));
+                    let replica_count = block.agents.len() * block.replicas.max(1) as usize;
+                    // Emit BlockSkipped for each replica so the TUI marks rows as skipped
+                    let reason = format!("upstream finalization block failed (run {run_id})");
+                    for entry in fin_entries
+                        .iter()
+                        .filter(|e| e.source_block_id == block_id && e.run_scope == Some(run_id))
+                    {
+                        let _ = progress_tx.send(ProgressEvent::BlockSkipped {
+                            block_id: entry.runtime_id,
+                            agent_name: entry.agent.clone(),
+                            label: entry.display_label.clone(),
+                            iteration: 1,
+                            loop_pass: 0,
+                            reason: reason.clone(),
+                        });
+                    }
+                    // Still decrement in-degree for children so the DAG walk continues
+                    if let Some(children) = fin_downstream.get(&block_id) {
+                        for &child in children {
+                            if per_run_ids.contains(&child) {
+                                if let Some(deg) = in_degree.get_mut(&child) {
+                                    *deg = deg.saturating_sub(replica_count);
+                                    if *deg == 0 {
+                                        ready.push_back(child);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
+
+                // Find matching runtime entries for this block + run
+                let block_entries: Vec<&RuntimeReplicaInfo> = fin_entries
+                    .iter()
+                    .filter(|e| e.source_block_id == block_id && e.run_scope == Some(run_id))
+                    .collect();
+
+                // Collect feed data for this block
+                let mut feed_payloads: Vec<(String, String)> = Vec::new();
+                for feed in &def.data_feeds {
+                    if feed.to != block_id {
+                        continue;
+                    }
+                    let label = if feed.from == WILDCARD_BLOCK_ID {
+                        format!("All execution blocks ({})", feed.collection.as_str())
+                    } else {
+                        format!("Block {} ({})", feed.from, feed.collection.as_str())
+                    };
+                    let data =
+                        collect_feed_data(feed, def, exec_runtime_table, &run_scope, Some(run_id))?;
+                    if !data.is_empty() {
+                        feed_payloads.push((label, data));
+                    }
+                }
+
+                // Collect upstream finalization outputs
+                let upstream_fin_ids: Vec<BlockId> = def
+                    .finalization_connections
+                    .iter()
+                    .filter(|c| c.to == block_id)
+                    .map(|c| c.from)
+                    .collect();
+                let mut upstream_outputs: Vec<(String, String)> = Vec::new();
+                for uid in &upstream_fin_ids {
+                    if let Some(outputs) = fin_outputs.get(&(*uid, Some(run_id))) {
+                        for (label, content) in outputs {
+                            upstream_outputs.push((label.clone(), content.clone()));
+                        }
+                    }
+                }
+
+                let message = build_finalization_message(block, &feed_payloads, &upstream_outputs);
+
+                // Execute each replica
+                let mut block_output_list: Vec<(String, String)> = Vec::new();
+                for entry in &block_entries {
+                    let _ = progress_tx.send(ProgressEvent::BlockStarted {
+                        block_id: entry.runtime_id,
+                        agent_name: entry.agent.clone(),
+                        label: entry.display_label.clone(),
+                        iteration: 1,
+                        loop_pass: 0,
+                    });
+
+                    let (kind, cfg, _use_cli) = match agent_configs.get(&entry.agent) {
+                        Some(c) => c,
+                        None => {
+                            let _ = progress_tx.send(ProgressEvent::BlockError {
+                                block_id: entry.runtime_id,
+                                agent_name: entry.agent.clone(),
+                                label: entry.display_label.clone(),
+                                iteration: 1,
+                                loop_pass: 0,
+                                error: "No provider available".into(),
+                                details: None,
+                            });
+                            block_error_count += 1;
+                            continue;
+                        }
+                    };
+
+                    let mut provider = provider_factory(*kind, cfg);
+                    let rid = entry.runtime_id;
+                    let agent_name = entry.agent.clone();
+                    let label = entry.display_label.clone();
+
+                    let result = crate::execution::run_with_cancellation(
+                        &mut *provider,
+                        &message,
+                        &progress_tx,
+                        &cancel,
+                        {
+                            let agent_name = agent_name.clone();
+                            move |chunk| ProgressEvent::BlockStreamChunk {
+                                block_id: rid,
+                                agent_name: agent_name.clone(),
+                                iteration: 1,
+                                loop_pass: 0,
+                                chunk,
+                            }
+                        },
+                        {
+                            let agent_name = agent_name.clone();
+                            move |msg| ProgressEvent::BlockLog {
+                                block_id: rid,
+                                agent_name: agent_name.clone(),
+                                iteration: 1,
+                                loop_pass: 0,
+                                message: msg,
+                            }
+                        },
+                        ProgressEvent::BlockError {
+                            block_id: rid,
+                            agent_name: agent_name.clone(),
+                            label: label.clone(),
+                            iteration: 1,
+                            loop_pass: 0,
+                            error: "Cancelled".into(),
+                            details: None,
+                        },
+                    )
+                    .await;
+
+                    match result {
+                        Some(Ok(resp)) => {
+                            // Write output file
+                            let filename = format!("{}.md", entry.filename_stem);
+                            let path = fin_dir.join(&filename);
+                            if let Err(e) = tokio::fs::write(&path, &resp.content).await {
+                                let _ = progress_tx.send(ProgressEvent::BlockError {
+                                    block_id: rid,
+                                    agent_name: agent_name.clone(),
+                                    label: label.clone(),
+                                    iteration: 1,
+                                    loop_pass: 0,
+                                    error: format!("Failed to write output: {e}"),
+                                    details: None,
+                                });
+                                block_error_count += 1;
+                            } else {
+                                let _ = progress_tx.send(ProgressEvent::BlockFinished {
+                                    block_id: rid,
+                                    agent_name: agent_name.clone(),
+                                    label,
+                                    iteration: 1,
+                                    loop_pass: 0,
+                                });
+                                block_output_list.push((entry.display_label.clone(), resp.content));
+                            }
+                        }
+                        Some(Err(e)) => {
+                            let _ = progress_tx.send(ProgressEvent::BlockError {
+                                block_id: rid,
+                                agent_name,
+                                label,
+                                iteration: 1,
+                                loop_pass: 0,
+                                error: e.to_string(),
+                                details: Some(e.to_string()),
+                            });
+                            block_error_count += 1;
+                        }
+                        None => {
+                            // Cancelled — already sent cancel event
+                        }
+                    }
+                }
+
+                // Track full failure: all replicas errored and no output produced
+                if block_output_list.is_empty() && !block_entries.is_empty() {
+                    failed_blocks.insert((block_id, Some(run_id)));
+                }
+                fin_outputs.insert((block_id, Some(run_id)), block_output_list);
+
+                // Decrement in-degree for downstream per-run blocks
+                let replica_count = block.agents.len() * block.replicas.max(1) as usize;
+                if let Some(children) = fin_downstream.get(&block_id) {
+                    for &child in children {
+                        if per_run_ids.contains(&child) {
+                            if let Some(deg) = in_degree.get_mut(&child) {
+                                *deg = deg.saturating_sub(replica_count);
+                                if *deg == 0 {
+                                    ready.push_back(child);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            debug_assert!(
+                cancel.load(std::sync::atomic::Ordering::Relaxed)
+                    || in_degree.values().all(|&d| d == 0),
+                "per-run finalization in-degree not fully drained"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // PHASE 2: All-runs finalization
+    // -----------------------------------------------------------------------
+    if !all_runs_ids.is_empty() {
+        // Compute in-degree with weighted formula for tier-crossing edges
+        let mut in_degree: HashMap<BlockId, usize> =
+            all_runs_ids.iter().map(|&id| (id, 0)).collect();
+
+        for conn in &def.finalization_connections {
+            // Only count all-runs → all-runs edges for in-degree.
+            // Per-run → all-runs edges are already satisfied (phase 1 completed);
+            // those outputs are collected via upstream_outputs below.
+            if !all_runs_ids.contains(&conn.to) || !all_runs_ids.contains(&conn.from) {
+                continue;
+            }
+            let from_block = fin_block_map.get(&conn.from);
+            let from_replicas = from_block
+                .map(|b| b.agents.len() * b.replicas.max(1) as usize)
+                .unwrap_or(1);
+
+            *in_degree.entry(conn.to).or_default() += from_replicas;
+        }
+
+        let mut ready: VecDeque<BlockId> = in_degree
+            .iter()
+            .filter(|(_, &deg)| deg == 0)
+            .map(|(&id, _)| id)
+            .collect();
+        let mut sorted: Vec<BlockId> = ready.drain(..).collect();
+        sorted.sort();
+        ready.extend(sorted);
+
+        while let Some(block_id) = ready.pop_front() {
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
+
+            let block = match fin_block_map.get(&block_id) {
+                Some(b) => *b,
+                None => continue,
+            };
+
+            // Skip if any upstream all-runs finalization block fully failed
+            let upstream_failed = def
+                .finalization_connections
+                .iter()
+                .filter(|c| c.to == block_id && all_runs_ids.contains(&c.from))
+                .any(|c| failed_blocks.contains(&(c.from, None)));
+            if upstream_failed {
+                failed_blocks.insert((block_id, None));
+                let replica_count = block.agents.len() * block.replicas.max(1) as usize;
+                // Emit BlockSkipped for each replica so the TUI marks rows as skipped
+                let reason = "upstream finalization block failed".to_string();
+                for entry in fin_entries
+                    .iter()
+                    .filter(|e| e.source_block_id == block_id && e.run_scope.is_none())
+                {
+                    let _ = progress_tx.send(ProgressEvent::BlockSkipped {
+                        block_id: entry.runtime_id,
+                        agent_name: entry.agent.clone(),
+                        label: entry.display_label.clone(),
+                        iteration: 1,
+                        loop_pass: 0,
+                        reason: reason.clone(),
+                    });
+                }
+                if let Some(children) = fin_downstream.get(&block_id) {
+                    for &child in children {
+                        if all_runs_ids.contains(&child) {
+                            if let Some(deg) = in_degree.get_mut(&child) {
+                                *deg = deg.saturating_sub(replica_count);
+                                if *deg == 0 {
+                                    ready.push_back(child);
+                                }
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+
+            // Find matching runtime entries for this block (all-runs, no run_scope)
+            let block_entries: Vec<&RuntimeReplicaInfo> = fin_entries
+                .iter()
+                .filter(|e| e.source_block_id == block_id && e.run_scope.is_none())
+                .collect();
+
+            // Collect feed data for this block (all-runs granularity)
+            let mut feed_payloads: Vec<(String, String)> = Vec::new();
+            for feed in &def.data_feeds {
+                if feed.to != block_id {
+                    continue;
+                }
+                let label = if feed.from == WILDCARD_BLOCK_ID {
+                    format!("All execution blocks ({})", feed.collection.as_str())
+                } else {
+                    format!("Block {} ({})", feed.from, feed.collection.as_str())
+                };
+                let data = collect_feed_data(feed, def, exec_runtime_table, &run_scope, None)?;
+                if !data.is_empty() {
+                    feed_payloads.push((label, data));
+                }
+            }
+
+            // Collect upstream finalization outputs (from per-run blocks across all runs, or all-runs blocks)
+            let upstream_fin_ids: Vec<BlockId> = def
+                .finalization_connections
+                .iter()
+                .filter(|c| c.to == block_id)
+                .map(|c| c.from)
+                .collect();
+
+            let mut upstream_outputs: Vec<(String, String)> = Vec::new();
+            for uid in &upstream_fin_ids {
+                if per_run_ids.contains(uid) {
+                    // Collect from all runs
+                    for &(run_id, _) in &successful_runs {
+                        if let Some(outputs) = fin_outputs.get(&(*uid, Some(run_id))) {
+                            for (label, content) in outputs {
+                                upstream_outputs.push((label.clone(), content.clone()));
+                            }
+                        }
+                    }
+                } else {
+                    // All-runs upstream
+                    if let Some(outputs) = fin_outputs.get(&(*uid, None)) {
+                        for (label, content) in outputs {
+                            upstream_outputs.push((label.clone(), content.clone()));
+                        }
+                    }
+                }
+            }
+
+            let message = build_finalization_message(block, &feed_payloads, &upstream_outputs);
+
+            // Execute each replica
+            let mut block_output_list: Vec<(String, String)> = Vec::new();
+            for entry in &block_entries {
+                let _ = progress_tx.send(ProgressEvent::BlockStarted {
+                    block_id: entry.runtime_id,
+                    agent_name: entry.agent.clone(),
+                    label: entry.display_label.clone(),
+                    iteration: 1,
+                    loop_pass: 0,
+                });
+
+                let (kind, cfg, _use_cli) = match agent_configs.get(&entry.agent) {
+                    Some(c) => c,
+                    None => {
+                        let _ = progress_tx.send(ProgressEvent::BlockError {
+                            block_id: entry.runtime_id,
+                            agent_name: entry.agent.clone(),
+                            label: entry.display_label.clone(),
+                            iteration: 1,
+                            loop_pass: 0,
+                            error: "No provider available".into(),
+                            details: None,
+                        });
+                        block_error_count += 1;
+                        continue;
+                    }
+                };
+
+                let mut provider = provider_factory(*kind, cfg);
+                let rid = entry.runtime_id;
+                let agent_name = entry.agent.clone();
+                let label = entry.display_label.clone();
+
+                let result = crate::execution::run_with_cancellation(
+                    &mut *provider,
+                    &message,
+                    &progress_tx,
+                    &cancel,
+                    {
+                        let agent_name = agent_name.clone();
+                        move |chunk| ProgressEvent::BlockStreamChunk {
+                            block_id: rid,
+                            agent_name: agent_name.clone(),
+                            iteration: 1,
+                            loop_pass: 0,
+                            chunk,
+                        }
+                    },
+                    {
+                        let agent_name = agent_name.clone();
+                        move |msg| ProgressEvent::BlockLog {
+                            block_id: rid,
+                            agent_name: agent_name.clone(),
+                            iteration: 1,
+                            loop_pass: 0,
+                            message: msg,
+                        }
+                    },
+                    ProgressEvent::BlockError {
+                        block_id: rid,
+                        agent_name: agent_name.clone(),
+                        label: label.clone(),
+                        iteration: 1,
+                        loop_pass: 0,
+                        error: "Cancelled".into(),
+                        details: None,
+                    },
+                )
+                .await;
+
+                match result {
+                    Some(Ok(resp)) => {
+                        let filename = format!("{}.md", entry.filename_stem);
+                        let path = fin_dir.join(&filename);
+                        if let Err(e) = tokio::fs::write(&path, &resp.content).await {
+                            let _ = progress_tx.send(ProgressEvent::BlockError {
+                                block_id: rid,
+                                agent_name: agent_name.clone(),
+                                label: label.clone(),
+                                iteration: 1,
+                                loop_pass: 0,
+                                error: format!("Failed to write output: {e}"),
+                                details: None,
+                            });
+                            block_error_count += 1;
+                        } else {
+                            let _ = progress_tx.send(ProgressEvent::BlockFinished {
+                                block_id: rid,
+                                agent_name: agent_name.clone(),
+                                label,
+                                iteration: 1,
+                                loop_pass: 0,
+                            });
+                            block_output_list.push((entry.display_label.clone(), resp.content));
+                        }
+                    }
+                    Some(Err(e)) => {
+                        let _ = progress_tx.send(ProgressEvent::BlockError {
+                            block_id: rid,
+                            agent_name,
+                            label,
+                            iteration: 1,
+                            loop_pass: 0,
+                            error: e.to_string(),
+                            details: Some(e.to_string()),
+                        });
+                        block_error_count += 1;
+                    }
+                    None => {
+                        // Cancelled
+                    }
+                }
+            }
+
+            if block_output_list.is_empty() && !block_entries.is_empty() {
+                failed_blocks.insert((block_id, None));
+            }
+            fin_outputs.insert((block_id, None), block_output_list);
+
+            // Decrement in-degree for downstream all-runs blocks
+            let replica_count = block.agents.len() * block.replicas.max(1) as usize;
+            if let Some(children) = fin_downstream.get(&block_id) {
+                for &child in children {
+                    if all_runs_ids.contains(&child) {
+                        if let Some(deg) = in_degree.get_mut(&child) {
+                            *deg = deg.saturating_sub(replica_count);
+                            if *deg == 0 {
+                                ready.push_back(child);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        debug_assert!(
+            cancel.load(std::sync::atomic::Ordering::Relaxed)
+                || in_degree.values().all(|&d| d == 0),
+            "all-runs finalization in-degree not fully drained"
+        );
+    }
+
+    // Skip metadata write and error reporting on cancellation — the run is
+    // incomplete and callers detect cancel via the shared flag.
+    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        return Ok(());
+    }
+
+    // Write finalization.toml metadata
+    write_finalization_toml(&fin_dir, def, &run_scope, pipeline_source)?;
+
+    if block_error_count > 0 {
+        return Err(AppError::Config(format!(
+            "{block_error_count} finalization block(s) failed"
+        )));
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -2434,6 +3772,9 @@ mod tests {
             connections,
             session_configs: Vec::new(),
             loop_connections: Vec::new(),
+            finalization_blocks: Vec::new(),
+            finalization_connections: Vec::new(),
+            data_feeds: Vec::new(),
         }
     }
 
@@ -2579,7 +3920,7 @@ mod tests {
     #[test]
     fn would_create_cycle_self_edge() {
         let d = def_with(vec![block(1, 0, 0)], vec![]);
-        assert!(would_create_cycle(&d, 1, 1));
+        assert!(would_create_cycle(&d.connections, 1, 1));
     }
 
     #[test]
@@ -2589,7 +3930,7 @@ mod tests {
             vec![conn(1, 2), conn(2, 3)],
         );
         // Adding 3→1 would create 1→2→3→1
-        assert!(would_create_cycle(&d, 3, 1));
+        assert!(would_create_cycle(&d.connections, 3, 1));
     }
 
     #[test]
@@ -2599,7 +3940,7 @@ mod tests {
             vec![conn(1, 2), conn(2, 3)],
         );
         // Adding 1→3 (skip-edge) is valid
-        assert!(!would_create_cycle(&d, 1, 3));
+        assert!(!would_create_cycle(&d.connections, 1, 3));
     }
 
     #[test]
@@ -2614,29 +3955,29 @@ mod tests {
             vec![conn(1, 2), conn(1, 3), conn(2, 4)],
         );
         // Adding 3→4 is valid (diamond)
-        assert!(!would_create_cycle(&d, 3, 4));
+        assert!(!would_create_cycle(&d.connections, 3, 4));
     }
 
     // -- next_free_position --
 
     #[test]
     fn next_free_position_empty() {
-        let d = PipelineDefinition::default();
-        assert_eq!(next_free_position(&d), (0, 0));
+        let blocks: Vec<PipelineBlock> = vec![];
+        assert_eq!(next_free_position(&blocks), (0, 0));
     }
 
     #[test]
     fn next_free_position_fills_gaps() {
         let d = def_with(vec![block(1, 0, 0), block(2, 2, 0)], vec![]);
         // (1, 0) is the first gap
-        assert_eq!(next_free_position(&d), (1, 0));
+        assert_eq!(next_free_position(&d.blocks), (1, 0));
     }
 
     #[test]
     fn next_free_position_wraps_to_next_row() {
         // Fill entire row 0 cols 0..100? That's too many. Let's check a smaller scenario.
         let d = def_with(vec![block(1, 0, 0), block(2, 1, 0)], vec![]);
-        assert_eq!(next_free_position(&d), (2, 0));
+        assert_eq!(next_free_position(&d.blocks), (2, 0));
     }
 
     // -- save/load roundtrip --
@@ -2787,6 +4128,9 @@ to = 1
             connections: vec![],
             session_configs: Vec::new(),
             loop_connections: Vec::new(),
+            finalization_blocks: Vec::new(),
+            finalization_connections: Vec::new(),
+            data_feeds: Vec::new(),
         };
         let context = PromptRuntimeContext::new(def.initial_prompt.clone(), false);
 
@@ -2832,6 +4176,9 @@ to = 1
             connections: vec![],
             session_configs: Vec::new(),
             loop_connections: Vec::new(),
+            finalization_blocks: Vec::new(),
+            finalization_connections: Vec::new(),
+            data_feeds: Vec::new(),
         };
         let agent_configs = HashMap::from([(
             "Claude".to_string(),
@@ -2910,6 +4257,9 @@ to = 1
             connections: vec![],
             session_configs: Vec::new(),
             loop_connections: Vec::new(),
+            finalization_blocks: Vec::new(),
+            finalization_connections: Vec::new(),
+            data_feeds: Vec::new(),
         };
         let agent_configs = HashMap::from([(
             "Claude".to_string(),
@@ -3669,6 +5019,9 @@ keep_across_iterations = false
             connections,
             session_configs: Vec::new(),
             loop_connections: loops,
+            finalization_blocks: Vec::new(),
+            finalization_connections: Vec::new(),
+            data_feeds: Vec::new(),
         }
     }
 
@@ -3794,8 +5147,8 @@ keep_across_iterations = false
         let def = def_with_loops(vec![block(1, 0, 0)], vec![], vec![lconn(1, 99, 1)]);
         let err = validate_pipeline(&def).unwrap_err();
         assert!(
-            err.to_string().contains("non-existent"),
-            "expected 'dangling' ref msg, got: {err}"
+            err.to_string().contains("non-execution block"),
+            "expected 'non-execution block' ref msg, got: {err}"
         );
     }
 
@@ -3962,7 +5315,7 @@ keep_across_iterations = false
         // Adding A→B regular edge would create a duplicate, but not a cycle
         // The cycle check should not consider the loop back-edge
         assert!(
-            !would_create_cycle(&def, 1, 2),
+            !would_create_cycle(&def.connections, 1, 2),
             "loop back-edge should not be considered by cycle detection"
         );
     }
@@ -4364,6 +5717,8 @@ keep_across_iterations = false
             runtime_id: 0,
             source_block_id: 1,
             replica_index: 0,
+            phase: RuntimePhase::Execution,
+            run_scope: None,
             agent: "Claude".into(),
             display_label: "Block#1".into(),
             session_key: "__block_1".into(),
@@ -5165,7 +6520,7 @@ keep_across_iterations = false
     fn next_free_position_capped_with_extreme_coordinates() {
         // A block at u16::MAX should not cause a hang; search is capped at 100×100
         let d = def_with(vec![block(1, 60000, 60000)], vec![]);
-        let pos = next_free_position(&d);
+        let pos = next_free_position(&d.blocks);
         assert_ne!(pos, (60000, 60000));
         // The returned position must not collide with any existing block
         assert!(!d.blocks.iter().any(|b| b.position == pos));
@@ -5175,7 +6530,7 @@ keep_across_iterations = false
     fn next_free_position_fallback_avoids_occupied_out_of_range() {
         // Fallback row (0, 101) is already occupied — must skip past it
         let d = def_with(vec![block(1, 60000, 60000), block(2, 0, 101)], vec![]);
-        let pos = next_free_position(&d);
+        let pos = next_free_position(&d.blocks);
         assert!(!d.blocks.iter().any(|b| b.position == pos));
     }
 
@@ -5196,5 +6551,247 @@ keep_across_iterations = false
         assert!(buf.len() <= max);
         // Verify it's still valid UTF-8
         assert!(std::str::from_utf8(buf.as_bytes()).is_ok());
+    }
+
+    // -- Finalization DAG tests --
+
+    fn fin_block(id: BlockId, col: u16, row: u16) -> PipelineBlock {
+        PipelineBlock {
+            id,
+            name: format!("Fin#{id}"),
+            agents: vec!["Claude".into()],
+            prompt: format!("finalization {id}"),
+            session_id: None,
+            position: (col, row),
+            replicas: 1,
+        }
+    }
+
+    fn feed(from: BlockId, to: BlockId) -> DataFeed {
+        DataFeed {
+            from,
+            to,
+            collection: FeedCollection::LastIteration,
+            granularity: FeedGranularity::PerRun,
+        }
+    }
+
+    fn feed_all_runs(from: BlockId, to: BlockId) -> DataFeed {
+        DataFeed {
+            from,
+            to,
+            collection: FeedCollection::LastIteration,
+            granularity: FeedGranularity::AllRuns,
+        }
+    }
+
+    #[test]
+    fn backward_compat_old_pipeline_deserializes() {
+        // Old TOML with no finalization fields should still deserialize
+        let toml_str = r#"
+initial_prompt = "test"
+iterations = 1
+
+[[blocks]]
+id = 1
+agent = "Claude"
+prompt = "a"
+position = [0, 0]
+"#;
+        let def: PipelineDefinition = toml::from_str(toml_str).unwrap();
+        assert!(!def.has_finalization());
+        assert!(def.finalization_blocks.is_empty());
+        assert!(def.finalization_connections.is_empty());
+        assert!(def.data_feeds.is_empty());
+    }
+
+    #[test]
+    fn finalization_toml_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fin_test.toml");
+        let mut def = def_with(vec![block(1, 0, 0)], vec![]);
+        def.finalization_blocks = vec![fin_block(10, 0, 0)];
+        def.data_feeds = vec![feed(1, 10)];
+        save_pipeline(&def, &path).unwrap();
+        let loaded = load_pipeline(&path).unwrap();
+        assert_eq!(loaded.finalization_blocks.len(), 1);
+        assert_eq!(loaded.finalization_blocks[0].id, 10);
+        assert_eq!(loaded.data_feeds.len(), 1);
+        assert_eq!(loaded.data_feeds[0].from, 1);
+        assert_eq!(loaded.data_feeds[0].to, 10);
+    }
+
+    #[test]
+    fn validate_rejects_cross_phase_connections() {
+        let mut def = def_with(vec![block(1, 0, 0)], vec![]);
+        def.finalization_blocks = vec![fin_block(10, 0, 0)];
+        def.data_feeds = vec![feed(1, 10)];
+        // Add a regular connection from execution to finalization
+        def.connections.push(conn(1, 10));
+        let err = validate_pipeline(&def).unwrap_err();
+        assert!(
+            err.to_string().contains("non-existent") || err.to_string().contains("block"),
+            "expected block ref error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_finalization_cycles() {
+        let mut def = def_with(vec![block(1, 0, 0)], vec![]);
+        def.finalization_blocks = vec![fin_block(10, 0, 0), fin_block(11, 1, 0)];
+        def.finalization_connections = vec![conn(10, 11), conn(11, 10)];
+        def.data_feeds = vec![feed(1, 10)];
+        let err = validate_pipeline(&def).unwrap_err();
+        assert!(
+            err.to_string().contains("cycle"),
+            "expected cycle error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_feeds_to_non_finalization_blocks() {
+        let mut def = def_with(vec![block(1, 0, 0), block(2, 1, 0)], vec![]);
+        // Feed targeting execution block 2
+        def.data_feeds = vec![feed(1, 2)];
+        let err = validate_pipeline(&def).unwrap_err();
+        assert!(
+            err.to_string().contains("finalization block"),
+            "expected finalization block error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_loop_endpoints_in_finalization() {
+        let mut def = def_with(vec![block(1, 0, 0)], vec![]);
+        def.finalization_blocks = vec![fin_block(10, 0, 0), fin_block(11, 1, 0)];
+        def.data_feeds = vec![feed(1, 10)];
+        // Loop referencing finalization block
+        def.loop_connections.push(LoopConnection {
+            from: 10,
+            to: 11,
+            count: 1,
+            prompt: String::new(),
+        });
+        let err = validate_pipeline(&def).unwrap_err();
+        assert!(
+            err.to_string().contains("non-execution block"),
+            "expected non-execution block error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_self_edge_finalization_connections() {
+        let mut def = def_with(vec![block(1, 0, 0)], vec![]);
+        def.finalization_blocks = vec![fin_block(10, 0, 0)];
+        def.finalization_connections = vec![conn(10, 10)];
+        def.data_feeds = vec![feed(1, 10)];
+        let err = validate_pipeline(&def).unwrap_err();
+        assert!(
+            err.to_string().contains("self-edge"),
+            "expected self-edge error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_finalization_connections() {
+        let mut def = def_with(vec![block(1, 0, 0)], vec![]);
+        def.finalization_blocks = vec![fin_block(10, 0, 0), fin_block(11, 1, 0)];
+        def.finalization_connections = vec![conn(10, 11), conn(10, 11)];
+        def.data_feeds = vec![feed(1, 10)];
+        let err = validate_pipeline(&def).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Duplicate finalization connection"),
+            "expected duplicate error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_feed_tuples() {
+        let mut def = def_with(vec![block(1, 0, 0)], vec![]);
+        def.finalization_blocks = vec![fin_block(10, 0, 0)];
+        def.data_feeds = vec![feed(1, 10), feed(1, 10)];
+        let err = validate_pipeline(&def).unwrap_err();
+        assert!(
+            err.to_string().contains("Duplicate data feed"),
+            "expected duplicate feed error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_wildcard_conflict() {
+        let mut def = def_with(vec![block(1, 0, 0), block(2, 1, 0)], vec![]);
+        def.finalization_blocks = vec![fin_block(10, 0, 0)];
+        // Wildcard feed + block-specific feed to same target
+        def.data_feeds = vec![feed(WILDCARD_BLOCK_ID, 10), feed(1, 10)];
+        let err = validate_pipeline(&def).unwrap_err();
+        assert!(
+            err.to_string().contains("Wildcard feed conflicts"),
+            "expected wildcard conflict error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn is_per_run_propagates_transitively() {
+        let mut def = def_with(vec![block(1, 0, 0)], vec![]);
+        def.finalization_blocks = vec![
+            fin_block(10, 0, 0),
+            fin_block(11, 1, 0),
+            fin_block(12, 2, 0),
+        ];
+        def.finalization_connections = vec![conn(10, 11), conn(11, 12)];
+        def.data_feeds = vec![feed(1, 10)]; // PerRun feed to block 10
+        assert!(def.is_per_run_finalization_block(10));
+        assert!(def.is_per_run_finalization_block(11)); // propagated
+        assert!(def.is_per_run_finalization_block(12)); // propagated transitively
+    }
+
+    #[test]
+    fn is_per_run_all_runs_not_propagated() {
+        let mut def = def_with(vec![block(1, 0, 0)], vec![]);
+        def.finalization_blocks = vec![fin_block(10, 0, 0), fin_block(11, 1, 0)];
+        def.finalization_connections = vec![conn(10, 11)];
+        def.data_feeds = vec![feed_all_runs(1, 10)]; // AllRuns feed to block 10
+        assert!(!def.is_per_run_finalization_block(10));
+        assert!(!def.is_per_run_finalization_block(11));
+    }
+
+    #[test]
+    fn validate_accepts_valid_finalization_dag() {
+        let mut def = def_with(vec![block(1, 0, 0), block(2, 1, 0)], vec![conn(1, 2)]);
+        def.finalization_blocks = vec![fin_block(10, 0, 0), fin_block(11, 1, 0)];
+        def.finalization_connections = vec![conn(10, 11)];
+        def.data_feeds = vec![feed(WILDCARD_BLOCK_ID, 10)]; // wildcard
+        assert!(validate_pipeline(&def).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_ids_across_phases() {
+        let mut def = def_with(vec![block(1, 0, 0)], vec![]);
+        // Finalization block reuses execution block ID
+        def.finalization_blocks = vec![fin_block(1, 0, 0)];
+        let err = validate_pipeline(&def).unwrap_err();
+        assert!(
+            err.to_string().contains("Duplicate block ID"),
+            "expected duplicate ID error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn all_blocks_iterates_both_phases() {
+        let mut def = def_with(vec![block(1, 0, 0), block(2, 1, 0)], vec![]);
+        def.finalization_blocks = vec![fin_block(10, 0, 0)];
+        let ids: Vec<BlockId> = def.all_blocks().map(|b| b.id).collect();
+        assert_eq!(ids, vec![1, 2, 10]);
+    }
+
+    #[test]
+    fn execution_and_finalization_block_id_sets() {
+        let mut def = def_with(vec![block(1, 0, 0), block(2, 1, 0)], vec![]);
+        def.finalization_blocks = vec![fin_block(10, 0, 0)];
+        assert_eq!(def.execution_block_ids(), [1, 2].into_iter().collect());
+        assert_eq!(def.finalization_block_ids(), [10].into_iter().collect());
+        assert!(def.is_finalization_block(10));
+        assert!(!def.is_finalization_block(1));
     }
 }

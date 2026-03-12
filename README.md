@@ -19,7 +19,7 @@ Run Claude, OpenAI, and Gemini in collaborative execution modes and save all art
 |------|-------------|
 | **Relay** | Sequential handoff — each agent builds on the previous agent's output |
 | **Swarm** | Parallel rounds with cross-agent context injected between rounds |
-| **Pipeline** | Custom DAG builder — wire arbitrary blocks of agents into a dependency graph |
+| **Pipeline** | Custom DAG builder — wire arbitrary blocks of agents into a dependency graph, with optional finalization DAG for post-execution analysis |
 
 ## Supported Providers
 
@@ -35,7 +35,7 @@ Each agent can run in API mode or CLI mode (`use_cli = true`). Mix and match fre
 
 - **Terminal UI** — select agents, mode, prompt, iterations, run count, and concurrency from an interactive TUI
 - **Named agents** — define multiple agents per provider with independent configs
-- **Pipeline builder** — visual DAG editor for wiring arbitrary agent blocks with dependency-driven execution, independent per-connection routing, and loop-back connections for iterative refinement of sub-DAGs
+- **Pipeline builder** — visual DAG editor for wiring arbitrary agent blocks with dependency-driven execution, independent per-connection routing, loop-back connections for iterative refinement of sub-DAGs, and an optional finalization DAG for post-execution analysis and summarization
 - **Multiple runs** — launch N independent copies of the same setup in parallel with bounded concurrency
 - **Resume runs** — pick up where you left off in relay or swarm sessions
 - **Forward Prompt** — relay mode option to include the original prompt in every handoff
@@ -323,6 +323,9 @@ Fields vary by mode for options, but every prompt flow includes Prompt, Session 
 | `c` | Enter connect mode — select a second block to create a connection |
 | `x` | Enter remove-connection mode — pick a connection to delete |
 | `o` | Create loop-back connection — press on the downstream feedback block, then select the upstream restart target; set count and prompt; press on existing loop to edit |
+| `A` | Add a finalization block (placed below the separator in the finalization region) |
+| `f` | Create or edit data feed — on an execution block, enters feed-connect mode (navigate to a finalization block and press Enter to create the feed); on a finalization block, opens incoming feeds for editing |
+| `F` | Remove a data feed attached to the selected block |
 | `s` | Open session configuration popup — toggle per-session history persistence |
 | `Arrow keys` / `h j k l` | Navigate/select blocks spatially without moving |
 | `Shift+Arrow keys` / `Shift+H J K L` | Move selected block (swap with occupied target cell, otherwise move) |
@@ -332,7 +335,7 @@ Fields vary by mode for options, but every prompt flow includes Prompt, Session 
 | `Ctrl+L` | Load pipeline from file |
 | `Ctrl+E` | Analyze setup — sends current pipeline to `diagnostic_provider` for a plain-language explanation |
 | `F5` | Validate and run the pipeline |
-| `?` | Open help popup (6 tabbed sections; Tab/Shift+Tab to cycle). Only when focus is not on a text field (initial prompt / session name). |
+| `?` | Open help popup (7 tabbed sections; Tab/Shift+Tab to cycle). Only when focus is not on a text field (initial prompt / session name). |
 | `Esc` | Cancel current action / back to home |
 
 Inside the **edit popup**: `Tab` cycles between Name, Agents (multiselect list — `Up`/`Down` to navigate, `Space` to toggle), Prompt (text area), Session ID, and Replicas fields. `Esc` closes the popup. Each block can have one or more agents selected. Setting Replicas > 1 spawns that many copies per agent. Total tasks per block = agents × replicas (max 32).
@@ -425,6 +428,94 @@ prompt = "Refine based on feedback"
 
 `count` is the number of additional passes beyond the initial run. Each block in the sub-DAG runs `count + 1` times total. Loop wires are drawn as double-line in yellow on the canvas.
 
+### Finalization DAG
+
+Pipeline mode supports an optional **finalization phase** that runs after the execution DAG completes. Finalization blocks receive execution outputs via **data feeds** and can be wired into their own dependency DAG via finalization connections. When finalization is defined, it replaces consolidation for pipeline mode.
+
+**Data feeds** connect execution blocks to finalization blocks with two configurable dimensions:
+
+| Setting | Options | Description |
+|---------|---------|-------------|
+| **Collection** | `last_iteration` (default), `all_iterations` | Which iteration outputs to collect from execution blocks |
+| **Granularity** | `per_run` (default), `all_runs` | Whether the finalization block runs once per successful run or once across all runs |
+
+A **per-run** finalization block runs independently for each successful run, receiving only that run's execution outputs. An **all-runs** finalization block runs once, receiving outputs from all successful runs. Per-run blocks can feed into all-runs blocks via finalization connections, enabling patterns like "summarize each run, then synthesize across summaries."
+
+Wildcard feeds (`from = 0`) collect outputs from all execution blocks. Block-specific feeds target a single execution block.
+
+Single-run finalization outputs are stored in `run_dir/finalization/`:
+
+```
+my_session/
+  session.toml
+  pipeline.toml
+  Analyzer_b1_Claude_iter1.md
+  Reviewer_b2_Gemini_iter1.md
+  finalization/
+    finalization.toml
+    Summary_b3_Claude.md
+    Report_b4_GPT.md
+```
+
+Batch finalization outputs are stored in `batch_root/finalization/`:
+
+```
+my_session/
+  batch.toml
+  run_1/
+    ...
+  run_3/
+    ...
+  finalization/
+    finalization.toml
+    per_run_summary_Claude_run1.md
+    per_run_summary_Claude_run3.md
+    meta_report_Claude.md
+```
+
+Per-run finalization filenames include the real run ID (only successful runs). The `finalization.toml` metadata file records the successful run IDs, finalization block count, and feed count.
+
+Example pipeline TOML with finalization:
+
+```toml
+initial_prompt = "Analyze the codebase"
+iterations = 2
+
+[[blocks]]
+id = 1
+name = "Analyzer"
+agents = ["Claude"]
+prompt = "Analyze the architecture"
+row = 0
+col = 0
+
+[[blocks]]
+id = 2
+name = "Reviewer"
+agents = ["Gemini"]
+prompt = "Review the analysis"
+row = 0
+col = 1
+
+[[connections]]
+from = 1
+to = 2
+
+[[finalization_blocks]]
+id = 3
+name = "Summary"
+agents = ["Claude"]
+prompt = "Synthesize all findings into a final report"
+row = 0
+col = 0
+
+[[data_feeds]]
+from = 0
+to = 3
+collection = "last_iteration"
+granularity = "per_run"
+```
+
 Runs are grouped by date: `YYYY-MM-DD/<session_name>`. When no session name is provided, a random two-word name (`adjective-noun`) is generated. Duplicate user-defined session names within the same date are rejected.
 
 When `runs > 1`, House of Agents creates a batch root and one subdirectory per independent run:
@@ -461,5 +552,6 @@ Legacy directories (`YYYYMMDD_HHMMSS_NNN[_session]` and `YYYY-MM-DD/HH-MM-SS[_se
 - **Consolidation**
   - Single-run: offered after non-cancelled swarm/pipeline runs with 2+ final outputs
   - Batch: first offers per-run consolidation, then optional cross-run consolidation across successful runs
+  - Skipped automatically for pipeline runs that have finalization defined (finalization replaces consolidation)
 - **Setup Analysis** — press `Ctrl+E` on the Prompt, Order, or Pipeline screen to send the current run configuration to the `diagnostic_provider` for a plain-language explanation of what the run will do. Requires `diagnostic_provider` to be set in config. The popup shows loading state, then a scrollable analysis result (scroll with `j`/`k`/arrows/PgUp/PgDn, close with `Esc`/`q`). Pre-flight checks catch invalid setups locally before making the provider call. Errors are shown inside the popup itself.
 - **Diagnostics** — when `diagnostic_provider` is set to an agent name, a final analysis pass writes `errors.md`

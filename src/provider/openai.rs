@@ -166,7 +166,7 @@ impl Provider for OpenAIProvider {
 pub async fn list_models(api_key: &str, client: &reqwest::Client) -> Result<Vec<String>, String> {
     let request = client
         .get("https://api.openai.com/v1/models")
-        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Authorization", format!("Bearer {api_key}"))
         .build()
         .map_err(|e| e.to_string())?;
 

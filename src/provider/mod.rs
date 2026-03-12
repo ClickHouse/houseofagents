@@ -250,6 +250,7 @@ pub fn prune_history(history: &mut Vec<Message>, max_messages: usize) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn create_provider(
     kind: ProviderKind,
     config: &ProviderConfig,
@@ -258,6 +259,7 @@ pub fn create_provider(
     max_history_messages: usize,
     max_history_bytes: usize,
     cli_timeout_seconds: u64,
+    add_dirs: Vec<String>,
 ) -> Box<dyn Provider> {
     if config.use_cli {
         return Box::new(cli::CliProvider::new(
@@ -267,7 +269,7 @@ pub fn create_provider(
             config.thinking_effort.clone(),
             config.extra_cli_args.clone(),
             config.cli_print_mode,
-            vec![],
+            add_dirs,
             cli_timeout_seconds,
             max_history_messages,
             max_history_bytes,
@@ -555,7 +557,16 @@ mod tests {
     fn create_provider_cli_returns_expected_kind() {
         let client = reqwest::Client::new();
         for kind in ProviderKind::all() {
-            let p = create_provider(*kind, &cfg(true), client.clone(), 100, 20, 102400, 5);
+            let p = create_provider(
+                *kind,
+                &cfg(true),
+                client.clone(),
+                100,
+                20,
+                102400,
+                5,
+                vec![],
+            );
             assert_eq!(p.kind(), *kind);
         }
     }
@@ -564,7 +575,16 @@ mod tests {
     fn create_provider_api_returns_expected_kind() {
         let client = reqwest::Client::new();
         for kind in ProviderKind::all() {
-            let p = create_provider(*kind, &cfg(false), client.clone(), 100, 20, 102400, 5);
+            let p = create_provider(
+                *kind,
+                &cfg(false),
+                client.clone(),
+                100,
+                20,
+                102400,
+                5,
+                vec![],
+            );
             assert_eq!(p.kind(), *kind);
         }
     }

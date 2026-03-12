@@ -232,6 +232,13 @@ pub enum BatchProgressEvent {
         outcome: RunOutcome,
         error: Option<String>,
     },
+    BatchStageStarted {
+        label: String,
+    },
+    BatchStageFinished {
+        label: String,
+        error: Option<String>,
+    },
     AllRunsDone,
 }
 

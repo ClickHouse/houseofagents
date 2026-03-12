@@ -283,6 +283,8 @@ pub(crate) struct RunningState {
     pub(crate) stream_buffers: HashMap<StreamTarget, StreamBuffer>,
     pub(crate) preview_target: Option<StreamTarget>,
     pub(crate) show_activity_log: bool,
+    pub(crate) batch_stage: Option<String>,
+    pub(crate) batch_stage_error: Option<String>,
 }
 
 pub(crate) struct ResultsState {
@@ -292,6 +294,8 @@ pub(crate) struct ResultsState {
     pub(crate) batch_result_runs: Vec<BatchRunGroup>,
     pub(crate) batch_result_root_files: Vec<PathBuf>,
     pub(crate) batch_result_expanded: HashSet<u32>,
+    pub(crate) batch_result_finalization_files: Vec<PathBuf>,
+    pub(crate) batch_result_finalization_expanded: bool,
     pub(crate) results_loading: bool,
     pub(crate) results_load_rx: Option<mpsc::UnboundedReceiver<Result<ResultsLoadPayload, String>>>,
     pub(crate) preview_loading: bool,
@@ -360,6 +364,10 @@ pub(crate) struct PipelineState {
     pub(crate) pipeline_loop_edit_count_buf: String,
     pub(crate) pipeline_loop_edit_prompt_buf: String,
     pub(crate) pipeline_loop_edit_prompt_cursor: usize,
+    pub(crate) pipeline_feed_connecting_from: Option<BlockId>,
+    pub(crate) pipeline_show_feed_edit: bool,
+    pub(crate) pipeline_feed_edit_target: Option<(BlockId, BlockId)>,
+    pub(crate) pipeline_feed_edit_field: PipelineFeedEditField,
 }
 
 pub(crate) struct PendingSingleExecution {
@@ -388,6 +396,7 @@ pub(crate) struct ResultsLoadPayload {
     pub(crate) batch_result_runs: Vec<BatchRunGroup>,
     pub(crate) batch_result_root_files: Vec<PathBuf>,
     pub(crate) batch_result_expanded: HashSet<u32>,
+    pub(crate) batch_result_finalization_files: Vec<PathBuf>,
 }
 
 pub(crate) struct PreviewLoadResult {
@@ -507,6 +516,12 @@ pub enum PipelineEditField {
 pub(crate) enum PipelineLoopEditField {
     Count,
     Prompt,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PipelineFeedEditField {
+    Collection,
+    Granularity,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -824,6 +839,8 @@ impl RunningState {
             stream_buffers: HashMap::new(),
             preview_target: None,
             show_activity_log: true,
+            batch_stage: None,
+            batch_stage_error: None,
         }
     }
 
@@ -872,6 +889,8 @@ impl RunningState {
         self.current_iteration = 0;
         self.final_iteration = 0;
         self.show_activity_log = true;
+        self.batch_stage = None;
+        self.batch_stage_error = None;
     }
 
     fn reset_to_home(&mut self) {
@@ -1119,6 +1138,8 @@ impl ResultsState {
             batch_result_runs: Vec::new(),
             batch_result_root_files: Vec::new(),
             batch_result_expanded: HashSet::new(),
+            batch_result_finalization_files: Vec::new(),
+            batch_result_finalization_expanded: false,
             results_loading: false,
             results_load_rx: None,
             preview_loading: false,
@@ -1134,6 +1155,8 @@ impl ResultsState {
         self.batch_result_runs.clear();
         self.batch_result_root_files.clear();
         self.batch_result_expanded.clear();
+        self.batch_result_finalization_files.clear();
+        self.batch_result_finalization_expanded = false;
         self.results_loading = false;
         self.results_load_rx = None;
         self.preview_loading = false;
@@ -1212,6 +1235,10 @@ impl PipelineState {
             pipeline_loop_edit_count_buf: String::new(),
             pipeline_loop_edit_prompt_buf: String::new(),
             pipeline_loop_edit_prompt_cursor: 0,
+            pipeline_feed_connecting_from: None,
+            pipeline_show_feed_edit: false,
+            pipeline_feed_edit_target: None,
+            pipeline_feed_edit_field: PipelineFeedEditField::Collection,
         }
     }
 }
@@ -1392,7 +1419,7 @@ mod tests {
         app.pipeline.pipeline_save_path = Some(PathBuf::from("pipeline.toml"));
         app.pipeline.pipeline_show_session_config = true;
         app.pipeline.pipeline_session_config_cursor = 2;
-        app.help_popup.open(6);
+        app.help_popup.open(crate::screen::help::PIPELINE_TAB_COUNT);
         app.help_popup.tab = 3;
         app.help_popup.scroll = 15;
         app.setup_analysis.active = true;

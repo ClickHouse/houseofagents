@@ -67,6 +67,9 @@ pub fn draw(f: &mut Frame, app: &App) {
                     VisibleBatchItem::RunHeader { run_id, expanded } => {
                         format!("{} Run {run_id}", if *expanded { "▾" } else { "▸" })
                     }
+                    VisibleBatchItem::FinalizationHeader { expanded } => {
+                        format!("{} Finalization", if *expanded { "▾" } else { "▸" })
+                    }
                     VisibleBatchItem::File { depth, path } => {
                         let name = path
                             .file_name()
@@ -170,11 +173,14 @@ fn selected_file_ref<'a>(
 }
 
 fn has_batch_results(app: &App) -> bool {
-    !app.results.batch_result_runs.is_empty() || !app.results.batch_result_root_files.is_empty()
+    !app.results.batch_result_runs.is_empty()
+        || !app.results.batch_result_root_files.is_empty()
+        || !app.results.batch_result_finalization_files.is_empty()
 }
 
 enum VisibleBatchItem<'a> {
     RunHeader { run_id: u32, expanded: bool },
+    FinalizationHeader { expanded: bool },
     File { depth: usize, path: &'a PathBuf },
 }
 
@@ -188,6 +194,16 @@ fn visible_batch_items(app: &App) -> Vec<VisibleBatchItem<'_>> {
         });
         if expanded {
             for path in &run.files {
+                items.push(VisibleBatchItem::File { depth: 1, path });
+            }
+        }
+    }
+    // Finalization group (between run groups and root files)
+    if !app.results.batch_result_finalization_files.is_empty() {
+        let expanded = app.results.batch_result_finalization_expanded;
+        items.push(VisibleBatchItem::FinalizationHeader { expanded });
+        if expanded {
+            for path in &app.results.batch_result_finalization_files {
                 items.push(VisibleBatchItem::File { depth: 1, path });
             }
         }

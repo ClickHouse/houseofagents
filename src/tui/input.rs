@@ -7,6 +7,7 @@ use super::results::{
 };
 use super::text_edit::*;
 use super::*;
+use crate::app::PipelineFeedEditField;
 
 /// Upper bound for numeric fields such as iterations, runs, and concurrency.
 const MAX_NUMERIC_FIELD: u32 = 99;
@@ -550,12 +551,20 @@ pub(super) fn handle_pipeline_key(app: &mut App, key: KeyEvent) {
         handle_pipeline_loop_edit_key(app, key);
         return;
     }
+    if app.pipeline.pipeline_show_feed_edit {
+        handle_pipeline_feed_edit_key(app, key);
+        return;
+    }
     if app.pipeline.pipeline_removing_conn {
         handle_pipeline_remove_conn_key(app, key);
         return;
     }
     if app.pipeline.pipeline_loop_connecting_from.is_some() {
         handle_pipeline_loop_connect_key(app, key);
+        return;
+    }
+    if app.pipeline.pipeline_feed_connecting_from.is_some() {
+        handle_pipeline_feed_connect_key(app, key);
         return;
     }
 
@@ -572,30 +581,67 @@ pub(super) fn handle_pipeline_key(app: &mut App, key: KeyEvent) {
                     app.pipeline.pipeline_connecting_from,
                     app.pipeline.pipeline_block_cursor,
                 ) {
+                    let from_is_fin = app.pipeline.pipeline_def.is_finalization_block(from);
+                    let to_is_fin = app.pipeline.pipeline_def.is_finalization_block(to);
+
                     if from == to {
                         app.error_modal = Some("Cannot connect block to itself".into());
-                    } else if app
-                        .pipeline
-                        .pipeline_def
-                        .connections
-                        .iter()
-                        .any(|c| c.from == from && c.to == to)
-                    {
-                        app.error_modal = Some("Connection already exists".into());
-                    } else if pipeline_mod::would_create_cycle(&app.pipeline.pipeline_def, from, to)
-                    {
-                        app.error_modal = Some("Would create a cycle".into());
+                    } else if from_is_fin != to_is_fin {
+                        app.error_modal = Some(
+                            "Cannot connect blocks across phases \u{2014} use data feeds (f) instead."
+                                .into(),
+                        );
+                    } else if from_is_fin && to_is_fin {
+                        // Finalization connection
+                        if app
+                            .pipeline
+                            .pipeline_def
+                            .finalization_connections
+                            .iter()
+                            .any(|c| c.from == from && c.to == to)
+                        {
+                            app.error_modal = Some("Connection already exists".into());
+                        } else if pipeline_mod::would_create_cycle(
+                            &app.pipeline.pipeline_def.finalization_connections,
+                            from,
+                            to,
+                        ) {
+                            app.error_modal = Some("Would create a cycle".into());
+                        } else {
+                            app.pipeline
+                                .pipeline_def
+                                .finalization_connections
+                                .push(pipeline_mod::PipelineConnection { from, to });
+                            app.pipeline.pipeline_connecting_from = None;
+                        }
                     } else {
-                        app.pipeline
+                        // Execution connection
+                        if app
+                            .pipeline
                             .pipeline_def
                             .connections
-                            .push(pipeline_mod::PipelineConnection { from, to });
-                        let warnings =
-                            pipeline_mod::prune_invalid_loops(&mut app.pipeline.pipeline_def);
-                        if !warnings.is_empty() {
-                            app.error_modal = Some(warnings.join("\n"));
+                            .iter()
+                            .any(|c| c.from == from && c.to == to)
+                        {
+                            app.error_modal = Some("Connection already exists".into());
+                        } else if pipeline_mod::would_create_cycle(
+                            &app.pipeline.pipeline_def.connections,
+                            from,
+                            to,
+                        ) {
+                            app.error_modal = Some("Would create a cycle".into());
+                        } else {
+                            app.pipeline
+                                .pipeline_def
+                                .connections
+                                .push(pipeline_mod::PipelineConnection { from, to });
+                            let warnings =
+                                pipeline_mod::prune_invalid_loops(&mut app.pipeline.pipeline_def);
+                            if !warnings.is_empty() {
+                                app.error_modal = Some(warnings.join("\n"));
+                            }
+                            app.pipeline.pipeline_connecting_from = None;
                         }
-                        app.pipeline.pipeline_connecting_from = None;
                     }
                 }
             }
@@ -649,7 +695,7 @@ pub(super) fn handle_pipeline_key(app: &mut App, key: KeyEvent) {
                     PipelineFocus::InitialPrompt | PipelineFocus::SessionName
                 ) =>
         {
-            app.help_popup.open(6);
+            app.help_popup.open(crate::screen::help::PIPELINE_TAB_COUNT);
         }
         // Ctrl+S: save — always open dialog, prefill with current name
         KeyCode::Char('s') if ctrl => {
@@ -803,7 +849,7 @@ pub(super) fn handle_pipeline_builder_key(app: &mut App, key: KeyEvent) {
             }
         }
         KeyCode::Char('a') => {
-            let pos = pipeline_mod::next_free_position(&app.pipeline.pipeline_def);
+            let pos = pipeline_mod::next_free_position(&app.pipeline.pipeline_def.blocks);
             let id = app.pipeline.pipeline_next_id;
             app.pipeline.pipeline_next_id += 1;
             let default_agent = app
@@ -827,37 +873,184 @@ pub(super) fn handle_pipeline_builder_key(app: &mut App, key: KeyEvent) {
             app.pipeline.pipeline_block_cursor = Some(id);
             pipeline_ensure_visible(app);
         }
-        KeyCode::Char('d') => {
+        KeyCode::Char('A') => {
+            let pos =
+                pipeline_mod::next_free_position(&app.pipeline.pipeline_def.finalization_blocks);
+            let id = app.pipeline.pipeline_next_id;
+            app.pipeline.pipeline_next_id += 1;
+            let default_agent = app
+                .config
+                .agents
+                .first()
+                .map(|a| a.name.clone())
+                .unwrap_or_else(|| "Claude".to_string());
+            app.pipeline
+                .pipeline_def
+                .finalization_blocks
+                .push(pipeline_mod::PipelineBlock {
+                    id,
+                    name: format!("Fin#{id}"),
+                    agents: vec![default_agent],
+                    prompt: String::new(),
+                    session_id: None,
+                    position: pos,
+                    replicas: 1,
+                });
+            app.pipeline.pipeline_block_cursor = Some(id);
+            pipeline_ensure_visible(app);
+        }
+        KeyCode::Char('f') => {
             if let Some(sel) = app.pipeline.pipeline_block_cursor {
-                let old_index = app
+                let is_exec = app.pipeline.pipeline_def.blocks.iter().any(|b| b.id == sel);
+                let is_fin = app.pipeline.pipeline_def.is_finalization_block(sel);
+
+                if is_exec {
+                    // Always enter feed-connect mode from exec blocks
+                    // (allows creating multiple feeds from the same block)
+                    app.pipeline.pipeline_feed_connecting_from = Some(sel);
+                } else if is_fin {
+                    let incoming_feeds: Vec<(BlockId, BlockId)> = app
+                        .pipeline
+                        .pipeline_def
+                        .data_feeds
+                        .iter()
+                        .filter(|f| f.to == sel)
+                        .map(|f| (f.from, f.to))
+                        .collect();
+                    if incoming_feeds.is_empty() {
+                        app.error_modal =
+                            Some("Use 'f' on an execution block to create feeds.".into());
+                    } else {
+                        // Cycle to next feed if already editing one for this block
+                        let next = if let Some(current) = app.pipeline.pipeline_feed_edit_target {
+                            if let Some(pos) = incoming_feeds.iter().position(|f| *f == current) {
+                                incoming_feeds[(pos + 1) % incoming_feeds.len()]
+                            } else {
+                                incoming_feeds[0]
+                            }
+                        } else {
+                            incoming_feeds[0]
+                        };
+                        app.pipeline.pipeline_show_feed_edit = true;
+                        app.pipeline.pipeline_feed_edit_target = Some(next);
+                        app.pipeline.pipeline_feed_edit_field = PipelineFeedEditField::Collection;
+                    }
+                } else {
+                    app.error_modal = Some("No applicable feeds for this block".into());
+                }
+            }
+        }
+        KeyCode::Char('F') => {
+            if let Some(sel) = app.pipeline.pipeline_block_cursor {
+                let feeds: Vec<(usize, BlockId, BlockId)> = app
                     .pipeline
                     .pipeline_def
-                    .blocks
+                    .data_feeds
                     .iter()
-                    .position(|b| b.id == sel)
-                    .unwrap_or(0);
-                app.pipeline.pipeline_def.blocks.retain(|b| b.id != sel);
-                app.pipeline
-                    .pipeline_def
-                    .connections
-                    .retain(|c| c.from != sel && c.to != sel);
-                app.pipeline
-                    .pipeline_def
-                    .loop_connections
-                    .retain(|lc| lc.from != sel && lc.to != sel);
-                // Prune loops whose sub-DAG lost an internal node
-                let warnings = pipeline_mod::prune_invalid_loops(&mut app.pipeline.pipeline_def);
-                if !warnings.is_empty() {
-                    app.error_modal = Some(warnings.join("\n"));
-                }
-                app.pipeline.pipeline_def.normalize_session_configs();
-                if app.pipeline.pipeline_def.blocks.is_empty() {
-                    app.pipeline.pipeline_block_cursor = None;
+                    .enumerate()
+                    .filter(|(_, f)| f.from == sel || f.to == sel)
+                    .map(|(i, f)| (i, f.from, f.to))
+                    .collect();
+                if feeds.is_empty() {
+                    app.error_modal = Some("No data feeds on this block".into());
                 } else {
-                    let new_idx = old_index.min(app.pipeline.pipeline_def.blocks.len() - 1);
-                    app.pipeline.pipeline_block_cursor =
-                        Some(app.pipeline.pipeline_def.blocks[new_idx].id);
-                    pipeline_ensure_visible(app);
+                    // If feed edit popup is targeting a specific feed, remove that one;
+                    // otherwise remove the first matching feed.
+                    let idx = if let Some((efrom, eto)) = app.pipeline.pipeline_feed_edit_target {
+                        feeds
+                            .iter()
+                            .find(|(_, from, to)| *from == efrom && *to == eto)
+                            .map(|(i, _, _)| *i)
+                            .unwrap_or(feeds[0].0)
+                    } else {
+                        feeds[0].0
+                    };
+                    app.pipeline.pipeline_def.data_feeds.remove(idx);
+                    // Close feed edit popup if it was targeting the removed feed
+                    if app.pipeline.pipeline_show_feed_edit {
+                        app.pipeline.pipeline_show_feed_edit = false;
+                        app.pipeline.pipeline_feed_edit_target = None;
+                    }
+                }
+            }
+        }
+        KeyCode::Char('d') => {
+            if let Some(sel) = app.pipeline.pipeline_block_cursor {
+                if app.pipeline.pipeline_def.is_finalization_block(sel) {
+                    // Finalization block deletion
+                    let old_index = app
+                        .pipeline
+                        .pipeline_def
+                        .finalization_blocks
+                        .iter()
+                        .position(|b| b.id == sel)
+                        .unwrap_or(0);
+                    app.pipeline
+                        .pipeline_def
+                        .finalization_blocks
+                        .retain(|b| b.id != sel);
+                    app.pipeline
+                        .pipeline_def
+                        .finalization_connections
+                        .retain(|c| c.from != sel && c.to != sel);
+                    app.pipeline.pipeline_def.data_feeds.retain(|f| f.to != sel);
+                    app.pipeline.pipeline_def.normalize_session_configs();
+                    // Find next cursor from all blocks
+                    let all: Vec<BlockId> = app
+                        .pipeline
+                        .pipeline_def
+                        .all_blocks()
+                        .map(|b| b.id)
+                        .collect();
+                    if all.is_empty() {
+                        app.pipeline.pipeline_block_cursor = None;
+                    } else {
+                        let new_idx = old_index.min(all.len() - 1);
+                        app.pipeline.pipeline_block_cursor = Some(all[new_idx]);
+                        pipeline_ensure_visible(app);
+                    }
+                } else {
+                    // Execution block deletion
+                    let old_index = app
+                        .pipeline
+                        .pipeline_def
+                        .blocks
+                        .iter()
+                        .position(|b| b.id == sel)
+                        .unwrap_or(0);
+                    app.pipeline.pipeline_def.blocks.retain(|b| b.id != sel);
+                    app.pipeline
+                        .pipeline_def
+                        .connections
+                        .retain(|c| c.from != sel && c.to != sel);
+                    app.pipeline
+                        .pipeline_def
+                        .loop_connections
+                        .retain(|lc| lc.from != sel && lc.to != sel);
+                    app.pipeline
+                        .pipeline_def
+                        .data_feeds
+                        .retain(|f| f.from != sel);
+                    // Prune loops whose sub-DAG lost an internal node
+                    let warnings =
+                        pipeline_mod::prune_invalid_loops(&mut app.pipeline.pipeline_def);
+                    if !warnings.is_empty() {
+                        app.error_modal = Some(warnings.join("\n"));
+                    }
+                    app.pipeline.pipeline_def.normalize_session_configs();
+                    let all: Vec<BlockId> = app
+                        .pipeline
+                        .pipeline_def
+                        .all_blocks()
+                        .map(|b| b.id)
+                        .collect();
+                    if all.is_empty() {
+                        app.pipeline.pipeline_block_cursor = None;
+                    } else {
+                        let new_idx = old_index.min(all.len() - 1);
+                        app.pipeline.pipeline_block_cursor = Some(all[new_idx]);
+                        pipeline_ensure_visible(app);
+                    }
                 }
             }
         }
@@ -869,6 +1062,13 @@ pub(super) fn handle_pipeline_builder_key(app: &mut App, key: KeyEvent) {
                     .blocks
                     .iter()
                     .find(|b| b.id == sel)
+                    .or_else(|| {
+                        app.pipeline
+                            .pipeline_def
+                            .finalization_blocks
+                            .iter()
+                            .find(|b| b.id == sel)
+                    })
                 {
                     app.pipeline.pipeline_show_edit = true;
                     app.pipeline.pipeline_edit_field = PipelineEditField::Name;
@@ -884,8 +1084,14 @@ pub(super) fn handle_pipeline_builder_key(app: &mut App, key: KeyEvent) {
                     app.pipeline.pipeline_edit_agent_scroll = 0;
                     app.pipeline.pipeline_edit_prompt_buf = block.prompt.clone();
                     app.pipeline.pipeline_edit_prompt_cursor = block.prompt.len();
-                    app.pipeline.pipeline_edit_session_buf =
-                        block.session_id.clone().unwrap_or_default();
+                    // Finalization blocks use hardcoded session keys at runtime,
+                    // so hide session editing for them.
+                    let is_fin = app.pipeline.pipeline_def.is_finalization_block(sel);
+                    app.pipeline.pipeline_edit_session_buf = if is_fin {
+                        String::new()
+                    } else {
+                        block.session_id.clone().unwrap_or_default()
+                    };
                     app.pipeline.pipeline_edit_session_cursor =
                         app.pipeline.pipeline_edit_session_buf.len();
                     app.pipeline.pipeline_edit_replicas_buf = block.replicas.to_string();
@@ -913,7 +1119,14 @@ pub(super) fn handle_pipeline_builder_key(app: &mut App, key: KeyEvent) {
                     .iter()
                     .filter(|lc| lc.from == sel || lc.to == sel)
                     .count();
-                if regular_count + loop_count == 0 {
+                let fin_count = app
+                    .pipeline
+                    .pipeline_def
+                    .finalization_connections
+                    .iter()
+                    .filter(|c| c.from == sel || c.to == sel)
+                    .count();
+                if regular_count + loop_count + fin_count == 0 {
                     app.error_modal = Some("No connections on this block".into());
                 } else {
                     app.pipeline.pipeline_removing_conn = true;
@@ -923,7 +1136,9 @@ pub(super) fn handle_pipeline_builder_key(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Char('o') => {
             if let Some(sel) = app.pipeline.pipeline_block_cursor {
-                if let Some(lc) = app
+                if app.pipeline.pipeline_def.is_finalization_block(sel) {
+                    app.error_modal = Some("Loops are only available for execution blocks".into());
+                } else if let Some(lc) = app
                     .pipeline
                     .pipeline_def
                     .loop_connections
@@ -1021,49 +1236,84 @@ pub(super) fn pipeline_builder_move_mode(key: &KeyEvent) -> bool {
 }
 
 pub(super) fn pipeline_move_selected_block(app: &mut App, dx: i16, dy: i16) {
-    if app.pipeline.pipeline_def.blocks.is_empty() {
+    let has_any = !app.pipeline.pipeline_def.blocks.is_empty()
+        || !app.pipeline.pipeline_def.finalization_blocks.is_empty();
+    if !has_any {
         app.pipeline.pipeline_block_cursor = None;
         return;
     }
 
     let Some(sel_id) = app.pipeline.pipeline_block_cursor else {
-        app.pipeline.pipeline_block_cursor = app.pipeline.pipeline_def.blocks.first().map(|b| b.id);
+        app.pipeline.pipeline_block_cursor =
+            app.pipeline.pipeline_def.all_blocks().next().map(|b| b.id);
         return;
     };
-    let Some(sel_idx) = app
+
+    // Search execution blocks first
+    if let Some(sel_idx) = app
         .pipeline
         .pipeline_def
         .blocks
         .iter()
         .position(|b| b.id == sel_id)
-    else {
-        app.pipeline.pipeline_block_cursor = app.pipeline.pipeline_def.blocks.first().map(|b| b.id);
-        return;
-    };
-
-    let (sx, sy) = app.pipeline.pipeline_def.blocks[sel_idx].position;
-    let nx_i = sx as i32 + dx as i32;
-    let ny_i = sy as i32 + dy as i32;
-    if nx_i < 0 || ny_i < 0 || nx_i > u16::MAX as i32 || ny_i > u16::MAX as i32 {
+    {
+        let (sx, sy) = app.pipeline.pipeline_def.blocks[sel_idx].position;
+        let nx_i = sx as i32 + dx as i32;
+        let ny_i = sy as i32 + dy as i32;
+        if nx_i < 0 || ny_i < 0 || nx_i > u16::MAX as i32 || ny_i > u16::MAX as i32 {
+            return;
+        }
+        let next_pos = (nx_i as u16, ny_i as u16);
+        if next_pos == (sx, sy) {
+            return;
+        }
+        if let Some(other_idx) = app
+            .pipeline
+            .pipeline_def
+            .blocks
+            .iter()
+            .position(|b| b.id != sel_id && b.position == next_pos)
+        {
+            app.pipeline.pipeline_def.blocks[other_idx].position = (sx, sy);
+        }
+        app.pipeline.pipeline_def.blocks[sel_idx].position = next_pos;
         return;
     }
 
-    let next_pos = (nx_i as u16, ny_i as u16);
-    if next_pos == (sx, sy) {
-        return;
-    }
-
-    if let Some(other_idx) = app
+    // Search finalization blocks
+    if let Some(sel_idx) = app
         .pipeline
         .pipeline_def
-        .blocks
+        .finalization_blocks
         .iter()
-        .position(|b| b.id != sel_id && b.position == next_pos)
+        .position(|b| b.id == sel_id)
     {
-        app.pipeline.pipeline_def.blocks[other_idx].position = (sx, sy);
+        let (sx, sy) = app.pipeline.pipeline_def.finalization_blocks[sel_idx].position;
+        let nx_i = sx as i32 + dx as i32;
+        let ny_i = sy as i32 + dy as i32;
+        if nx_i < 0 || ny_i < 0 || nx_i > u16::MAX as i32 || ny_i > u16::MAX as i32 {
+            return;
+        }
+        let next_pos = (nx_i as u16, ny_i as u16);
+        if next_pos == (sx, sy) {
+            return;
+        }
+        if let Some(other_idx) = app
+            .pipeline
+            .pipeline_def
+            .finalization_blocks
+            .iter()
+            .position(|b| b.id != sel_id && b.position == next_pos)
+        {
+            app.pipeline.pipeline_def.finalization_blocks[other_idx].position = (sx, sy);
+        }
+        app.pipeline.pipeline_def.finalization_blocks[sel_idx].position = next_pos;
+        return;
     }
 
-    app.pipeline.pipeline_def.blocks[sel_idx].position = next_pos;
+    // Fallback: select first available block
+    app.pipeline.pipeline_block_cursor =
+        app.pipeline.pipeline_def.all_blocks().next().map(|b| b.id);
 }
 
 fn handle_pipeline_session_config_key(app: &mut App, key: KeyEvent) {
@@ -1113,28 +1363,43 @@ fn handle_pipeline_session_config_key(app: &mut App, key: KeyEvent) {
 }
 
 pub(super) fn pipeline_spatial_nav(app: &mut App, axis: NavAxis, negative: bool) {
+    use crate::screen::pipeline::{separator_y_offset, CELL_H};
+
     let Some(sel_id) = app.pipeline.pipeline_block_cursor else {
         // Select first block if none selected
-        app.pipeline.pipeline_block_cursor = app.pipeline.pipeline_def.blocks.first().map(|b| b.id);
+        app.pipeline.pipeline_block_cursor =
+            app.pipeline.pipeline_def.all_blocks().next().map(|b| b.id);
         return;
     };
-    let Some(sel_block) = app
+
+    // Build (id, screen_x, screen_y) for all blocks
+    let sep_y = separator_y_offset(&app.pipeline.pipeline_def.blocks);
+    let fin_y_off = sep_y as i32 + CELL_H as i32 / 2;
+
+    let all_positions: Vec<(BlockId, i32, i32)> = app
         .pipeline
         .pipeline_def
         .blocks
         .iter()
-        .find(|b| b.id == sel_id)
-    else {
+        .map(|b| (b.id, b.position.0 as i32, b.position.1 as i32))
+        .chain(
+            app.pipeline
+                .pipeline_def
+                .finalization_blocks
+                .iter()
+                .map(|b| (b.id, b.position.0 as i32, b.position.1 as i32 + fin_y_off)),
+        )
+        .collect();
+
+    let Some(&(_, sx, sy)) = all_positions.iter().find(|(id, _, _)| *id == sel_id) else {
         return;
     };
-    let (sx, sy) = (sel_block.position.0 as i32, sel_block.position.1 as i32);
 
     let mut best: Option<(BlockId, i32)> = None;
-    for block in &app.pipeline.pipeline_def.blocks {
-        if block.id == sel_id {
+    for &(bid, bx, by) in &all_positions {
+        if bid == sel_id {
             continue;
         }
-        let (bx, by) = (block.position.0 as i32, block.position.1 as i32);
         let (dx, dy) = (bx - sx, by - sy);
 
         let in_direction = match (&axis, negative) {
@@ -1148,7 +1413,7 @@ pub(super) fn pipeline_spatial_nav(app: &mut App, axis: NavAxis, negative: bool)
         }
         let dist = dx * dx + dy * dy;
         if best.is_none_or(|(_, bd)| dist < bd) {
-            best = Some((block.id, dist));
+            best = Some((bid, dist));
         }
     }
     if let Some((id, _)) = best {
@@ -1157,25 +1422,49 @@ pub(super) fn pipeline_spatial_nav(app: &mut App, axis: NavAxis, negative: bool)
 }
 
 pub(super) fn pipeline_ensure_visible(app: &mut App) {
-    use crate::screen::pipeline::{BLOCK_H, BLOCK_W, CELL_H, CELL_W};
+    use crate::screen::pipeline::{separator_y_offset, BLOCK_H, BLOCK_W, CELL_H, CELL_W};
 
     let Some(sel_id) = app.pipeline.pipeline_block_cursor else {
         return;
     };
-    let Some(block) = app
+
+    // Search execution blocks
+    let mut found_pos: Option<(i16, i16)> = None;
+    if let Some(block) = app
         .pipeline
         .pipeline_def
         .blocks
         .iter()
         .find(|b| b.id == sel_id)
-    else {
+    {
+        found_pos = Some((
+            block.position.0 as i16 * CELL_W as i16,
+            block.position.1 as i16 * CELL_H as i16,
+        ));
+    }
+    // Search finalization blocks (apply separator offset)
+    if found_pos.is_none() {
+        if let Some(block) = app
+            .pipeline
+            .pipeline_def
+            .finalization_blocks
+            .iter()
+            .find(|b| b.id == sel_id)
+        {
+            let sep_y = separator_y_offset(&app.pipeline.pipeline_def.blocks);
+            let fin_y_off = sep_y + CELL_H as i16 / 2;
+            found_pos = Some((
+                block.position.0 as i16 * CELL_W as i16,
+                block.position.1 as i16 * CELL_H as i16 + fin_y_off,
+            ));
+        }
+    }
+
+    let Some((sx, sy)) = found_pos else {
         return;
     };
 
-    let sx = block.position.0 as i16 * CELL_W as i16;
-    let sy = block.position.1 as i16 * CELL_H as i16;
-
-    // Canvas inner ≈ terminal size minus chrome (title 3 + prompt 6 + help 2 + borders 2)
+    // Canvas inner = terminal size minus chrome (title 3 + prompt 6 + help 2 + borders 2)
     let (term_w, term_h) = crossterm::terminal::size().unwrap_or((80, 24));
     let visible_w = (term_w.saturating_sub(4)) as i16; // border + padding
     let visible_h = (term_h.saturating_sub(13)) as i16; // title+prompt+help+borders
@@ -1203,9 +1492,16 @@ pub(super) fn handle_pipeline_edit_key(app: &mut App, key: KeyEvent) {
             app.pipeline.pipeline_show_edit = false;
         }
         KeyCode::Tab => {
+            let is_fin_block = app
+                .pipeline
+                .pipeline_block_cursor
+                .map(|sel| app.pipeline.pipeline_def.is_finalization_block(sel))
+                .unwrap_or(false);
             app.pipeline.pipeline_edit_field = match app.pipeline.pipeline_edit_field {
                 PipelineEditField::Name => PipelineEditField::Agent,
                 PipelineEditField::Agent => PipelineEditField::Prompt,
+                // Skip SessionId for finalization blocks (hardcoded at runtime)
+                PipelineEditField::Prompt if is_fin_block => PipelineEditField::Replicas,
                 PipelineEditField::Prompt => PipelineEditField::SessionId,
                 PipelineEditField::SessionId => PipelineEditField::Replicas,
                 PipelineEditField::Replicas => PipelineEditField::Name,
@@ -1219,12 +1515,21 @@ pub(super) fn handle_pipeline_edit_key(app: &mut App, key: KeyEvent) {
                 | PipelineEditField::Replicas => {
                     // Confirm and save
                     if let Some(sel) = app.pipeline.pipeline_block_cursor {
+                        // Check before mutable borrow of the block
+                        let editing_fin = app.pipeline.pipeline_def.is_finalization_block(sel);
                         if let Some(block) = app
                             .pipeline
                             .pipeline_def
                             .blocks
                             .iter_mut()
                             .find(|b| b.id == sel)
+                            .or_else(|| {
+                                app.pipeline
+                                    .pipeline_def
+                                    .finalization_blocks
+                                    .iter_mut()
+                                    .find(|b| b.id == sel)
+                            })
                         {
                             block.name = app.pipeline.pipeline_edit_name_buf.clone();
                             block.agents = app
@@ -1244,12 +1549,16 @@ pub(super) fn handle_pipeline_edit_key(app: &mut App, key: KeyEvent) {
                                     .unwrap_or_else(|| "Claude".into())];
                             }
                             block.prompt = app.pipeline.pipeline_edit_prompt_buf.clone();
-                            block.session_id = if app.pipeline.pipeline_edit_session_buf.is_empty()
-                            {
-                                None
-                            } else {
-                                Some(app.pipeline.pipeline_edit_session_buf.clone())
-                            };
+                            // Finalization blocks use hardcoded session keys at
+                            // runtime — don't save user-edited session_id.
+                            if !editing_fin {
+                                block.session_id =
+                                    if app.pipeline.pipeline_edit_session_buf.is_empty() {
+                                        None
+                                    } else {
+                                        Some(app.pipeline.pipeline_edit_session_buf.clone())
+                                    };
+                            }
                             let agent_count = block.agents.len() as u32;
                             let max_replicas = (32 / agent_count.max(1)).max(1);
                             block.replicas = app
@@ -1447,12 +1756,12 @@ pub(super) fn handle_pipeline_dialog_key(app: &mut App, key: KeyEvent) {
                     let path = pipeline_mod::pipelines_dir().join(filename);
                     match pipeline_mod::load_pipeline(&path) {
                         Ok(def) => {
-                            let max_id = def.blocks.iter().map(|b| b.id).max().unwrap_or(0);
+                            let max_id = def.all_blocks().map(|b| b.id).max().unwrap_or(0);
                             app.pipeline.pipeline_next_id = max_id + 1;
                             app.pipeline.pipeline_def = def;
                             app.pipeline.pipeline_save_path = Some(path);
                             app.pipeline.pipeline_block_cursor =
-                                app.pipeline.pipeline_def.blocks.first().map(|b| b.id);
+                                app.pipeline.pipeline_def.all_blocks().next().map(|b| b.id);
                             app.pipeline.pipeline_file_dialog = None;
                         }
                         Err(e) => {
@@ -1473,6 +1782,7 @@ pub(super) fn handle_pipeline_remove_conn_key(app: &mut App, key: KeyEvent) {
     enum ConnRef {
         Regular(usize),
         Loop(usize),
+        Finalization(usize),
     }
     let mut refs: Vec<ConnRef> = Vec::new();
     for (i, c) in app.pipeline.pipeline_def.connections.iter().enumerate() {
@@ -1489,6 +1799,17 @@ pub(super) fn handle_pipeline_remove_conn_key(app: &mut App, key: KeyEvent) {
     {
         if lc.from == sel || lc.to == sel {
             refs.push(ConnRef::Loop(i));
+        }
+    }
+    for (i, c) in app
+        .pipeline
+        .pipeline_def
+        .finalization_connections
+        .iter()
+        .enumerate()
+    {
+        if c.from == sel || c.to == sel {
+            refs.push(ConnRef::Finalization(i));
         }
     }
 
@@ -1517,6 +1838,12 @@ pub(super) fn handle_pipeline_remove_conn_key(app: &mut App, key: KeyEvent) {
                     }
                     ConnRef::Loop(idx) => {
                         app.pipeline.pipeline_def.loop_connections.remove(*idx);
+                    }
+                    ConnRef::Finalization(idx) => {
+                        app.pipeline
+                            .pipeline_def
+                            .finalization_connections
+                            .remove(*idx);
                     }
                 }
             }
@@ -1594,6 +1921,115 @@ fn handle_pipeline_loop_connect_key(app: &mut App, key: KeyEvent) {
         KeyCode::Left | KeyCode::Char('h') => pipeline_spatial_nav(app, NavAxis::Horizontal, true),
         KeyCode::Right | KeyCode::Char('l') => {
             pipeline_spatial_nav(app, NavAxis::Horizontal, false)
+        }
+        _ => {}
+    }
+}
+
+fn handle_pipeline_feed_connect_key(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => {
+            app.pipeline.pipeline_feed_connecting_from = None;
+        }
+        KeyCode::Enter => {
+            if let (Some(from), Some(to)) = (
+                app.pipeline.pipeline_feed_connecting_from,
+                app.pipeline.pipeline_block_cursor,
+            ) {
+                if !app.pipeline.pipeline_def.is_finalization_block(to) {
+                    app.error_modal = Some("Feed target must be a finalization block".into());
+                } else if app
+                    .pipeline
+                    .pipeline_def
+                    .data_feeds
+                    .iter()
+                    .any(|f| f.from == from && f.to == to)
+                {
+                    app.error_modal = Some("Data feed already exists".into());
+                } else {
+                    app.pipeline
+                        .pipeline_def
+                        .data_feeds
+                        .push(pipeline_mod::DataFeed {
+                            from,
+                            to,
+                            collection: pipeline_mod::FeedCollection::LastIteration,
+                            granularity: pipeline_mod::FeedGranularity::PerRun,
+                        });
+                    app.pipeline.pipeline_feed_connecting_from = None;
+                    // Open feed edit popup immediately
+                    app.pipeline.pipeline_show_feed_edit = true;
+                    app.pipeline.pipeline_feed_edit_target = Some((from, to));
+                    app.pipeline.pipeline_feed_edit_field = PipelineFeedEditField::Collection;
+                }
+            }
+        }
+        KeyCode::Up | KeyCode::Char('k') => pipeline_spatial_nav(app, NavAxis::Vertical, true),
+        KeyCode::Down | KeyCode::Char('j') => pipeline_spatial_nav(app, NavAxis::Vertical, false),
+        KeyCode::Left | KeyCode::Char('h') => pipeline_spatial_nav(app, NavAxis::Horizontal, true),
+        KeyCode::Right | KeyCode::Char('l') => {
+            pipeline_spatial_nav(app, NavAxis::Horizontal, false)
+        }
+        _ => {}
+    }
+}
+
+fn handle_pipeline_feed_edit_key(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => {
+            app.pipeline.pipeline_show_feed_edit = false;
+        }
+        KeyCode::Tab => {
+            app.pipeline.pipeline_feed_edit_field = match app.pipeline.pipeline_feed_edit_field {
+                PipelineFeedEditField::Collection => PipelineFeedEditField::Granularity,
+                PipelineFeedEditField::Granularity => PipelineFeedEditField::Collection,
+            };
+        }
+        KeyCode::Char(' ') | KeyCode::Enter => {
+            if let Some((from_id, to_id)) = app.pipeline.pipeline_feed_edit_target {
+                if let Some(feed) = app
+                    .pipeline
+                    .pipeline_def
+                    .data_feeds
+                    .iter_mut()
+                    .find(|f| f.from == from_id && f.to == to_id)
+                {
+                    match app.pipeline.pipeline_feed_edit_field {
+                        PipelineFeedEditField::Collection => {
+                            feed.collection = match feed.collection {
+                                pipeline_mod::FeedCollection::LastIteration => {
+                                    pipeline_mod::FeedCollection::AllIterations
+                                }
+                                pipeline_mod::FeedCollection::AllIterations => {
+                                    pipeline_mod::FeedCollection::LastIteration
+                                }
+                            };
+                        }
+                        PipelineFeedEditField::Granularity => {
+                            feed.granularity = match feed.granularity {
+                                pipeline_mod::FeedGranularity::PerRun => {
+                                    pipeline_mod::FeedGranularity::AllRuns
+                                }
+                                pipeline_mod::FeedGranularity::AllRuns => {
+                                    pipeline_mod::FeedGranularity::PerRun
+                                }
+                            };
+                        }
+                    }
+                }
+            }
+        }
+        KeyCode::Up | KeyCode::Left | KeyCode::Char('k') | KeyCode::Char('h') => {
+            app.pipeline.pipeline_feed_edit_field = match app.pipeline.pipeline_feed_edit_field {
+                PipelineFeedEditField::Collection => PipelineFeedEditField::Granularity,
+                PipelineFeedEditField::Granularity => PipelineFeedEditField::Collection,
+            };
+        }
+        KeyCode::Down | KeyCode::Right | KeyCode::Char('j') | KeyCode::Char('l') => {
+            app.pipeline.pipeline_feed_edit_field = match app.pipeline.pipeline_feed_edit_field {
+                PipelineFeedEditField::Collection => PipelineFeedEditField::Granularity,
+                PipelineFeedEditField::Granularity => PipelineFeedEditField::Collection,
+            };
         }
         _ => {}
     }
@@ -1969,15 +2405,21 @@ pub(super) fn handle_results_key(app: &mut App, key: KeyEvent) {
             update_preview(app);
         }
         KeyCode::Enter | KeyCode::Char('l') if has_batch_result_tree(app) => {
-            if let Some(BatchResultEntry::RunHeader(run_id)) =
-                batch_result_entry_at(app, app.results.result_cursor)
-            {
-                if !app.results.batch_result_expanded.insert(run_id) {
-                    app.results.batch_result_expanded.remove(&run_id);
+            match batch_result_entry_at(app, app.results.result_cursor) {
+                Some(BatchResultEntry::RunHeader(run_id)) => {
+                    if !app.results.batch_result_expanded.insert(run_id) {
+                        app.results.batch_result_expanded.remove(&run_id);
+                    }
+                    update_preview(app);
                 }
-                update_preview(app);
-            } else {
-                app.reset_to_home();
+                Some(BatchResultEntry::FinalizationHeader) => {
+                    app.results.batch_result_finalization_expanded =
+                        !app.results.batch_result_finalization_expanded;
+                    update_preview(app);
+                }
+                _ => {
+                    app.reset_to_home();
+                }
             }
         }
         KeyCode::Esc => app.reset_to_home(),
@@ -2570,7 +3012,7 @@ pub(super) fn commit_agent_rename(app: &mut App) {
     let lower = new_name.to_lowercase();
     for (i, a) in app.config.agents.iter().enumerate() {
         if i != idx && a.name.to_lowercase() == lower {
-            app.error_modal = Some(format!("Agent name '{}' already exists", new_name));
+            app.error_modal = Some(format!("Agent name '{new_name}' already exists"));
             return;
         }
     }

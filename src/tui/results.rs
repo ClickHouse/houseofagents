@@ -33,6 +33,9 @@ pub(super) fn handle_results_load_result(
 
     match result {
         Ok(payload) => {
+            app.results.batch_result_finalization_expanded =
+                !payload.batch_result_finalization_files.is_empty();
+            app.results.batch_result_finalization_files = payload.batch_result_finalization_files;
             app.results.result_files = payload.result_files;
             app.results.batch_result_runs = payload.batch_result_runs;
             app.results.batch_result_root_files = payload.batch_result_root_files;
@@ -130,11 +133,28 @@ fn load_results_sync(
         root_files.sort();
         run_groups.sort_by_key(|group| group.run_id);
         let batch_result_expanded = run_groups.iter().map(|group| group.run_id).collect();
+
+        // Collect finalization files from batch root's finalization/ directory
+        let mut finalization_files = Vec::new();
+        let fin_dir = run_dir.join("finalization");
+        if fin_dir.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&fin_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file() {
+                        finalization_files.push(path);
+                    }
+                }
+            }
+            finalization_files.sort();
+        }
+
         return Ok(crate::app::ResultsLoadPayload {
             result_files: Vec::new(),
             batch_result_runs: run_groups,
             batch_result_root_files: root_files,
             batch_result_expanded,
+            batch_result_finalization_files: finalization_files,
         });
     }
 
@@ -146,6 +166,20 @@ fn load_results_sync(
             path.is_file().then_some(path)
         })
         .collect::<Vec<_>>();
+
+    // Collect finalization files if the finalization/ subdirectory exists
+    let fin_dir = run_dir.join("finalization");
+    if fin_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&fin_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    files.push(path);
+                }
+            }
+        }
+    }
+
     files.sort();
 
     Ok(crate::app::ResultsLoadPayload {
@@ -153,6 +187,7 @@ fn load_results_sync(
         batch_result_runs: Vec::new(),
         batch_result_root_files: Vec::new(),
         batch_result_expanded: HashSet::new(),
+        batch_result_finalization_files: Vec::new(),
     })
 }
 
@@ -168,11 +203,14 @@ fn selected_preview_path(app: &App) -> Option<&std::path::PathBuf> {
 }
 
 pub(super) fn has_batch_result_tree(app: &App) -> bool {
-    !app.results.batch_result_runs.is_empty() || !app.results.batch_result_root_files.is_empty()
+    !app.results.batch_result_runs.is_empty()
+        || !app.results.batch_result_root_files.is_empty()
+        || !app.results.batch_result_finalization_files.is_empty()
 }
 
 pub(super) enum BatchResultEntry<'a> {
     RunHeader(u32),
+    FinalizationHeader,
     File(&'a std::path::PathBuf),
 }
 
@@ -182,6 +220,13 @@ pub(super) fn batch_result_visible_len(app: &App) -> usize {
         len += 1;
         if app.results.batch_result_expanded.contains(&group.run_id) {
             len += group.files.len();
+        }
+    }
+    // Finalization group (header + files) when finalization files exist
+    if !app.results.batch_result_finalization_files.is_empty() {
+        len += 1; // FinalizationHeader
+        if app.results.batch_result_finalization_expanded {
+            len += app.results.batch_result_finalization_files.len();
         }
     }
     len
@@ -199,6 +244,23 @@ pub(super) fn batch_result_entry_at(app: &App, mut index: usize) -> Option<Batch
                 return Some(BatchResultEntry::File(&group.files[index]));
             }
             index = index.saturating_sub(group.files.len());
+        }
+    }
+
+    // Finalization group (between run groups and root files)
+    if !app.results.batch_result_finalization_files.is_empty() {
+        if index == 0 {
+            return Some(BatchResultEntry::FinalizationHeader);
+        }
+        index -= 1;
+
+        if app.results.batch_result_finalization_expanded {
+            if index < app.results.batch_result_finalization_files.len() {
+                return Some(BatchResultEntry::File(
+                    &app.results.batch_result_finalization_files[index],
+                ));
+            }
+            index = index.saturating_sub(app.results.batch_result_finalization_files.len());
         }
     }
 

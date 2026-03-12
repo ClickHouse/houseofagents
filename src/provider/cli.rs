@@ -111,6 +111,10 @@ impl CliProvider {
             args.push("-C".to_string());
             args.push(cwd.display().to_string());
         }
+        for dir in &self.add_dirs {
+            args.push("--add-dir".to_string());
+            args.push(dir.clone());
+        }
         if self.session_id.is_some() {
             args.push("resume".to_string());
         }
@@ -462,6 +466,34 @@ impl CliProvider {
             ProviderKind::Gemini => "Gemini",
         }
     }
+
+    /// After a timeout the server-side session almost certainly exists (the
+    /// process ran for the full timeout duration).  Mark it as started so
+    /// the next call uses `--resume`, continuing the conversation.
+    fn mark_session_after_timeout(&mut self) {
+        self.history.pop();
+        if self.kind == ProviderKind::Anthropic {
+            self.session_started = true;
+        }
+    }
+
+    /// Resets provider state after a non-timeout send failure where we can't
+    /// be sure the session was created server-side.  Generates a fresh
+    /// session ID so the next call starts clean.
+    fn reset_after_send_error(&mut self) {
+        self.history.pop();
+        match self.kind {
+            ProviderKind::Anthropic => {
+                self.session_id = Some(Uuid::new_v4().to_string());
+                self.session_started = false;
+            }
+            ProviderKind::OpenAI => {
+                self.session_id = None;
+                self.session_started = false;
+            }
+            ProviderKind::Gemini => {}
+        }
+    }
 }
 
 impl Provider for CliProvider {
@@ -525,110 +557,140 @@ impl Provider for CliProvider {
             }
 
             let bin = self.bin_name();
-            let mut codex_output_path: Option<PathBuf> = None;
-            let mut args: Vec<String> = match self.kind {
-                ProviderKind::Anthropic => {
-                    let mut args = Vec::new();
-                    if self.cli_print_mode {
-                        args.push("-p".to_string());
-                    }
-                    args.push("--output-format".to_string());
-                    args.push("text".to_string());
-                    for dir in &self.add_dirs {
-                        args.push("--add-dir".to_string());
-                        args.push(dir.clone());
-                    }
-                    if let Some(ref session_id) = self.session_id {
-                        if self.session_started {
-                            args.push("--resume".to_string());
-                        } else {
-                            args.push("--session-id".to_string());
+            let mut session_retried = false;
+            let content = 'cli: loop {
+                let mut codex_output_path: Option<PathBuf> = None;
+                let mut args: Vec<String> = match self.kind {
+                    ProviderKind::Anthropic => {
+                        let mut args = Vec::new();
+                        if self.cli_print_mode {
+                            args.push("-p".to_string());
                         }
-                        args.push(session_id.clone());
+                        args.push("--output-format".to_string());
+                        args.push("text".to_string());
+                        for dir in &self.add_dirs {
+                            args.push("--add-dir".to_string());
+                            args.push(dir.clone());
+                        }
+                        if let Some(ref session_id) = self.session_id {
+                            if self.session_started {
+                                args.push("--resume".to_string());
+                            } else {
+                                args.push("--session-id".to_string());
+                            }
+                            args.push(session_id.clone());
+                        }
+                        if let Some(effort) = self.anthropic_effort() {
+                            args.push("--effort".to_string());
+                            args.push(effort.to_string());
+                        }
+                        args
                     }
-                    if let Some(effort) = self.anthropic_effort() {
-                        args.push("--effort".to_string());
-                        args.push(effort.to_string());
+                    ProviderKind::OpenAI => {
+                        let (args, out_path) = match self.build_codex_args() {
+                            Ok(v) => v,
+                            Err(e) => {
+                                self.history.pop();
+                                return Err(e);
+                            }
+                        };
+                        codex_output_path = Some(out_path);
+                        args
                     }
-                    args
+                    ProviderKind::Gemini => vec![
+                        "--prompt".to_string(),
+                        "".to_string(),
+                        "--output-format".to_string(),
+                        "text".to_string(),
+                    ],
+                };
+
+                if self.kind != ProviderKind::OpenAI && !self.model.is_empty() {
+                    args.push("--model".to_string());
+                    args.push(self.model.clone());
                 }
-                ProviderKind::OpenAI => {
-                    let (args, out_path) = self.build_codex_args()?;
-                    codex_output_path = Some(out_path);
-                    args
+                if self.kind != ProviderKind::OpenAI {
+                    match self.parse_extra_cli_args() {
+                        Ok(extra) => args.extend(extra),
+                        Err(e) => {
+                            self.history.pop();
+                            return Err(e);
+                        }
+                    }
                 }
-                ProviderKind::Gemini => vec![
-                    "--prompt".to_string(),
-                    "".to_string(),
-                    "--output-format".to_string(),
-                    "text".to_string(),
-                ],
-            };
+                self.push_command_debug(&mut debug_logs, bin, &args);
+                self.emit_live_log(format!("start {} (timeout {}s)", bin, self.timeout_seconds));
 
-            if self.kind != ProviderKind::OpenAI && !self.model.is_empty() {
-                args.push("--model".to_string());
-                args.push(self.model.clone());
-            }
-            if self.kind != ProviderKind::OpenAI {
-                args.extend(self.parse_extra_cli_args()?);
-            }
-            self.push_command_debug(&mut debug_logs, bin, &args);
-            self.emit_live_log(format!("start {} (timeout {}s)", bin, self.timeout_seconds));
+                let mut child = match Command::new(bin)
+                    .args(&args)
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .kill_on_drop(true)
+                    .spawn()
+                {
+                    Ok(c) => c,
+                    Err(e) => {
+                        self.history.pop();
+                        return Err(Self::provider_error_with_debug(
+                            bin,
+                            format!("Failed to spawn: {e}"),
+                            &debug_logs,
+                        ));
+                    }
+                };
 
-            let mut child = Command::new(bin)
-                .args(&args)
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .kill_on_drop(true)
-                .spawn()
-                .map_err(|e| {
-                    Self::provider_error_with_debug(
-                        bin,
-                        format!("Failed to spawn: {e}"),
-                        &debug_logs,
-                    )
-                })?;
+                let stdout = match child.stdout.take() {
+                    Some(s) => s,
+                    None => {
+                        self.history.pop();
+                        return Err(Self::provider_error_with_debug(
+                            bin,
+                            "Failed to capture stdout from CLI process".into(),
+                            &debug_logs,
+                        ));
+                    }
+                };
+                let stderr = match child.stderr.take() {
+                    Some(s) => s,
+                    None => {
+                        self.history.pop();
+                        return Err(Self::provider_error_with_debug(
+                            bin,
+                            "Failed to capture stderr from CLI process".into(),
+                            &debug_logs,
+                        ));
+                    }
+                };
 
-            let stdout = child.stdout.take().ok_or_else(|| {
-                Self::provider_error_with_debug(
-                    bin,
-                    "Failed to capture stdout from CLI process".into(),
-                    &debug_logs,
+                let mut stdout_task = tokio::spawn(async move {
+                    CliProvider::read_bounded_bytes(stdout, CLI_STDOUT_MAX_BYTES).await
+                });
+                let live_log_tx = self.live_log_tx.clone();
+                let mut stderr_task = tokio::spawn(async move {
+                    CliProvider::read_bounded_stderr(stderr, CLI_STDERR_MAX_BYTES, live_log_tx)
+                        .await
+                });
+
+                // Write prompt via stdin
+                if let Some(mut stdin) = child.stdin.take() {
+                    debug_logs.push(format!("stdin chars: {}", prompt.chars().count()));
+                    if let Err(e) = stdin.write_all(prompt.as_bytes()).await {
+                        self.history.pop();
+                        return Err(Self::provider_error_with_debug(
+                            bin,
+                            format!("Failed to write stdin: {e}"),
+                            &debug_logs,
+                        ));
+                    }
+                    // Drop stdin to close it, signaling EOF
+                }
+
+                let status = match tokio::time::timeout(
+                    Duration::from_secs(self.timeout_seconds),
+                    child.wait(),
                 )
-            })?;
-            let stderr = child.stderr.take().ok_or_else(|| {
-                Self::provider_error_with_debug(
-                    bin,
-                    "Failed to capture stderr from CLI process".into(),
-                    &debug_logs,
-                )
-            })?;
-
-            let mut stdout_task = tokio::spawn(async move {
-                CliProvider::read_bounded_bytes(stdout, CLI_STDOUT_MAX_BYTES).await
-            });
-            let live_log_tx = self.live_log_tx.clone();
-            let mut stderr_task = tokio::spawn(async move {
-                CliProvider::read_bounded_stderr(stderr, CLI_STDERR_MAX_BYTES, live_log_tx).await
-            });
-
-            // Write prompt via stdin
-            if let Some(mut stdin) = child.stdin.take() {
-                debug_logs.push(format!("stdin chars: {}", prompt.chars().count()));
-                stdin.write_all(prompt.as_bytes()).await.map_err(|e| {
-                    Self::provider_error_with_debug(
-                        bin,
-                        format!("Failed to write stdin: {e}"),
-                        &debug_logs,
-                    )
-                })?;
-                // Drop stdin to close it, signaling EOF
-            }
-
-            let status =
-                match tokio::time::timeout(Duration::from_secs(self.timeout_seconds), child.wait())
-                    .await
+                .await
                 {
                     Ok(Ok(status)) => status,
                     Ok(Err(e)) => {
@@ -642,6 +704,7 @@ impl Provider for CliProvider {
                         self.emit_live_log("wait failed".into());
                         stdout_task.abort();
                         stderr_task.abort();
+                        self.reset_after_send_error();
                         return Err(Self::provider_error_with_debug(
                             bin,
                             e.to_string(),
@@ -661,6 +724,7 @@ impl Provider for CliProvider {
                         self.emit_live_log(format!("timeout after {}s", self.timeout_seconds));
                         stdout_task.abort();
                         stderr_task.abort();
+                        self.mark_session_after_timeout();
                         return Err(Self::provider_error_with_debug(
                             bin,
                             format!("Timed out after {} seconds", self.timeout_seconds),
@@ -669,109 +733,154 @@ impl Provider for CliProvider {
                     }
                 };
 
-            let stdout_result =
-                Self::await_reader_task(&mut stdout_task, &stderr_task, bin, "stdout", &debug_logs)
-                    .await?;
-            let stderr_result =
-                Self::await_reader_task(&mut stderr_task, &stdout_task, bin, "stderr", &debug_logs)
-                    .await?;
+                let stdout_result = match Self::await_reader_task(
+                    &mut stdout_task,
+                    &stderr_task,
+                    bin,
+                    "stdout",
+                    &debug_logs,
+                )
+                .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        self.reset_after_send_error();
+                        return Err(e);
+                    }
+                };
+                let stderr_result = match Self::await_reader_task(
+                    &mut stderr_task,
+                    &stdout_task,
+                    bin,
+                    "stderr",
+                    &debug_logs,
+                )
+                .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        self.reset_after_send_error();
+                        return Err(e);
+                    }
+                };
 
-            debug_logs.push(format!(
-                "exit: {} (elapsed {} ms, stdout {} bytes, stderr {} bytes)",
-                status,
-                started_at.elapsed().as_millis(),
-                stdout_result.bytes.len(),
-                stderr_result.text.len(),
-            ));
-            self.emit_live_log(format!("exit {}", status));
-            if stdout_result.truncated {
-                if codex_output_path.is_some() {
-                    // Codex routes the real answer to the -o file; stdout is
-                    // JSONL telemetry that can safely exceed the cap.
-                    debug_logs.push(format!(
-                        "stdout truncated to {} bytes (codex output file available)",
-                        CLI_STDOUT_MAX_BYTES
+                debug_logs.push(format!(
+                    "exit: {} (elapsed {} ms, stdout {} bytes, stderr {} bytes)",
+                    status,
+                    started_at.elapsed().as_millis(),
+                    stdout_result.bytes.len(),
+                    stderr_result.text.len(),
+                ));
+                self.emit_live_log(format!("exit {status}"));
+                if stdout_result.truncated {
+                    if codex_output_path.is_some() {
+                        // Codex routes the real answer to the -o file; stdout is
+                        // JSONL telemetry that can safely exceed the cap.
+                        debug_logs.push(format!(
+                        "stdout truncated to {CLI_STDOUT_MAX_BYTES} bytes (codex output file available)"
                     ));
-                } else {
-                    let msg = format!(
-                        "stdout truncated at {} bytes — response is incomplete",
-                        CLI_STDOUT_MAX_BYTES
+                    } else {
+                        let msg = format!(
+                        "stdout truncated at {CLI_STDOUT_MAX_BYTES} bytes — response is incomplete"
                     );
-                    debug_logs.push(msg.clone());
-                    self.history.pop(); // remove orphaned user turn
+                        debug_logs.push(msg.clone());
+                        // The remote session likely completed (the process produced
+                        // output exceeding the cap).  Only pop the local user turn;
+                        // do NOT reset the session — the server advanced and we
+                        // want to continue from there on the next call.
+                        self.history.pop();
+                        if self.kind == ProviderKind::Anthropic {
+                            self.session_started = true;
+                        }
+                        return Err(Self::provider_error_with_debug(bin, msg, &debug_logs));
+                    }
+                }
+                if stderr_result.truncated {
+                    debug_logs.push(format!("stderr truncated to {CLI_STDERR_MAX_BYTES} bytes"));
+                }
+                Self::append_stderr_debug(&mut debug_logs, &stderr_result.text);
+
+                let stdout_text: String = String::from_utf8_lossy(&stdout_result.bytes).into();
+
+                if !status.success() {
+                    if let Some(path) = codex_output_path.as_ref() {
+                        let _ = fs::remove_file(path).await;
+                    }
+                    // Session conflict: the session exists server-side but we
+                    // tried --session-id instead of --resume.  Fix the flag and
+                    // retry once with --resume so the iteration isn't wasted.
+                    //
+                    // The "already in use" string comes from the Claude CLI's
+                    // session-id conflict error.  If Anthropic changes this
+                    // wording the retry will silently stop triggering — the
+                    // call will fail normally instead, which is safe.
+                    if !session_retried
+                        && self.kind == ProviderKind::Anthropic
+                        && stderr_result.text.contains("already in use")
+                    {
+                        self.session_started = true;
+                        session_retried = true;
+                        debug_logs.push("session conflict detected, retrying with --resume".into());
+                        self.emit_live_log("session conflict, retrying with --resume".into());
+                        continue 'cli;
+                    }
+                    self.reset_after_send_error();
+                    let mut msg = format!("exit {}: {}", status, stderr_result.text);
+                    let stdout_trimmed = stdout_text.trim();
+                    if !stdout_trimmed.is_empty() {
+                        msg.push_str("\nstdout: ");
+                        msg.push_str(&Self::clip(stdout_trimmed, 1024));
+                    }
                     return Err(Self::provider_error_with_debug(bin, msg, &debug_logs));
                 }
-            }
-            if stderr_result.truncated {
-                debug_logs.push(format!(
-                    "stderr truncated to {} bytes",
-                    CLI_STDERR_MAX_BYTES
-                ));
-            }
-            Self::append_stderr_debug(&mut debug_logs, &stderr_result.text);
-
-            let stdout_text: String = String::from_utf8_lossy(&stdout_result.bytes).into();
-
-            if !status.success() {
-                if let Some(path) = codex_output_path.as_ref() {
-                    let _ = fs::remove_file(path).await;
-                }
-                let mut msg = format!("exit {}: {}", status, stderr_result.text);
-                let stdout_trimmed = stdout_text.trim();
-                if !stdout_trimmed.is_empty() {
-                    msg.push_str("\nstdout: ");
-                    msg.push_str(&Self::clip(stdout_trimmed, 1024));
-                }
-                return Err(Self::provider_error_with_debug(bin, msg, &debug_logs));
-            }
-            if self.kind == ProviderKind::OpenAI {
-                if let Some(session_id) = Self::extract_session_id_from_jsonl(&stdout_text) {
-                    debug_logs.push(format!(
-                        "session detected: {}",
-                        Self::short_session(&session_id)
-                    ));
-                    self.session_id = Some(session_id);
+                if self.kind == ProviderKind::OpenAI {
+                    if let Some(session_id) = Self::extract_session_id_from_jsonl(&stdout_text) {
+                        debug_logs.push(format!(
+                            "session detected: {}",
+                            Self::short_session(&session_id)
+                        ));
+                        self.session_id = Some(session_id);
+                        self.session_started = true;
+                    }
+                } else if self.kind == ProviderKind::Anthropic {
                     self.session_started = true;
+                    if let Some(session_id) = self.session_id.as_deref() {
+                        debug_logs.push(format!(
+                            "session active: {}",
+                            Self::short_session(session_id)
+                        ));
+                    }
                 }
-            } else if self.kind == ProviderKind::Anthropic {
-                self.session_started = true;
-                if let Some(session_id) = self.session_id.as_deref() {
-                    debug_logs.push(format!(
-                        "session active: {}",
-                        Self::short_session(session_id)
-                    ));
-                }
-            }
 
-            let content = if self.kind == ProviderKind::OpenAI {
-                if let Some(path) = codex_output_path.as_ref() {
-                    match fs::read_to_string(path).await {
-                        Ok(text) => {
-                            let _ = fs::remove_file(path).await;
-                            debug_logs
-                                .push(format!("codex output chars: {}", text.chars().count()));
-                            text
+                let content = if self.kind == ProviderKind::OpenAI {
+                    if let Some(path) = codex_output_path.as_ref() {
+                        match fs::read_to_string(path).await {
+                            Ok(text) => {
+                                let _ = fs::remove_file(path).await;
+                                debug_logs
+                                    .push(format!("codex output chars: {}", text.chars().count()));
+                                text
+                            }
+                            Err(e) => {
+                                let _ = fs::remove_file(path).await;
+                                self.reset_after_send_error();
+                                let msg = format!(
+                                    "failed to read codex output file {}: {e}",
+                                    path.display()
+                                );
+                                debug_logs.push(msg.clone());
+                                return Err(Self::provider_error_with_debug(bin, msg, &debug_logs));
+                            }
                         }
-                        Err(e) => {
-                            let _ = fs::remove_file(path).await;
-                            // Clear session state: we can't confirm the turn
-                            // completed locally, so resuming would create a
-                            // context gap.  Fall back to history-based mode.
-                            self.session_id = None;
-                            self.session_started = false;
-                            self.history.pop(); // remove orphaned user turn
-                            let msg =
-                                format!("failed to read codex output file {}: {e}", path.display());
-                            debug_logs.push(msg.clone());
-                            return Err(Self::provider_error_with_debug(bin, msg, &debug_logs));
-                        }
+                    } else {
+                        stdout_text
                     }
                 } else {
                     stdout_text
-                }
-            } else {
-                stdout_text
-            };
+                };
+                break content;
+            }; // end of 'cli retry loop
+
             self.history.push(Message {
                 role: Role::Assistant,
                 content,

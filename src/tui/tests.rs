@@ -1698,7 +1698,10 @@ fn help_opens_on_pipeline() {
     app.pipeline.pipeline_focus = PipelineFocus::Builder;
     handle_key(&mut app, key(KeyCode::Char('?')));
     assert!(app.help_popup.active);
-    assert_eq!(app.help_popup.tab_count, 6);
+    assert_eq!(
+        app.help_popup.tab_count,
+        crate::screen::help::PIPELINE_TAB_COUNT
+    );
 }
 
 #[test]
@@ -1803,8 +1806,11 @@ fn pipeline_step_labels_expands_replicas() {
         connections: vec![],
         session_configs: vec![],
         loop_connections: vec![],
+        finalization_blocks: Vec::new(),
+        finalization_connections: Vec::new(),
+        data_feeds: Vec::new(),
     };
-    let labels = pipeline_step_labels(&def);
+    let labels = pipeline_step_labels(&def, true);
     assert_eq!(labels.len(), 4); // 3 replicas + 1
     assert_eq!(labels[0], "Writer (r1) (Claude)");
     assert_eq!(labels[1], "Writer (r2) (Claude)");
@@ -1830,8 +1836,11 @@ fn pipeline_step_labels_unnamed_blocks_no_agent_duplication() {
         connections: vec![],
         session_configs: vec![],
         loop_connections: vec![],
+        finalization_blocks: Vec::new(),
+        finalization_connections: Vec::new(),
+        data_feeds: Vec::new(),
     };
-    let labels = pipeline_step_labels(&def);
+    let labels = pipeline_step_labels(&def, true);
     assert_eq!(labels.len(), 1);
     assert_eq!(labels[0], "Block 5 (Claude)");
 }
@@ -1854,8 +1863,11 @@ fn pipeline_step_labels_multi_agent_no_duplication() {
         connections: vec![],
         session_configs: vec![],
         loop_connections: vec![],
+        finalization_blocks: Vec::new(),
+        finalization_connections: Vec::new(),
+        data_feeds: Vec::new(),
     };
-    let labels = pipeline_step_labels(&def);
+    let labels = pipeline_step_labels(&def, true);
     assert_eq!(labels.len(), 2);
     // Agent name should appear exactly once, not doubled
     assert_eq!(labels[0], "Writer (Claude)");

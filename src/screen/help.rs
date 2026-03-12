@@ -8,7 +8,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 use std::sync::LazyLock;
 
-pub const PIPELINE_TAB_COUNT: usize = 6;
+pub const PIPELINE_TAB_COUNT: usize = 7;
 pub const PIPELINE_TAB_NAMES: [&str; PIPELINE_TAB_COUNT] = [
     "Overview",
     "Canvas Navigation",
@@ -16,6 +16,7 @@ pub const PIPELINE_TAB_NAMES: [&str; PIPELINE_TAB_COUNT] = [
     "Wiring",
     "Sessions",
     "Prompt & Settings",
+    "Finalization",
 ];
 
 // ---------------------------------------------------------------------------
@@ -408,6 +409,53 @@ pub fn pipeline_help_lines(tab: usize) -> &'static [Line<'static>] {
                     Span::styled("  Ctrl+E", k),
                     Span::raw(": Analyze setup — sends config to diagnostic_provider."),
                 ]),
+                Line::from(""),
+            ],
+            // Tab 6: Finalization
+            vec![
+                Line::from(Span::styled("Finalization", h)),
+                Line::from(""),
+                Line::from("  Finalization is a second pipeline phase that runs after"),
+                Line::from("  the execution DAG completes. Finalization blocks receive"),
+                Line::from("  execution outputs via data feeds."),
+                Line::from(""),
+                Line::from(Span::styled("  Keys", h)),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("  A (Shift+A)", k),
+                    Span::raw(": Add a finalization block. These appear below"),
+                ]),
+                Line::from("    the separator line and have magenta borders."),
+                Line::from(vec![
+                    Span::styled("  f", k),
+                    Span::raw(": Create or edit data feed. On an execution block:"),
+                ]),
+                Line::from("    enter feed-connect mode — navigate to a finalization"),
+                Line::from("    block and press Enter to create the feed."),
+                Line::from("    On a finalization block: open incoming feeds for editing."),
+                Line::from(vec![
+                    Span::styled("  F", k),
+                    Span::raw(": Remove a data feed attached to the selected block."),
+                ]),
+                Line::from(""),
+                Line::from(Span::styled("  Data Feed Settings", h)),
+                Line::from(""),
+                Line::from("  Collection: controls which iteration outputs are fed."),
+                Line::from("    last_iteration — only the final iteration output"),
+                Line::from("    all_iterations  — every iteration output"),
+                Line::from(""),
+                Line::from("  Granularity: controls run scope for batch execution."),
+                Line::from("    per_run  — finalization runs once per successful run"),
+                Line::from("    all_runs — finalization runs once over all run outputs"),
+                Line::from(""),
+                Line::from(Span::styled("  Finalization Connections", h)),
+                Line::from(""),
+                Line::from("  Use c to connect finalization blocks to each other"),
+                Line::from("  (same as regular DAG wiring, but within the"),
+                Line::from("  finalization phase). Cross-phase connections are not"),
+                Line::from("  allowed — use data feeds instead."),
+                Line::from(""),
+                Line::from("  Loops (o) are only available for execution blocks."),
                 Line::from(""),
             ],
         ]

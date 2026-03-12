@@ -491,14 +491,17 @@ fn draw_pipeline_dag(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_multi_run(f: &mut Frame, app: &App) {
+    let has_stage = app.running.batch_stage.is_some() || app.running.batch_stage_error.is_some();
+    let stage_height = if has_stage { 2 } else { 0 };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Min(8),
-            Constraint::Length(10),
-            Constraint::Length(3),
+            Constraint::Length(3),            // title
+            Constraint::Length(3),            // progress gauge
+            Constraint::Min(8),               // runs list
+            Constraint::Length(stage_height), // batch stage indicator (0 when hidden)
+            Constraint::Length(10),           // selected run logs
+            Constraint::Length(3),            // help bar
         ])
         .split(f.area());
 
@@ -599,6 +602,31 @@ fn draw_multi_run(f: &mut Frame, app: &App) {
     }
     f.render_stateful_widget(list, chunks[2], &mut list_state);
 
+    // Batch stage indicator (finalization, etc.)
+    if has_stage {
+        let stage_line = if let Some(ref label) = app.running.batch_stage {
+            Line::from(vec![
+                Span::styled("  Stage: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    label.clone(),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" ...", Style::default().fg(Color::DarkGray)),
+            ])
+        } else if let Some(ref err) = app.running.batch_stage_error {
+            Line::from(vec![
+                Span::styled("  Stage error: ", Style::default().fg(Color::Red)),
+                Span::styled(err.clone(), Style::default().fg(Color::Red)),
+            ])
+        } else {
+            Line::default()
+        };
+        let stage_widget = Paragraph::new(stage_line);
+        f.render_widget(stage_widget, chunks[3]);
+    }
+
     let detail_lines = if let Some(state) = app
         .running
         .multi_run_states
@@ -624,7 +652,7 @@ fn draw_multi_run(f: &mut Frame, app: &App) {
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Yellow)),
         );
-    f.render_widget(detail, chunks[3]);
+    f.render_widget(detail, chunks[4]);
 
     let help_text = if app.running.diagnostic_running {
         "Analyzing reports for errors..."
@@ -638,7 +666,7 @@ fn draw_multi_run(f: &mut Frame, app: &App) {
         "j/k: select run  Enter: view results  q: quit"
     };
     let help = Paragraph::new(help_text).block(Block::default().borders(Borders::TOP));
-    f.render_widget(help, chunks[4]);
+    f.render_widget(help, chunks[5]);
 }
 
 fn draw_consolidation_modal(f: &mut Frame, app: &App) {

@@ -167,9 +167,9 @@ fn cli_to_headless_args(cli: &Cli) -> Result<headless::HeadlessArgs, String> {
         Some(text.clone())
     } else if let Some(ref path) = cli.prompt_file {
         let content = std::fs::read_to_string(path)
-            .map_err(|e| format!("Failed to read prompt file '{}': {e}", path))?;
+            .map_err(|e| format!("Failed to read prompt file '{path}': {e}"))?;
         if content.trim().is_empty() {
-            return Err(format!("Prompt file '{}' is empty", path));
+            return Err(format!("Prompt file '{path}' is empty"));
         }
         Some(content)
     } else {

@@ -28,8 +28,7 @@ pub(super) fn start_setup_analysis(app: &mut App) {
         Some(cfg) => cfg,
         None => {
             app.setup_analysis.show_message(format!(
-                "Diagnostic agent '{}' is not configured.",
-                diag_agent_name
+                "Diagnostic agent '{diag_agent_name}' is not configured."
             ));
             return;
         }
@@ -76,8 +75,14 @@ pub(super) fn start_setup_analysis(app: &mut App) {
                     .show_message(format!("Pipeline validation failed:\n\n{e}"));
                 return;
             }
-            // Validate each block's agent runtime
-            for block in &app.pipeline.pipeline_def.blocks {
+            // Validate each block's agent runtime (execution + finalization)
+            for block in app
+                .pipeline
+                .pipeline_def
+                .blocks
+                .iter()
+                .chain(app.pipeline.pipeline_def.finalization_blocks.iter())
+            {
                 for agent_name in &block.agents {
                     let label = format!("{} (block {})", agent_name, block.id);
                     match app.effective_agent_config(agent_name).cloned() {
@@ -147,6 +152,7 @@ pub(super) fn start_setup_analysis(app: &mut App) {
         app.config.max_history_messages,
         app.config.max_history_bytes,
         app.effective_cli_timeout_seconds().max(1),
+        vec![],
     );
 
     app.setup_analysis.open_loading();
@@ -260,7 +266,7 @@ fn build_relay_prompt(app: &App, prompt: &mut String) {
         if let Some(cfg) = app.effective_agent_config(name) {
             prompt.push_str(&format!("  - {} ({}/{})\n", name, cfg.provider, cfg.model));
         } else {
-            prompt.push_str(&format!("  - {}\n", name));
+            prompt.push_str(&format!("  - {name}\n"));
         }
     }
 
@@ -350,7 +356,7 @@ fn build_swarm_prompt(app: &App, prompt: &mut String) {
         if let Some(cfg) = app.effective_agent_config(name) {
             prompt.push_str(&format!("  - {} ({}/{})\n", name, cfg.provider, cfg.model));
         } else {
-            prompt.push_str(&format!("  - {}\n", name));
+            prompt.push_str(&format!("  - {name}\n"));
         }
     }
 
@@ -399,7 +405,7 @@ fn build_pipeline_prompt(app: &App, prompt: &mut String) {
 
     // Initial prompt
     let initial = truncate_chars(&def.initial_prompt, 500);
-    prompt.push_str(&format!("Initial prompt: {}", initial));
+    prompt.push_str(&format!("Initial prompt: {initial}"));
     if def.initial_prompt.chars().count() > 500 {
         prompt.push_str("...");
     }
@@ -443,7 +449,7 @@ fn build_pipeline_prompt(app: &App, prompt: &mut String) {
             block.id, label, agent_label, agent_info
         );
         if !snippet.is_empty() {
-            line.push_str(&format!(", prompt: {}", snippet));
+            line.push_str(&format!(", prompt: {snippet}"));
             if block.prompt.chars().count() > 200 {
                 line.push_str("...");
             }
@@ -452,7 +458,7 @@ fn build_pipeline_prompt(app: &App, prompt: &mut String) {
             line.push_str(&format!(", replicas: {}", block.replicas));
         }
         if let Some(ref sid) = block.session_id {
-            line.push_str(&format!(", session: {}", sid));
+            line.push_str(&format!(", session: {sid}"));
         }
         prompt.push_str(&line);
         prompt.push('\n');
@@ -503,7 +509,7 @@ fn build_pipeline_prompt(app: &App, prompt: &mut String) {
             );
             if !lc.prompt.is_empty() {
                 let snippet = truncate_chars(&lc.prompt, 200);
-                line.push_str(&format!(", prompt: {}", snippet));
+                line.push_str(&format!(", prompt: {snippet}"));
                 if lc.prompt.chars().count() > 200 {
                     line.push_str("...");
                 }
@@ -609,12 +615,132 @@ fn build_pipeline_prompt(app: &App, prompt: &mut String) {
             }
         ));
     }
+
+    // Finalization phase
+    if def.has_finalization() {
+        prompt.push_str("\n--- Finalization Phase ---\n");
+        prompt.push_str(
+            "Finalization blocks run after all execution iterations complete. \
+             They receive data from execution blocks via data feeds.\n",
+        );
+
+        // Finalization blocks
+        prompt.push_str("\nFinalization blocks:\n");
+        for block in &def.finalization_blocks {
+            let label = pipeline_block_label(block);
+            let agent_names: Vec<String> = block
+                .agents
+                .iter()
+                .map(|a| {
+                    if let Some(cfg) = app.effective_agent_config(a) {
+                        format!("{} ({})", a, cfg.model)
+                    } else {
+                        a.clone()
+                    }
+                })
+                .collect();
+            let agent_info = agent_names.join(", ");
+            let snippet = truncate_chars(&block.prompt, 200);
+            let agent_label = if block.agents.len() > 1 {
+                "agents"
+            } else {
+                "agent"
+            };
+
+            // Classify by granularity using the same logic as the runtime executor
+            let granularity_label = if def.is_per_run_finalization_block(block.id) {
+                "per-run"
+            } else {
+                "all-runs"
+            };
+
+            let mut line = format!(
+                "  {} \"{}\" — {}: {}, scope: {}",
+                block.id, label, agent_label, agent_info, granularity_label
+            );
+            if !snippet.is_empty() {
+                line.push_str(&format!(", prompt: {snippet}"));
+                if block.prompt.chars().count() > 200 {
+                    line.push_str("...");
+                }
+            }
+            prompt.push_str(&line);
+            prompt.push('\n');
+        }
+
+        // Data feeds
+        if !def.data_feeds.is_empty() {
+            prompt.push_str("\nData feeds (execution -> finalization):\n");
+            for feed in &def.data_feeds {
+                let from_label = if feed.from == crate::execution::pipeline::WILDCARD_BLOCK_ID {
+                    "* (all execution blocks)".to_string()
+                } else {
+                    def.blocks
+                        .iter()
+                        .find(|b| b.id == feed.from)
+                        .map(|b| format!("{} \"{}\"", b.id, pipeline_block_label(b)))
+                        .unwrap_or_else(|| format!("Block {}", feed.from))
+                };
+                let to_label = def
+                    .finalization_blocks
+                    .iter()
+                    .find(|b| b.id == feed.to)
+                    .map(|b| format!("{} \"{}\"", b.id, pipeline_block_label(b)))
+                    .unwrap_or_else(|| format!("Block {}", feed.to));
+                let collection = match feed.collection {
+                    pipeline_mod::FeedCollection::LastIteration => "last iteration",
+                    pipeline_mod::FeedCollection::AllIterations => "all iterations",
+                };
+                let granularity = match feed.granularity {
+                    pipeline_mod::FeedGranularity::PerRun => "per-run",
+                    pipeline_mod::FeedGranularity::AllRuns => "all-runs",
+                };
+                prompt.push_str(&format!(
+                    "  {from_label} -> {to_label}: collect {collection}, scope {granularity}\n"
+                ));
+            }
+
+            // Note about wildcard feeds
+            let has_wildcard = def
+                .data_feeds
+                .iter()
+                .any(|f| f.from == crate::execution::pipeline::WILDCARD_BLOCK_ID);
+            if has_wildcard {
+                prompt.push_str(
+                    "  Note: Wildcard feeds (from=*) collect output from ALL execution blocks.\n",
+                );
+            }
+        }
+
+        // Finalization connections
+        if !def.finalization_connections.is_empty() {
+            prompt.push_str("\nFinalization connections:\n");
+            for conn in &def.finalization_connections {
+                let from_label = def
+                    .finalization_blocks
+                    .iter()
+                    .find(|b| b.id == conn.from)
+                    .map(pipeline_block_label)
+                    .unwrap_or_else(|| format!("Block {}", conn.from));
+                let to_label = def
+                    .finalization_blocks
+                    .iter()
+                    .find(|b| b.id == conn.to)
+                    .map(pipeline_block_label)
+                    .unwrap_or_else(|| format!("Block {}", conn.to));
+                prompt.push_str(&format!(
+                    "  {} \"{}\" -> {} \"{}\"\n",
+                    conn.from, from_label, conn.to, to_label
+                ));
+            }
+        }
+    }
 }
 
 fn append_prompt_text(app: &App, prompt: &mut String) {
     if !app.prompt.prompt_text.is_empty() {
         let truncated = truncate_chars(&app.prompt.prompt_text, 500);
-        prompt.push_str(&format!("Prompt: {}", truncated));
+        prompt.push_str(&format!("Prompt: {truncated}"));
         if app.prompt.prompt_text.chars().count() > 500 {
             prompt.push_str("...");
         }

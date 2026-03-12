@@ -133,7 +133,11 @@ pub(crate) fn build_pipeline_agent_configs(
     session_overrides: &HashMap<String, AgentConfig>,
 ) -> HashMap<String, (ProviderKind, crate::config::ProviderConfig, bool)> {
     let mut agent_configs = HashMap::new();
-    for block in &pipeline_def.blocks {
+    for block in pipeline_def
+        .blocks
+        .iter()
+        .chain(pipeline_def.finalization_blocks.iter())
+    {
         for agent_name in &block.agents {
             if agent_configs.contains_key(agent_name) {
                 continue;

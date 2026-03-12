@@ -165,8 +165,7 @@ impl OutputManager {
                         return Err(AppError::Io(std::io::Error::new(
                             std::io::ErrorKind::AlreadyExists,
                             format!(
-                                "Session '{}' already exists for {}. Choose a different name.",
-                                name, date_part
+                                "Session '{name}' already exists for {date_part}. Choose a different name."
                             ),
                         )));
                     }
@@ -485,7 +484,7 @@ impl OutputManager {
         content: &str,
     ) -> Result<PathBuf, AppError> {
         let sanitized = Self::sanitize_session_name(agent_name);
-        let filename = format!("{}_iter{}.md", sanitized, iteration);
+        let filename = format!("{sanitized}_iter{iteration}.md");
         let path = self.run_dir.join(&filename);
         std::fs::write(&path, content)?;
         Ok(path)

@@ -7,6 +7,11 @@ pub(super) fn should_offer_consolidation(app: &App) -> bool {
     if app.running.cancel_flag.load(Ordering::Relaxed) {
         return false;
     }
+    // Skip consolidation for pipelines with finalization
+    if app.selected_mode == ExecutionMode::Pipeline && app.pipeline.pipeline_def.has_finalization()
+    {
+        return false;
+    }
     if app.running.multi_run_total > 1 {
         return !successful_run_ids(app).is_empty();
     }
@@ -116,6 +121,7 @@ pub(super) fn start_consolidation(app: &mut App) {
     let max_history_bytes = app.config.max_history_bytes;
     let cli_timeout = app.effective_cli_timeout_seconds().max(1);
 
+    let run_dir_str = run_dir.display().to_string();
     tokio::spawn(async move {
         let result = post_run::run_consolidation_with_provider_factory(
             post_run::ConsolidationRequest {
@@ -138,6 +144,7 @@ pub(super) fn start_consolidation(app: &mut App) {
                     max_history_messages,
                     max_history_bytes,
                     cli_timeout,
+                    vec![run_dir_str.clone()],
                 )
             },
         )

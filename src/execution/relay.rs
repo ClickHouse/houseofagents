@@ -78,7 +78,7 @@ pub async fn run_relay(
                     let prev_file_key = OutputManager::sanitize_session_name(prev_name);
                     let prev_path = output
                         .run_dir()
-                        .join(format!("{}_iter{}.md", prev_file_key, prev_iteration));
+                        .join(format!("{prev_file_key}_iter{prev_iteration}.md"));
                     format!(
                         "{}Read the previous agent output from file and build on it.\n\nPrevious agent: {}\nFile: {}\n\nUse that file as the source of truth and provide an improved response.",
                         task_prefix,
@@ -87,8 +87,7 @@ pub async fn run_relay(
                     )
                 } else {
                     format!(
-                        "{}Here is the output from {} (the previous agent):\n\n---\n{}\n---\n\nPlease build upon and improve this work.",
-                        task_prefix, prev_name, last_output
+                        "{task_prefix}Here is the output from {prev_name} (the previous agent):\n\n---\n{last_output}\n---\n\nPlease build upon and improve this work."
                     )
                 };
                 prompt_context.augment_prompt_for_agent(&base_message, receiver_is_cli)

@@ -615,6 +615,15 @@ pub(crate) fn collect_report_files(run_dir: &std::path::Path) -> Vec<std::path::
         dirs.extend(batch_run_directories(run_dir));
     }
 
+    // Also include finalization/ subdirectories when present
+    let base_dirs = dirs.clone();
+    for dir in &base_dirs {
+        let fin_dir = dir.join("finalization");
+        if fin_dir.is_dir() {
+            dirs.push(fin_dir);
+        }
+    }
+
     for dir in dirs {
         let mut dir_files = std::fs::read_dir(dir)
             .ok()

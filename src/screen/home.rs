@@ -583,7 +583,7 @@ fn draw_model_picker(f: &mut Frame, app: &App) {
 
     if app.edit_popup.model_picker_loading {
         let block = Block::default()
-            .title(format!(" {} — Loading models... ", provider_name))
+            .title(format!(" {provider_name} — Loading models... "))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan));
         let text = Paragraph::new("Fetching available models from API...\n\nEsc: cancel")
@@ -671,10 +671,7 @@ fn draw_model_picker(f: &mut Frame, app: &App) {
     };
 
     let block = Block::default()
-        .title(format!(
-            " {} — Select Model ({}) ",
-            provider_name, count_label,
-        ))
+        .title(format!(" {provider_name} — Select Model ({count_label}) ",))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
 

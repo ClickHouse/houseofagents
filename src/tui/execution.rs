@@ -43,7 +43,13 @@ pub(super) fn start_pipeline_execution(app: &mut App) {
         .into_iter()
         .map(|(a, avail)| (a.name.clone(), avail))
         .collect();
-    for block in &app.pipeline.pipeline_def.blocks {
+    for block in app
+        .pipeline
+        .pipeline_def
+        .blocks
+        .iter()
+        .chain(app.pipeline.pipeline_def.finalization_blocks.iter())
+    {
         for agent_name in &block.agents {
             match avail_agents.get(agent_name) {
                 Some(true) => {}
@@ -79,7 +85,13 @@ pub(super) fn start_pipeline_execution(app: &mut App) {
     let mut agent_configs: std::collections::HashMap<String, (ProviderKind, ProviderConfig, bool)> =
         std::collections::HashMap::new();
 
-    for block in &app.pipeline.pipeline_def.blocks {
+    for block in app
+        .pipeline
+        .pipeline_def
+        .blocks
+        .iter()
+        .chain(app.pipeline.pipeline_def.finalization_blocks.iter())
+    {
         for agent_name in &block.agents {
             if agent_configs.contains_key(agent_name) {
                 continue;
@@ -102,7 +114,7 @@ pub(super) fn start_pipeline_execution(app: &mut App) {
 
     // Pre-seed block rows from runtime replica table so IDs match the execution engine
     let rt = crate::execution::pipeline::build_runtime_table(&app.pipeline.pipeline_def);
-    app.running.block_rows = rt
+    let mut block_rows: Vec<crate::app::BlockStatusRow> = rt
         .entries
         .iter()
         .map(|info| {
@@ -122,8 +134,39 @@ pub(super) fn start_pipeline_execution(app: &mut App) {
         })
         .collect();
 
+    // Include finalization rows for single-run mode
+    let fin_tasks = crate::execution::pipeline::finalization_task_count(&app.pipeline.pipeline_def);
+    if app.pipeline.pipeline_def.has_finalization() {
+        let fin_scope = crate::execution::pipeline::FinalizationRunScope::SingleRun {
+            run_id: 1,
+            run_dir: std::path::PathBuf::new(), // placeholder for row building
+        };
+        let fin_entries = crate::execution::pipeline::build_finalization_runtime_entries(
+            &app.pipeline.pipeline_def,
+            &fin_scope,
+            rt.entries.len() as u32,
+        );
+        for entry in &fin_entries {
+            let provider = agent_configs
+                .get(&entry.agent)
+                .map(|(k, _, _)| *k)
+                .unwrap_or(ProviderKind::Anthropic);
+            block_rows.push(crate::app::BlockStatusRow {
+                block_id: entry.runtime_id,
+                source_block_id: entry.source_block_id,
+                replica_index: entry.replica_index,
+                label: entry.display_label.clone(),
+                agent_name: entry.agent.clone(),
+                provider,
+                status: crate::app::AgentRowStatus::Pending,
+            });
+        }
+    }
+    app.running.block_rows = block_rows;
+
     let loop_extra = crate::execution::pipeline::loop_extra_tasks(&app.pipeline.pipeline_def);
-    app.running.expected_total_steps = (rt.entries.len() + loop_extra) * iterations as usize;
+    app.running.expected_total_steps =
+        (rt.entries.len() + loop_extra) * iterations as usize + fin_tasks;
 
     // HTTP client
     let timeout_secs = app.effective_http_timeout_seconds().max(1);
@@ -213,23 +256,99 @@ pub(super) fn start_pipeline_execution(app: &mut App) {
         app.config.diagnostic_provider.is_some(),
     );
 
-    tokio::spawn(async move {
-        let result = pipeline_mod::run_pipeline(
-            &pipeline_def,
-            &config,
-            agent_configs,
-            client,
-            cli_timeout,
-            &prompt_context,
-            &output,
-            progress_tx.clone(),
-            cancel,
-        )
-        .await;
+    let has_finalization = pipeline_def.has_finalization();
+    let run_dir = output.run_dir().to_path_buf();
 
-        if let Err(e) = result {
+    tokio::spawn(async move {
+        if has_finalization {
+            // Proxy channel pattern: withhold AllDone, run finalization, then emit outer AllDone
+            let (inner_tx, mut inner_rx) = mpsc::unbounded_channel();
+
+            let fwd_tx = progress_tx.clone();
+            let fwd = tokio::spawn(async move {
+                while let Some(event) = inner_rx.recv().await {
+                    if matches!(event, ProgressEvent::AllDone) {
+                        return;
+                    }
+                    let _ = fwd_tx.send(event);
+                }
+            });
+
+            let exec_rt = crate::execution::pipeline::build_runtime_table(&pipeline_def);
+            let result = pipeline_mod::run_pipeline(
+                &pipeline_def,
+                &config,
+                agent_configs.clone(),
+                client.clone(),
+                cli_timeout,
+                &prompt_context,
+                &output,
+                inner_tx.clone(),
+                cancel.clone(),
+            )
+            .await;
+
+            if result.is_err() {
+                let _ = inner_tx.send(ProgressEvent::AllDone);
+            }
+            drop(inner_tx);
+            let _ = fwd.await;
+
+            // Finalization phase (on success only)
+            if result.is_ok() {
+                let fin_scope = crate::execution::pipeline::FinalizationRunScope::SingleRun {
+                    run_id: 1,
+                    run_dir: run_dir.clone(),
+                };
+                if let Err(e) = crate::execution::pipeline::run_pipeline_finalization(
+                    &pipeline_def,
+                    fin_scope,
+                    &exec_rt,
+                    agent_configs,
+                    &run_dir,
+                    progress_tx.clone(),
+                    cancel,
+                    |kind, cfg| {
+                        provider::create_provider(
+                            kind,
+                            cfg,
+                            client.clone(),
+                            config.default_max_tokens,
+                            config.max_history_messages,
+                            config.max_history_bytes,
+                            cli_timeout,
+                            vec![run_dir.display().to_string()],
+                        )
+                    },
+                )
+                .await
+                {
+                    let _ = output.append_error(&format!("Finalization failed: {e}"));
+                }
+            } else if let Err(e) = result {
+                let _ = output.append_error(&format!("Pipeline failed: {e}"));
+            }
+
             let _ = progress_tx.send(ProgressEvent::AllDone);
-            let _ = output.append_error(&format!("Pipeline failed: {e}"));
+        } else {
+            // No finalization — direct execution
+            let result = pipeline_mod::run_pipeline(
+                &pipeline_def,
+                &config,
+                agent_configs,
+                client,
+                cli_timeout,
+                &prompt_context,
+                &output,
+                progress_tx.clone(),
+                cancel,
+            )
+            .await;
+
+            if let Err(e) = result {
+                let _ = progress_tx.send(ProgressEvent::AllDone);
+                let _ = output.append_error(&format!("Pipeline failed: {e}"));
+            }
         }
     });
 }
@@ -246,8 +365,11 @@ pub(super) fn resolve_selected_agent_configs(
     )
 }
 
-pub(super) fn pipeline_step_labels(def: &pipeline_mod::PipelineDefinition) -> Vec<String> {
-    pipeline_mod::pipeline_step_labels(def)
+pub(super) fn pipeline_step_labels(
+    def: &pipeline_mod::PipelineDefinition,
+    include_finalization: bool,
+) -> Vec<String> {
+    pipeline_mod::pipeline_step_labels(def, include_finalization)
 }
 
 pub(super) struct MultiExecutionParams {
@@ -407,6 +529,7 @@ pub(super) fn start_multi_execution(app: &mut App, params: MultiExecutionParams)
 
                     let mut agents: Vec<(String, Box<dyn provider::Provider>)> = Vec::new();
                     let mut use_cli_by_agent = HashMap::new();
+                    let add_dirs = vec![output.run_dir().display().to_string()];
                     for agent_config in &resolved_agents {
                         use_cli_by_agent.insert(agent_config.name.clone(), agent_config.use_cli);
                         let pconfig = agent_config.to_provider_config();
@@ -420,6 +543,7 @@ pub(super) fn start_multi_execution(app: &mut App, params: MultiExecutionParams)
                                 max_history_messages,
                                 max_history_bytes,
                                 cli_timeout_secs,
+                                add_dirs.clone(),
                             ),
                         ));
                     }
@@ -504,7 +628,7 @@ pub(super) fn start_multi_pipeline_execution(
         }
     };
 
-    let step_labels = pipeline_step_labels(&app.pipeline.pipeline_def);
+    let step_labels = pipeline_step_labels(&app.pipeline.pipeline_def, false);
     if let Err(e) = batch_root.write_batch_info(
         runs,
         concurrency,
@@ -543,114 +667,354 @@ pub(super) fn start_multi_pipeline_execution(
     app.running.cancel_flag = cancel.clone();
 
     let batch_root_dir = batch_root.run_dir().clone();
+    let has_finalization = pipeline_def.has_finalization();
 
     tokio::spawn(async move {
-        run_multi(
-            runs,
-            concurrency,
-            batch_tx,
-            cancel,
-            move |run_id, progress_tx, cancel| {
-                let client = client.clone();
-                let config = config.clone();
-                let pipeline_def = pipeline_def.clone();
-                let prompt_context = prompt_context.clone();
-                let agent_configs = agent_configs.clone();
-                let batch_root_dir = batch_root_dir.clone();
-                let pipeline_source = pipeline_source.clone();
-                async move {
-                    let parent = match OutputManager::from_existing(batch_root_dir.clone()) {
-                        Ok(parent) => parent,
-                        Err(e) => {
-                            return (
-                                RunOutcome::Failed,
-                                Some(format!("Failed to open batch root: {e}")),
-                            );
-                        }
-                    };
-                    let output = match parent.new_run_subdir(run_id) {
-                        Ok(output) => output,
-                        Err(e) => {
-                            return (
-                                RunOutcome::Failed,
-                                Some(format!("Failed to create run_{run_id} output dir: {e}")),
-                            );
-                        }
-                    };
+        if has_finalization {
+            // Proxy channel pattern: intercept run_multi events, collect successful runs,
+            // run finalization, then emit outer AllRunsDone
+            let (inner_batch_tx, mut inner_batch_rx) = mpsc::unbounded_channel();
+            let outer_tx = batch_tx.clone();
+            let batch_root_for_fwd = batch_root_dir.clone();
+            let batch_root_for_fin = batch_root_dir.clone();
+            let fwd = tokio::spawn(async move {
+                let mut successful_runs: Vec<(u32, std::path::PathBuf)> = Vec::new();
+                while let Some(event) = inner_batch_rx.recv().await {
+                    if let BatchProgressEvent::RunFinished {
+                        run_id,
+                        outcome: RunOutcome::Done,
+                        ..
+                    } = &event
+                    {
+                        successful_runs
+                            .push((*run_id, batch_root_for_fwd.join(format!("run_{run_id}"))));
+                    }
+                    if matches!(event, BatchProgressEvent::AllRunsDone) {
+                        return successful_runs;
+                    }
+                    let _ = outer_tx.send(event);
+                }
+                successful_runs
+            });
 
-                    if let Err(e) = output.write_prompt(&pipeline_def.initial_prompt) {
-                        let _ = output.append_error(&format!("Failed to write prompt: {e}"));
-                        return (
-                            RunOutcome::Failed,
-                            Some(format!("Failed to write prompt: {e}")),
-                        );
-                    }
-                    let run_rt = crate::execution::pipeline::build_runtime_table(&pipeline_def);
-                    let run_loop_extra =
-                        crate::execution::pipeline::loop_extra_tasks(&pipeline_def);
-                    if let Err(e) = output.write_pipeline_session_info(
-                        pipeline_def.blocks.len(),
-                        pipeline_def.connections.len(),
-                        pipeline_def.loop_connections.len(),
-                        iterations,
-                        run_rt.entries.len() + run_loop_extra,
-                        pipeline_source.as_deref(),
-                    ) {
-                        let _ = output.append_error(&format!("Failed to write session info: {e}"));
-                        return (
-                            RunOutcome::Failed,
-                            Some(format!("Failed to write session info: {e}")),
-                        );
-                    }
-                    match toml::to_string_pretty(&pipeline_def) {
-                        Ok(toml_str) => {
-                            if let Err(e) =
-                                std::fs::write(output.run_dir().join("pipeline.toml"), toml_str)
-                            {
-                                let _ = output
-                                    .append_error(&format!("Failed to write pipeline.toml: {e}"));
+            let pipeline_def_for_fin = pipeline_def.clone();
+            let agent_configs_for_fin = agent_configs.clone();
+            let config_for_fin = config.clone();
+            let cancel_for_fin = cancel.clone();
+            let client_for_fin = client.clone();
+
+            run_multi(
+                runs,
+                concurrency,
+                inner_batch_tx,
+                cancel.clone(),
+                move |run_id, progress_tx, cancel| {
+                    let client = client.clone();
+                    let config = config.clone();
+                    let pipeline_def = pipeline_def.clone();
+                    let prompt_context = prompt_context.clone();
+                    let agent_configs = agent_configs.clone();
+                    let batch_root_dir = batch_root_dir.clone();
+                    let pipeline_source = pipeline_source.clone();
+                    async move {
+                        let parent = match OutputManager::from_existing(batch_root_dir.clone()) {
+                            Ok(parent) => parent,
+                            Err(e) => {
                                 return (
                                     RunOutcome::Failed,
-                                    Some(format!("Failed to write pipeline.toml: {e}")),
+                                    Some(format!("Failed to open batch root: {e}")),
                                 );
                             }
+                        };
+                        let output = match parent.new_run_subdir(run_id) {
+                            Ok(output) => output,
+                            Err(e) => {
+                                return (
+                                    RunOutcome::Failed,
+                                    Some(format!("Failed to create run_{run_id} output dir: {e}")),
+                                );
+                            }
+                        };
+
+                        if let Err(e) = output.write_prompt(&pipeline_def.initial_prompt) {
+                            let _ = output.append_error(&format!("Failed to write prompt: {e}"));
+                            return (
+                                RunOutcome::Failed,
+                                Some(format!("Failed to write prompt: {e}")),
+                            );
                         }
-                        Err(e) => {
-                            let err = format!("Failed to serialize pipeline: {e}");
-                            let _ = output.append_error(&err);
-                            return (RunOutcome::Failed, Some(err));
+                        let run_rt = crate::execution::pipeline::build_runtime_table(&pipeline_def);
+                        let run_loop_extra =
+                            crate::execution::pipeline::loop_extra_tasks(&pipeline_def);
+                        if let Err(e) = output.write_pipeline_session_info(
+                            pipeline_def.blocks.len(),
+                            pipeline_def.connections.len(),
+                            pipeline_def.loop_connections.len(),
+                            iterations,
+                            run_rt.entries.len() + run_loop_extra,
+                            pipeline_source.as_deref(),
+                        ) {
+                            let _ =
+                                output.append_error(&format!("Failed to write session info: {e}"));
+                            return (
+                                RunOutcome::Failed,
+                                Some(format!("Failed to write session info: {e}")),
+                            );
+                        }
+                        match toml::to_string_pretty(&pipeline_def) {
+                            Ok(toml_str) => {
+                                if let Err(e) =
+                                    std::fs::write(output.run_dir().join("pipeline.toml"), toml_str)
+                                {
+                                    let _ = output.append_error(&format!(
+                                        "Failed to write pipeline.toml: {e}"
+                                    ));
+                                    return (
+                                        RunOutcome::Failed,
+                                        Some(format!("Failed to write pipeline.toml: {e}")),
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                let err = format!("Failed to serialize pipeline: {e}");
+                                let _ = output.append_error(&err);
+                                return (RunOutcome::Failed, Some(err));
+                            }
+                        }
+
+                        let result = pipeline_mod::run_pipeline(
+                            &pipeline_def,
+                            &config,
+                            agent_configs,
+                            client,
+                            cli_timeout,
+                            &prompt_context,
+                            &output,
+                            progress_tx,
+                            cancel.clone(),
+                        )
+                        .await;
+
+                        if cancel.load(Ordering::Relaxed) {
+                            return (RunOutcome::Cancelled, None);
+                        }
+
+                        match result {
+                            Ok(()) => {
+                                let has_errors =
+                                    match output.run_dir().join("_errors.log").metadata() {
+                                        Ok(m) => m.len() > 0,
+                                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+                                        Err(_) => true,
+                                    };
+                                if has_errors {
+                                    (
+                                        RunOutcome::Failed,
+                                        Some("One or more agents reported errors".to_string()),
+                                    )
+                                } else {
+                                    (RunOutcome::Done, None)
+                                }
+                            }
+                            Err(e) => {
+                                let err = format!("Pipeline failed: {e}");
+                                let _ = output.append_error(&err);
+                                (RunOutcome::Failed, Some(err))
+                            }
                         }
                     }
+                },
+            )
+            .await;
 
-                    let result = pipeline_mod::run_pipeline(
-                        &pipeline_def,
-                        &config,
-                        agent_configs,
-                        client,
-                        cli_timeout,
-                        &prompt_context,
-                        &output,
-                        progress_tx,
-                        cancel.clone(),
-                    )
-                    .await;
+            let mut successful_runs = fwd.await.unwrap_or_default();
+            successful_runs.sort_by_key(|(id, _)| *id);
 
-                    if cancel.load(Ordering::Relaxed) {
-                        return (RunOutcome::Cancelled, None);
-                    }
+            // Batch-root finalization
+            if !successful_runs.is_empty() {
+                let _ = batch_tx.send(BatchProgressEvent::BatchStageStarted {
+                    label: "Finalization".into(),
+                });
 
-                    match result {
-                        Ok(()) => (RunOutcome::Done, None),
-                        Err(e) => {
-                            let err = format!("Pipeline failed: {e}");
-                            let _ = output.append_error(&err);
-                            (RunOutcome::Failed, Some(err))
+                let exec_rt =
+                    crate::execution::pipeline::build_runtime_table(&pipeline_def_for_fin);
+
+                // Local channel for finalization — drained internally
+                let (fin_tx, mut fin_rx) = mpsc::unbounded_channel();
+                let drain = tokio::spawn(async move { while fin_rx.recv().await.is_some() {} });
+
+                let fin_client = client_for_fin.clone();
+                let fin_result = crate::execution::pipeline::run_pipeline_finalization(
+                    &pipeline_def_for_fin,
+                    crate::execution::pipeline::FinalizationRunScope::Batch { successful_runs },
+                    &exec_rt,
+                    agent_configs_for_fin,
+                    &batch_root_for_fin,
+                    fin_tx,
+                    cancel_for_fin,
+                    |kind, cfg| {
+                        provider::create_provider(
+                            kind,
+                            cfg,
+                            fin_client.clone(),
+                            config_for_fin.default_max_tokens,
+                            config_for_fin.max_history_messages,
+                            config_for_fin.max_history_bytes,
+                            cli_timeout,
+                            vec![batch_root_for_fin.display().to_string()],
+                        )
+                    },
+                )
+                .await;
+                let _ = drain.await;
+
+                let error = fin_result.err().map(|e| {
+                    let msg = e.to_string();
+                    // Persist error to batch root so it survives screen transitions
+                    let err_path = batch_root_for_fin.join("_errors.log");
+                    let _ = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&err_path)
+                        .and_then(|mut f| {
+                            use std::io::Write;
+                            writeln!(f, "Finalization failed: {msg}")
+                        });
+                    msg
+                });
+                let _ = batch_tx.send(BatchProgressEvent::BatchStageFinished {
+                    label: "Finalization".into(),
+                    error,
+                });
+            }
+
+            let _ = batch_tx.send(BatchProgressEvent::AllRunsDone);
+        } else {
+            // No finalization — direct run_multi
+            run_multi(
+                runs,
+                concurrency,
+                batch_tx,
+                cancel,
+                move |run_id, progress_tx, cancel| {
+                    let client = client.clone();
+                    let config = config.clone();
+                    let pipeline_def = pipeline_def.clone();
+                    let prompt_context = prompt_context.clone();
+                    let agent_configs = agent_configs.clone();
+                    let batch_root_dir = batch_root_dir.clone();
+                    let pipeline_source = pipeline_source.clone();
+                    async move {
+                        let parent = match OutputManager::from_existing(batch_root_dir.clone()) {
+                            Ok(parent) => parent,
+                            Err(e) => {
+                                return (
+                                    RunOutcome::Failed,
+                                    Some(format!("Failed to open batch root: {e}")),
+                                );
+                            }
+                        };
+                        let output = match parent.new_run_subdir(run_id) {
+                            Ok(output) => output,
+                            Err(e) => {
+                                return (
+                                    RunOutcome::Failed,
+                                    Some(format!("Failed to create run_{run_id} output dir: {e}")),
+                                );
+                            }
+                        };
+
+                        if let Err(e) = output.write_prompt(&pipeline_def.initial_prompt) {
+                            let _ = output.append_error(&format!("Failed to write prompt: {e}"));
+                            return (
+                                RunOutcome::Failed,
+                                Some(format!("Failed to write prompt: {e}")),
+                            );
+                        }
+                        let run_rt = crate::execution::pipeline::build_runtime_table(&pipeline_def);
+                        let run_loop_extra =
+                            crate::execution::pipeline::loop_extra_tasks(&pipeline_def);
+                        if let Err(e) = output.write_pipeline_session_info(
+                            pipeline_def.blocks.len(),
+                            pipeline_def.connections.len(),
+                            pipeline_def.loop_connections.len(),
+                            iterations,
+                            run_rt.entries.len() + run_loop_extra,
+                            pipeline_source.as_deref(),
+                        ) {
+                            let _ =
+                                output.append_error(&format!("Failed to write session info: {e}"));
+                            return (
+                                RunOutcome::Failed,
+                                Some(format!("Failed to write session info: {e}")),
+                            );
+                        }
+                        match toml::to_string_pretty(&pipeline_def) {
+                            Ok(toml_str) => {
+                                if let Err(e) =
+                                    std::fs::write(output.run_dir().join("pipeline.toml"), toml_str)
+                                {
+                                    let _ = output.append_error(&format!(
+                                        "Failed to write pipeline.toml: {e}"
+                                    ));
+                                    return (
+                                        RunOutcome::Failed,
+                                        Some(format!("Failed to write pipeline.toml: {e}")),
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                let err = format!("Failed to serialize pipeline: {e}");
+                                let _ = output.append_error(&err);
+                                return (RunOutcome::Failed, Some(err));
+                            }
+                        }
+
+                        let result = pipeline_mod::run_pipeline(
+                            &pipeline_def,
+                            &config,
+                            agent_configs,
+                            client,
+                            cli_timeout,
+                            &prompt_context,
+                            &output,
+                            progress_tx,
+                            cancel.clone(),
+                        )
+                        .await;
+
+                        if cancel.load(Ordering::Relaxed) {
+                            return (RunOutcome::Cancelled, None);
+                        }
+
+                        match result {
+                            Ok(()) => {
+                                let has_errors =
+                                    match output.run_dir().join("_errors.log").metadata() {
+                                        Ok(m) => m.len() > 0,
+                                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+                                        Err(_) => true,
+                                    };
+                                if has_errors {
+                                    (
+                                        RunOutcome::Failed,
+                                        Some("One or more agents reported errors".to_string()),
+                                    )
+                                } else {
+                                    (RunOutcome::Done, None)
+                                }
+                            }
+                            Err(e) => {
+                                let err = format!("Pipeline failed: {e}");
+                                let _ = output.append_error(&err);
+                                (RunOutcome::Failed, Some(err))
+                            }
                         }
                     }
-                }
-            },
-        )
-        .await;
+                },
+            )
+            .await;
+        }
     });
 }
 
@@ -824,6 +1188,7 @@ fn continue_single_execution(
         use_cli_by_agent.insert(name.clone(), agent_config.use_cli);
 
         let pconfig = agent_config.to_provider_config();
+        let add_dirs = vec![pending.config.resolved_output_dir().display().to_string()];
         agents.push((
             name.clone(),
             provider::create_provider(
@@ -834,6 +1199,7 @@ fn continue_single_execution(
                 pending.config.max_history_messages,
                 pending.config.max_history_bytes,
                 pending.cli_timeout_secs,
+                add_dirs,
             ),
         ));
     }
@@ -1163,6 +1529,14 @@ pub(super) fn handle_batch_progress(app: &mut App, event: BatchProgressEvent) {
                     }
                 }
             }
+        }
+        BatchProgressEvent::BatchStageStarted { label } => {
+            app.running.batch_stage = Some(label);
+            app.running.batch_stage_error = None;
+        }
+        BatchProgressEvent::BatchStageFinished { label: _, error } => {
+            app.running.batch_stage = None;
+            app.running.batch_stage_error = error;
         }
         BatchProgressEvent::AllRunsDone => {
             app.running.is_running = false;

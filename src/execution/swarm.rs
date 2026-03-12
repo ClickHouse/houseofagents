@@ -149,7 +149,7 @@ pub async fn run_swarm(
                             ),
                         });
                         let sanitized = OutputManager::sanitize_session_name(&agent_name);
-                        let filename = format!("{}_iter{}.md", sanitized, iter);
+                        let filename = format!("{sanitized}_iter{iter}.md");
                         let path = task_output.run_dir().join(&filename);
                         if let Err(e) = tokio::fs::write(&path, &resp.content).await {
                             let err =
@@ -245,7 +245,7 @@ fn build_swarm_message(outputs: &HashMap<String, String>) -> String {
     keys.sort();
     for name in keys {
         if let Some(output) = outputs.get(name) {
-            msg.push_str(&format!("=== {}'s output ===\n{}\n\n", name, output));
+            msg.push_str(&format!("=== {name}'s output ===\n{output}\n\n"));
         }
     }
     msg.push_str("Review all perspectives and provide your updated analysis.");
@@ -264,7 +264,7 @@ fn build_swarm_file_message(
     keys.sort();
     for name in keys {
         let sanitized = OutputManager::sanitize_session_name(name);
-        let path = run_dir.join(format!("{}_iter{}.md", sanitized, prev_iteration));
+        let path = run_dir.join(format!("{sanitized}_iter{prev_iteration}.md"));
         msg.push_str(&format!("- {}: {}\n", name, path.display()));
     }
     msg.push_str("\nUse the file contents as the source of truth.");
