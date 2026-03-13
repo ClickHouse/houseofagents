@@ -61,6 +61,12 @@ pub async fn run(app: &mut App) -> anyhow::Result<()> {
     loop {
         terminal.draw(|f| crate::screen::draw(f, app))?;
 
+        // After draw updates viewport dimensions (e.g. pipeline_file_visible),
+        // sync scroll offsets so the cursor stays visible.  This matters after
+        // terminal resize: the draw above captures the new height in the Cell,
+        // and this call adjusts scroll to match.
+        input::adjust_file_dialog_scroll(app);
+
         tokio::select! {
             Some(event) = events.next() => {
                 match event {

@@ -2226,29 +2226,81 @@ fn draw_file_dialog(f: &mut Frame, app: &App, area: Rect) {
             let inner = block.inner(popup);
             f.render_widget(block, popup);
 
-            if app.pipeline.pipeline_file_list.is_empty() {
-                let msg = Paragraph::new("No pipeline files found")
-                    .style(Style::default().fg(Color::DarkGray));
-                f.render_widget(msg, inner);
+            let sections = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Min(1),
+                ])
+                .split(inner);
+
+            // Search input row
+            let search_style = if app.pipeline.pipeline_file_search_focus {
+                Style::default().fg(Color::Cyan)
             } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            let cursor = if app.pipeline.pipeline_file_search_focus {
+                "_"
+            } else {
+                ""
+            };
+            let search_line = Line::from(vec![
+                Span::styled("Search: ", search_style),
+                Span::raw(format!("{}{}", &app.pipeline.pipeline_file_search, cursor)),
+            ]);
+            f.render_widget(Paragraph::new(search_line), sections[0]);
+
+            // Match count hint
+            let total = app.pipeline.pipeline_file_list.len();
+            let matched = app.pipeline.pipeline_file_filtered.len();
+            let hint = if app.pipeline.pipeline_file_search.is_empty() {
+                format!("{total} pipelines")
+            } else {
+                format!("{matched}/{total} matches")
+            };
+            f.render_widget(
+                Paragraph::new(hint).style(Style::default().fg(Color::DarkGray)),
+                sections[1],
+            );
+
+            // Publish actual viewport height so the input handler can scroll correctly.
+            let file_list_rows = sections[2].height as usize;
+            app.pipeline.pipeline_file_visible.set(file_list_rows);
+
+            // File list from filtered indices
+            if app.pipeline.pipeline_file_filtered.is_empty() {
+                let msg = if app.pipeline.pipeline_file_list.is_empty() {
+                    "No pipeline files found"
+                } else {
+                    "No matches"
+                };
+                f.render_widget(
+                    Paragraph::new(msg).style(Style::default().fg(Color::DarkGray)),
+                    sections[2],
+                );
+            } else {
+                let scroll = app.pipeline.pipeline_file_scroll;
                 let items: Vec<Line> = app
                     .pipeline
-                    .pipeline_file_list
+                    .pipeline_file_filtered
                     .iter()
                     .enumerate()
-                    .map(|(i, name)| {
-                        let style = if i == app.pipeline.pipeline_file_cursor {
+                    .filter_map(|(vi, &orig_i)| {
+                        let name = app.pipeline.pipeline_file_list.get(orig_i)?;
+                        let style = if vi == app.pipeline.pipeline_file_cursor {
                             Style::default()
                                 .fg(Color::Cyan)
                                 .add_modifier(Modifier::BOLD)
                         } else {
                             Style::default()
                         };
-                        Line::from(Span::styled(name.as_str(), style))
+                        Some(Line::from(Span::styled(name.as_str(), style)))
                     })
                     .collect();
-                let list = Paragraph::new(items);
-                f.render_widget(list, inner);
+                let list = Paragraph::new(items).scroll((scroll as u16, 0));
+                f.render_widget(list, sections[2]);
             }
         }
         None => {}

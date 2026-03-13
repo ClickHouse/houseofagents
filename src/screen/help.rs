@@ -411,6 +411,11 @@ pub fn pipeline_help_lines(tab: usize) -> &'static [Line<'static>] {
                     Span::styled("  Ctrl+L", k),
                     Span::raw(": Load a previously saved pipeline definition."),
                 ]),
+                Line::from("    Type to filter by name. Tab toggles between search"),
+                Line::from("    box and file list. j/k or arrows navigate the list."),
+                Line::from("    Typing in the list switches back to search (j/k are"),
+                Line::from("    navigation-only; Tab to search first for j/k names)."),
+                Line::from("    In search: Esc clears query, then closes dialog."),
                 Line::from(vec![
                     Span::styled("  Ctrl+E", k),
                     Span::raw(": Analyze setup — sends config to diagnostic_provider."),

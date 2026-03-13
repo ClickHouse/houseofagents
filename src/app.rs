@@ -363,6 +363,11 @@ pub(crate) struct PipelineState {
     pub(crate) pipeline_file_input: String,
     pub(crate) pipeline_file_list: Vec<String>,
     pub(crate) pipeline_file_cursor: usize,
+    pub(crate) pipeline_file_search: String,
+    pub(crate) pipeline_file_search_focus: bool,
+    pub(crate) pipeline_file_filtered: Vec<usize>,
+    pub(crate) pipeline_file_scroll: usize,
+    pub(crate) pipeline_file_visible: Cell<usize>,
     pub(crate) pipeline_save_path: Option<PathBuf>,
     pub(crate) pipeline_show_session_config: bool,
     pub(crate) pipeline_session_config_cursor: usize,
@@ -1242,6 +1247,11 @@ impl PipelineState {
             pipeline_file_input: String::new(),
             pipeline_file_list: Vec::new(),
             pipeline_file_cursor: 0,
+            pipeline_file_search: String::new(),
+            pipeline_file_search_focus: true,
+            pipeline_file_filtered: Vec::new(),
+            pipeline_file_scroll: 0,
+            pipeline_file_visible: Cell::new(6),
             pipeline_save_path: None,
             pipeline_show_session_config: false,
             pipeline_session_config_cursor: 0,
@@ -1439,6 +1449,9 @@ mod tests {
         app.pipeline.pipeline_file_input = "file".into();
         app.pipeline.pipeline_file_list = vec!["one".into()];
         app.pipeline.pipeline_file_cursor = 1;
+        app.pipeline.pipeline_file_search = "query".into();
+        app.pipeline.pipeline_file_search_focus = false;
+        app.pipeline.pipeline_file_filtered = vec![0];
         app.pipeline.pipeline_save_path = Some(PathBuf::from("pipeline.toml"));
         app.pipeline.pipeline_show_session_config = true;
         app.pipeline.pipeline_session_config_cursor = 2;
@@ -1534,6 +1547,11 @@ mod tests {
         assert_eq!(app.pipeline.pipeline_file_input, "");
         assert!(app.pipeline.pipeline_file_list.is_empty());
         assert_eq!(app.pipeline.pipeline_file_cursor, 0);
+        assert!(app.pipeline.pipeline_file_search.is_empty());
+        assert!(app.pipeline.pipeline_file_search_focus);
+        assert!(app.pipeline.pipeline_file_filtered.is_empty());
+        assert_eq!(app.pipeline.pipeline_file_scroll, 0);
+        assert_eq!(app.pipeline.pipeline_file_visible.get(), 6);
         assert!(app.pipeline.pipeline_save_path.is_none());
         assert!(!app.pipeline.pipeline_show_session_config);
         assert_eq!(app.pipeline.pipeline_session_config_cursor, 0);

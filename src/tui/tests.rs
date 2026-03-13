@@ -2859,3 +2859,383 @@ fn edit_dialog_save_appends_new_profiles_after_existing() {
         vec!["security", "writer", "formatter"]
     );
 }
+
+// ---------------------------------------------------------------------------
+// Pipeline Load Dialog — behavioral tests
+// ---------------------------------------------------------------------------
+
+/// Set up an app with the Load dialog open and a fake file list.
+fn pipeline_app_with_load_dialog(files: Vec<&str>) -> App {
+    let mut app = pipeline_app_with_block();
+    let file_list: Vec<String> = files.into_iter().map(String::from).collect();
+    let filtered: Vec<usize> = (0..file_list.len()).collect();
+    app.pipeline.pipeline_file_dialog = Some(PipelineDialogMode::Load);
+    app.pipeline.pipeline_file_list = file_list;
+    app.pipeline.pipeline_file_filtered = filtered;
+    app.pipeline.pipeline_file_cursor = 0;
+    app.pipeline.pipeline_file_search.clear();
+    app.pipeline.pipeline_file_search_focus = true;
+    app
+}
+
+#[test]
+fn load_dialog_typing_filters_list() {
+    let mut app = pipeline_app_with_load_dialog(vec![
+        "review.toml",
+        "build.toml",
+        "review-v2.toml",
+        "deploy.toml",
+    ]);
+
+    // Type "rev" — should match "review.toml" and "review-v2.toml"
+    handle_key(&mut app, key(KeyCode::Char('r')));
+    handle_key(&mut app, key(KeyCode::Char('e')));
+    handle_key(&mut app, key(KeyCode::Char('v')));
+
+    assert_eq!(app.pipeline.pipeline_file_search, "rev");
+    assert_eq!(app.pipeline.pipeline_file_filtered.len(), 2);
+    // Both matches should point to the correct original indices
+    assert_eq!(app.pipeline.pipeline_file_filtered, vec![0, 2]);
+    assert_eq!(app.pipeline.pipeline_file_cursor, 0);
+}
+
+#[test]
+fn load_dialog_filter_is_case_insensitive() {
+    let mut app = pipeline_app_with_load_dialog(vec!["MyPipeline.toml", "other.toml"]);
+
+    handle_key(&mut app, key(KeyCode::Char('m')));
+    handle_key(&mut app, key(KeyCode::Char('y')));
+
+    assert_eq!(app.pipeline.pipeline_file_filtered.len(), 1);
+    assert_eq!(app.pipeline.pipeline_file_filtered[0], 0);
+}
+
+#[test]
+fn load_dialog_backspace_widens_filter() {
+    let mut app = pipeline_app_with_load_dialog(vec!["abc.toml", "abd.toml", "xyz.toml"]);
+
+    // Type "abc" — 1 match
+    for c in ['a', 'b', 'c'] {
+        handle_key(&mut app, key(KeyCode::Char(c)));
+    }
+    assert_eq!(app.pipeline.pipeline_file_filtered.len(), 1);
+
+    // Backspace to "ab" — 2 matches
+    handle_key(&mut app, key(KeyCode::Backspace));
+    assert_eq!(app.pipeline.pipeline_file_search, "ab");
+    assert_eq!(app.pipeline.pipeline_file_filtered.len(), 2);
+}
+
+#[test]
+fn load_dialog_tab_toggles_focus() {
+    let mut app = pipeline_app_with_load_dialog(vec!["a.toml", "b.toml"]);
+
+    // Starts in search focus
+    assert!(app.pipeline.pipeline_file_search_focus);
+
+    // Tab → list focus
+    handle_key(&mut app, key(KeyCode::Tab));
+    assert!(!app.pipeline.pipeline_file_search_focus);
+
+    // Tab → back to search focus
+    handle_key(&mut app, key(KeyCode::Tab));
+    assert!(app.pipeline.pipeline_file_search_focus);
+}
+
+#[test]
+fn load_dialog_tab_stays_in_search_when_filtered_empty() {
+    let mut app = pipeline_app_with_load_dialog(vec!["a.toml"]);
+
+    // Type something that matches nothing
+    handle_key(&mut app, key(KeyCode::Char('z')));
+    handle_key(&mut app, key(KeyCode::Char('z')));
+    assert!(app.pipeline.pipeline_file_filtered.is_empty());
+    assert!(app.pipeline.pipeline_file_search_focus);
+
+    // Tab should NOT toggle to list — nothing to navigate
+    handle_key(&mut app, key(KeyCode::Tab));
+    assert!(app.pipeline.pipeline_file_search_focus);
+}
+
+#[test]
+fn load_dialog_esc_clears_search_first_then_closes() {
+    let mut app = pipeline_app_with_load_dialog(vec!["a.toml", "b.toml"]);
+
+    // Type a search query
+    handle_key(&mut app, key(KeyCode::Char('a')));
+    assert_eq!(app.pipeline.pipeline_file_search, "a");
+    assert_eq!(app.pipeline.pipeline_file_filtered.len(), 1);
+
+    // First Esc: clears search, restores full list
+    handle_key(&mut app, key(KeyCode::Esc));
+    assert!(app.pipeline.pipeline_file_search.is_empty());
+    assert_eq!(app.pipeline.pipeline_file_filtered.len(), 2);
+    assert!(app.pipeline.pipeline_file_dialog.is_some());
+
+    // Second Esc: closes dialog
+    handle_key(&mut app, key(KeyCode::Esc));
+    assert!(app.pipeline.pipeline_file_dialog.is_none());
+}
+
+#[test]
+fn load_dialog_esc_from_list_focus_closes_immediately() {
+    let mut app = pipeline_app_with_load_dialog(vec!["a.toml", "b.toml"]);
+
+    // Tab to list focus
+    handle_key(&mut app, key(KeyCode::Tab));
+    assert!(!app.pipeline.pipeline_file_search_focus);
+
+    // Esc from list focus closes dialog immediately
+    handle_key(&mut app, key(KeyCode::Esc));
+    assert!(app.pipeline.pipeline_file_dialog.is_none());
+}
+
+#[test]
+fn load_dialog_enter_with_single_match_triggers_load_attempt() {
+    let mut app = pipeline_app_with_load_dialog(vec!["target.toml", "other.toml"]);
+
+    // Filter to exactly one match
+    handle_key(&mut app, key(KeyCode::Char('t')));
+    handle_key(&mut app, key(KeyCode::Char('a')));
+    handle_key(&mut app, key(KeyCode::Char('r')));
+    assert_eq!(app.pipeline.pipeline_file_filtered.len(), 1);
+
+    // Enter from search focus — tries to load (will fail since file doesn't exist,
+    // but that shows the error modal which proves the load path was taken)
+    handle_key(&mut app, key(KeyCode::Enter));
+    // Load attempt was made — either dialog closed (success) or error modal appeared
+    assert!(
+        app.pipeline.pipeline_file_dialog.is_none() || app.error_modal.is_some(),
+        "Enter with single match should attempt to load"
+    );
+}
+
+#[test]
+fn load_dialog_enter_with_multiple_matches_switches_to_list() {
+    let mut app = pipeline_app_with_load_dialog(vec!["a.toml", "ab.toml", "c.toml"]);
+
+    // Filter to 2 matches
+    handle_key(&mut app, key(KeyCode::Char('a')));
+    assert_eq!(app.pipeline.pipeline_file_filtered.len(), 2);
+    assert!(app.pipeline.pipeline_file_search_focus);
+
+    // Enter with multiple matches → switch to list focus
+    handle_key(&mut app, key(KeyCode::Enter));
+    assert!(!app.pipeline.pipeline_file_search_focus);
+    assert!(app.pipeline.pipeline_file_dialog.is_some());
+}
+
+#[test]
+fn load_dialog_enter_with_zero_matches_stays_in_search() {
+    let mut app = pipeline_app_with_load_dialog(vec!["a.toml"]);
+
+    handle_key(&mut app, key(KeyCode::Char('z')));
+    assert!(app.pipeline.pipeline_file_filtered.is_empty());
+
+    // Enter with no matches — should stay in search, dialog stays open
+    handle_key(&mut app, key(KeyCode::Enter));
+    assert!(app.pipeline.pipeline_file_search_focus);
+    assert!(app.pipeline.pipeline_file_dialog.is_some());
+}
+
+#[test]
+fn load_dialog_arrow_keys_navigate_list() {
+    let mut app = pipeline_app_with_load_dialog(vec!["a.toml", "b.toml", "c.toml"]);
+
+    // Switch to list focus
+    handle_key(&mut app, key(KeyCode::Tab));
+    assert_eq!(app.pipeline.pipeline_file_cursor, 0);
+
+    // Down
+    handle_key(&mut app, key(KeyCode::Down));
+    assert_eq!(app.pipeline.pipeline_file_cursor, 1);
+
+    // Down again
+    handle_key(&mut app, key(KeyCode::Down));
+    assert_eq!(app.pipeline.pipeline_file_cursor, 2);
+
+    // Down at bottom — stays at 2
+    handle_key(&mut app, key(KeyCode::Down));
+    assert_eq!(app.pipeline.pipeline_file_cursor, 2);
+
+    // Up
+    handle_key(&mut app, key(KeyCode::Up));
+    assert_eq!(app.pipeline.pipeline_file_cursor, 1);
+
+    // Up to top
+    handle_key(&mut app, key(KeyCode::Up));
+    assert_eq!(app.pipeline.pipeline_file_cursor, 0);
+
+    // Up at top — stays at 0
+    handle_key(&mut app, key(KeyCode::Up));
+    assert_eq!(app.pipeline.pipeline_file_cursor, 0);
+}
+
+#[test]
+fn load_dialog_jk_navigate_list() {
+    let mut app = pipeline_app_with_load_dialog(vec!["a.toml", "b.toml", "c.toml"]);
+
+    handle_key(&mut app, key(KeyCode::Tab));
+
+    handle_key(&mut app, key(KeyCode::Char('j')));
+    assert_eq!(app.pipeline.pipeline_file_cursor, 1);
+
+    handle_key(&mut app, key(KeyCode::Char('k')));
+    assert_eq!(app.pipeline.pipeline_file_cursor, 0);
+}
+
+#[test]
+fn load_dialog_char_in_list_switches_to_search() {
+    let mut app = pipeline_app_with_load_dialog(vec!["a.toml", "b.toml"]);
+
+    // Switch to list focus
+    handle_key(&mut app, key(KeyCode::Tab));
+    assert!(!app.pipeline.pipeline_file_search_focus);
+
+    // Type a char while in list focus — should switch to search and append char
+    handle_key(&mut app, key(KeyCode::Char('x')));
+    assert!(app.pipeline.pipeline_file_search_focus);
+    assert_eq!(app.pipeline.pipeline_file_search, "x");
+}
+
+#[test]
+fn load_dialog_paste_routes_to_search() {
+    let mut app = pipeline_app_with_load_dialog(vec!["review.toml", "build.toml"]);
+
+    // Paste text — should go to search field and filter
+    handle_pipeline_paste(&mut app, "rev");
+    assert!(app.pipeline.pipeline_file_search_focus);
+    assert_eq!(app.pipeline.pipeline_file_search, "rev");
+    assert_eq!(app.pipeline.pipeline_file_filtered.len(), 1);
+}
+
+#[test]
+fn load_dialog_filter_resets_cursor_to_zero() {
+    let mut app = pipeline_app_with_load_dialog(vec!["aa.toml", "ab.toml", "ac.toml"]);
+
+    // Navigate to cursor=2 in list
+    handle_key(&mut app, key(KeyCode::Tab));
+    handle_key(&mut app, key(KeyCode::Down));
+    handle_key(&mut app, key(KeyCode::Down));
+    assert_eq!(app.pipeline.pipeline_file_cursor, 2);
+
+    // Type a char (switches to search) — cursor should reset to 0
+    handle_key(&mut app, key(KeyCode::Char('b')));
+    assert_eq!(app.pipeline.pipeline_file_cursor, 0);
+}
+
+#[test]
+fn load_dialog_cursor_clamped_after_filter_narrows() {
+    let mut app = pipeline_app_with_load_dialog(vec!["alpha.toml", "beta.toml", "gamma.toml"]);
+
+    // Navigate down in list
+    handle_key(&mut app, key(KeyCode::Tab));
+    handle_key(&mut app, key(KeyCode::Down));
+    handle_key(&mut app, key(KeyCode::Down));
+    assert_eq!(app.pipeline.pipeline_file_cursor, 2);
+
+    // Now type to filter — cursor resets to 0 via recompute
+    handle_key(&mut app, key(KeyCode::Char('a')));
+    assert_eq!(app.pipeline.pipeline_file_cursor, 0);
+    // All three filenames contain "a" (alpha, beta, gamma)
+    assert_eq!(app.pipeline.pipeline_file_filtered.len(), 3);
+}
+
+#[test]
+fn load_dialog_scroll_offset_tracks_cursor() {
+    const FILE_NAMES: [&str; 30] = [
+        "file_00.toml",
+        "file_01.toml",
+        "file_02.toml",
+        "file_03.toml",
+        "file_04.toml",
+        "file_05.toml",
+        "file_06.toml",
+        "file_07.toml",
+        "file_08.toml",
+        "file_09.toml",
+        "file_10.toml",
+        "file_11.toml",
+        "file_12.toml",
+        "file_13.toml",
+        "file_14.toml",
+        "file_15.toml",
+        "file_16.toml",
+        "file_17.toml",
+        "file_18.toml",
+        "file_19.toml",
+        "file_20.toml",
+        "file_21.toml",
+        "file_22.toml",
+        "file_23.toml",
+        "file_24.toml",
+        "file_25.toml",
+        "file_26.toml",
+        "file_27.toml",
+        "file_28.toml",
+        "file_29.toml",
+    ];
+    let mut app = pipeline_app_with_load_dialog(FILE_NAMES.to_vec());
+
+    // Default visible rows from Cell is 6.
+    let visible = app.pipeline.pipeline_file_visible.get();
+    assert_eq!(visible, 6);
+
+    // Switch to list, navigate down past visible area
+    handle_key(&mut app, key(KeyCode::Tab));
+    for _ in 0..25 {
+        handle_key(&mut app, key(KeyCode::Down));
+    }
+    assert_eq!(app.pipeline.pipeline_file_cursor, 25);
+    // Exact expected scroll: cursor + 1 - visible = 25 + 1 - 6 = 20
+    assert_eq!(app.pipeline.pipeline_file_scroll, 25 + 1 - visible);
+}
+
+#[test]
+fn load_dialog_viewport_shrink_corrects_scroll() {
+    const FILE_NAMES: [&str; 20] = [
+        "file_00.toml",
+        "file_01.toml",
+        "file_02.toml",
+        "file_03.toml",
+        "file_04.toml",
+        "file_05.toml",
+        "file_06.toml",
+        "file_07.toml",
+        "file_08.toml",
+        "file_09.toml",
+        "file_10.toml",
+        "file_11.toml",
+        "file_12.toml",
+        "file_13.toml",
+        "file_14.toml",
+        "file_15.toml",
+        "file_16.toml",
+        "file_17.toml",
+        "file_18.toml",
+        "file_19.toml",
+    ];
+    let mut app = pipeline_app_with_load_dialog(FILE_NAMES.to_vec());
+
+    // Simulate a large viewport: 10 visible rows.
+    app.pipeline.pipeline_file_visible.set(10);
+
+    // Navigate to cursor=9 — still visible (rows 0..9), scroll stays 0.
+    handle_key(&mut app, key(KeyCode::Tab));
+    for _ in 0..9 {
+        handle_key(&mut app, key(KeyCode::Down));
+    }
+    assert_eq!(app.pipeline.pipeline_file_cursor, 9);
+    assert_eq!(app.pipeline.pipeline_file_scroll, 0);
+
+    // Simulate terminal shrink: viewport drops to 4 rows.
+    // This is what `terminal.draw()` would set after a resize.
+    app.pipeline.pipeline_file_visible.set(4);
+
+    // The post-draw scroll sync (adjust_file_dialog_scroll) fires:
+    adjust_file_dialog_scroll(&mut app);
+
+    // Scroll must advance so cursor=9 is in the 4-row viewport.
+    // Expected: 9 + 1 - 4 = 6
+    assert_eq!(app.pipeline.pipeline_file_scroll, 9 + 1 - 4);
+}

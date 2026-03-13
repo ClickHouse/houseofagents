@@ -484,6 +484,13 @@ pub(super) fn handle_pipeline_paste(app: &mut App, text: &str) {
         }
     } else if let Some(PipelineDialogMode::Save) = app.pipeline.pipeline_file_dialog {
         app.pipeline.pipeline_file_input.push_str(text);
+    } else if let Some(PipelineDialogMode::Load) = app.pipeline.pipeline_file_dialog {
+        let clean = text.replace(['\n', '\r'], "");
+        if !clean.is_empty() {
+            app.pipeline.pipeline_file_search_focus = true;
+            app.pipeline.pipeline_file_search.push_str(&clean);
+            recompute_pipeline_file_filter(app);
+        }
     } else {
         match app.pipeline.pipeline_focus {
             PipelineFocus::InitialPrompt => {
@@ -723,6 +730,11 @@ pub(super) fn handle_pipeline_key(app: &mut App, key: KeyEvent) {
                 })
                 .collect();
             app.pipeline.pipeline_file_cursor = 0;
+            app.pipeline.pipeline_file_scroll = 0;
+            app.pipeline.pipeline_file_search.clear();
+            app.pipeline.pipeline_file_search_focus = true;
+            app.pipeline.pipeline_file_filtered =
+                (0..app.pipeline.pipeline_file_list.len()).collect();
         }
         // F5: run
         KeyCode::F(5) => {
@@ -1846,45 +1858,171 @@ pub(super) fn handle_pipeline_dialog_key(app: &mut App, key: KeyEvent) {
             }
             _ => {}
         },
-        Some(PipelineDialogMode::Load) => match key.code {
-            KeyCode::Esc => {
-                app.pipeline.pipeline_file_dialog = None;
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                app.pipeline.pipeline_file_cursor =
-                    app.pipeline.pipeline_file_cursor.saturating_sub(1);
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if app.pipeline.pipeline_file_cursor + 1 < app.pipeline.pipeline_file_list.len() {
-                    app.pipeline.pipeline_file_cursor += 1;
-                }
-            }
-            KeyCode::Enter => {
-                if let Some(filename) = app
-                    .pipeline
-                    .pipeline_file_list
-                    .get(app.pipeline.pipeline_file_cursor)
-                {
-                    let path = pipeline_mod::pipelines_dir().join(filename);
-                    match pipeline_mod::load_pipeline(&path) {
-                        Ok(def) => {
-                            let max_id = def.all_blocks().map(|b| b.id).max().unwrap_or(0);
-                            app.pipeline.pipeline_next_id = max_id + 1;
-                            app.pipeline.pipeline_def = def;
-                            app.pipeline.pipeline_save_path = Some(path);
-                            app.pipeline.pipeline_block_cursor =
-                                app.pipeline.pipeline_def.all_blocks().next().map(|b| b.id);
-                            app.pipeline.pipeline_file_dialog = None;
-                        }
-                        Err(e) => {
-                            app.error_modal = Some(format!("Load failed: {e}"));
+        Some(PipelineDialogMode::Load) => {
+            if key.code == KeyCode::Tab {
+                // Toggle focus between search box and file list.
+                // Stay in search when the filtered list is empty — there is nothing
+                // to navigate so switching to the list would be a no-op dead-end.
+                app.pipeline.pipeline_file_search_focus = !app.pipeline.pipeline_file_search_focus
+                    || app.pipeline.pipeline_file_filtered.is_empty();
+                clamp_file_cursor(app);
+                scroll_file_list_to_cursor(app);
+            } else if app.pipeline.pipeline_file_search_focus {
+                match key.code {
+                    KeyCode::Char(c) => {
+                        app.pipeline.pipeline_file_search.push(c);
+                        recompute_pipeline_file_filter(app);
+                    }
+                    KeyCode::Backspace => {
+                        app.pipeline.pipeline_file_search.pop();
+                        recompute_pipeline_file_filter(app);
+                    }
+                    KeyCode::Enter => {
+                        if app.pipeline.pipeline_file_filtered.len() == 1 {
+                            load_pipeline_by_filtered_cursor(app);
+                        } else if !app.pipeline.pipeline_file_filtered.is_empty() {
+                            app.pipeline.pipeline_file_search_focus = false;
+                            clamp_file_cursor(app);
                         }
                     }
+                    KeyCode::Esc => {
+                        if !app.pipeline.pipeline_file_search.is_empty() {
+                            app.pipeline.pipeline_file_search.clear();
+                            recompute_pipeline_file_filter(app);
+                        } else {
+                            close_load_dialog(app);
+                        }
+                    }
+                    _ => {}
+                }
+            } else {
+                match key.code {
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        app.pipeline.pipeline_file_cursor =
+                            app.pipeline.pipeline_file_cursor.saturating_sub(1);
+                        scroll_file_list_to_cursor(app);
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        if app.pipeline.pipeline_file_cursor + 1
+                            < app.pipeline.pipeline_file_filtered.len()
+                        {
+                            app.pipeline.pipeline_file_cursor += 1;
+                        }
+                        scroll_file_list_to_cursor(app);
+                    }
+                    KeyCode::Enter => {
+                        load_pipeline_by_filtered_cursor(app);
+                    }
+                    KeyCode::Esc => {
+                        close_load_dialog(app);
+                    }
+                    KeyCode::Char(c) => {
+                        // Switch to search and forward the char
+                        app.pipeline.pipeline_file_search_focus = true;
+                        app.pipeline.pipeline_file_search.push(c);
+                        recompute_pipeline_file_filter(app);
+                    }
+                    _ => {}
                 }
             }
-            _ => {}
-        },
+        }
         None => {}
+    }
+}
+
+fn recompute_pipeline_file_filter(app: &mut App) {
+    let query = app.pipeline.pipeline_file_search.to_lowercase();
+    app.pipeline.pipeline_file_filtered = app
+        .pipeline
+        .pipeline_file_list
+        .iter()
+        .enumerate()
+        .filter(|(_, name)| {
+            if query.is_empty() {
+                return true;
+            }
+            // Match against the filename stem so queries like "t" don't hit
+            // the ".toml" extension on every file.
+            let stem = name.strip_suffix(".toml").unwrap_or(name);
+            stem.to_lowercase().contains(&query)
+        })
+        .map(|(i, _)| i)
+        .collect();
+    // Reset cursor and scroll — the old position may be out of bounds after filtering.
+    app.pipeline.pipeline_file_cursor = 0;
+    app.pipeline.pipeline_file_scroll = 0;
+}
+
+/// Re-sync file-list scroll after a terminal resize so the cursor stays visible.
+/// Called from the resize event handler in `mod.rs`.
+pub(super) fn adjust_file_dialog_scroll(app: &mut App) {
+    if matches!(
+        app.pipeline.pipeline_file_dialog,
+        Some(PipelineDialogMode::Load)
+    ) {
+        clamp_file_cursor(app);
+        scroll_file_list_to_cursor(app);
+    }
+}
+
+/// Keep `pipeline_file_scroll` so that `pipeline_file_cursor` is always visible.
+/// The actual viewport height is captured by the renderer in
+/// `pipeline_file_visible` (same `Cell` pattern used by the edit popup).
+fn scroll_file_list_to_cursor(app: &mut App) {
+    let visible = app.pipeline.pipeline_file_visible.get().max(1);
+    let cursor = app.pipeline.pipeline_file_cursor;
+    let scroll = &mut app.pipeline.pipeline_file_scroll;
+    if cursor < *scroll {
+        *scroll = cursor;
+    } else if cursor >= *scroll + visible {
+        *scroll = cursor + 1 - visible;
+    }
+}
+
+/// Ensure cursor stays within the filtered list bounds (defensive guard).
+fn clamp_file_cursor(app: &mut App) {
+    let len = app.pipeline.pipeline_file_filtered.len();
+    if len == 0 {
+        app.pipeline.pipeline_file_cursor = 0;
+    } else if app.pipeline.pipeline_file_cursor >= len {
+        app.pipeline.pipeline_file_cursor = len - 1;
+    }
+}
+
+/// Close the Load dialog and release transient state so it does not linger in memory.
+fn close_load_dialog(app: &mut App) {
+    app.pipeline.pipeline_file_dialog = None;
+    app.pipeline.pipeline_file_search.clear();
+    app.pipeline.pipeline_file_filtered.clear();
+    app.pipeline.pipeline_file_list.clear();
+    app.pipeline.pipeline_file_cursor = 0;
+    app.pipeline.pipeline_file_scroll = 0;
+    app.pipeline.pipeline_file_search_focus = true;
+}
+
+fn load_pipeline_by_filtered_cursor(app: &mut App) {
+    let filename = app
+        .pipeline
+        .pipeline_file_filtered
+        .get(app.pipeline.pipeline_file_cursor)
+        .and_then(|&i| app.pipeline.pipeline_file_list.get(i))
+        .cloned();
+    if let Some(filename) = filename {
+        let path = pipeline_mod::pipelines_dir().join(&filename);
+        match pipeline_mod::load_pipeline(&path) {
+            Ok(def) => {
+                let max_id = def.all_blocks().map(|b| b.id).max().unwrap_or(0);
+                app.pipeline.pipeline_next_id = max_id + 1;
+                app.pipeline.pipeline_def = def;
+                app.pipeline.pipeline_save_path = Some(path);
+                app.pipeline.pipeline_block_cursor =
+                    app.pipeline.pipeline_def.all_blocks().next().map(|b| b.id);
+                close_load_dialog(app);
+            }
+            Err(e) => {
+                app.error_modal = Some(format!("Load failed: {e}"));
+            }
+        }
     }
 }
 

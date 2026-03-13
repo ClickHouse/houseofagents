@@ -332,7 +332,7 @@ Fields vary by mode for options, but every prompt flow includes Prompt, Session 
 | `Ctrl+Arrow keys` | Scroll the builder canvas |
 | `↑`/`+` `↓`/`-` | Increment / decrement iterations, runs, or concurrency on the focused numeric field |
 | `Ctrl+S` | Save pipeline (always prompts for filename, prefills current name) |
-| `Ctrl+L` | Load pipeline from file |
+| `Ctrl+L` | Load pipeline from file (type to search, Tab toggles search/list focus, j/k navigates list) |
 | `Ctrl+E` | Analyze setup — sends current pipeline to `diagnostic_provider` for a plain-language explanation |
 | `F5` | Validate and run the pipeline |
 | `?` | Open help popup (7 tabbed sections; Tab/Shift+Tab to cycle). Only when focus is not on a text field (initial prompt / session name). |
