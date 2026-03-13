@@ -1302,6 +1302,7 @@ fn pipeline_move_selected_block_moves_into_empty_cell() {
         name: "one".into(),
         agents: vec!["agent".into()],
         prompt: String::new(),
+        profiles: vec![],
         session_id: None,
         position: (2, 2),
         replicas: 1,
@@ -1323,6 +1324,7 @@ fn pipeline_move_selected_block_swaps_when_target_occupied() {
             name: "one".into(),
             agents: vec!["agent".into()],
             prompt: String::new(),
+            profiles: vec![],
             session_id: None,
             position: (2, 2),
             replicas: 1,
@@ -1332,6 +1334,7 @@ fn pipeline_move_selected_block_swaps_when_target_occupied() {
             name: "two".into(),
             agents: vec!["agent".into()],
             prompt: String::new(),
+            profiles: vec![],
             session_id: None,
             position: (3, 2),
             replicas: 1,
@@ -1368,6 +1371,7 @@ fn pipeline_builder_arrow_navigates_shift_arrow_moves_block() {
             name: "one".into(),
             agents: vec!["agent".into()],
             prompt: String::new(),
+            profiles: vec![],
             session_id: None,
             position: (2, 2),
             replicas: 1,
@@ -1377,6 +1381,7 @@ fn pipeline_builder_arrow_navigates_shift_arrow_moves_block() {
             name: "two".into(),
             agents: vec!["agent".into()],
             prompt: String::new(),
+            profiles: vec![],
             session_id: None,
             position: (3, 2),
             replicas: 1,
@@ -1517,6 +1522,7 @@ fn pipeline_app_with_block() -> App {
         name: "B1".into(),
         agents: vec!["Claude".into()],
         prompt: String::new(),
+        profiles: vec![],
         session_id: None,
         position: (0, 0),
         replicas: 1,
@@ -1789,6 +1795,7 @@ fn pipeline_step_labels_expands_replicas() {
                 name: "Writer".into(),
                 agents: vec!["Claude".into()],
                 prompt: String::new(),
+                profiles: vec![],
                 session_id: None,
                 position: (0, 0),
                 replicas: 3,
@@ -1798,6 +1805,7 @@ fn pipeline_step_labels_expands_replicas() {
                 name: "Reviewer".into(),
                 agents: vec!["GPT".into()],
                 prompt: String::new(),
+                profiles: vec![],
                 session_id: None,
                 position: (1, 0),
                 replicas: 1,
@@ -1829,6 +1837,7 @@ fn pipeline_step_labels_unnamed_blocks_no_agent_duplication() {
             name: String::new(),
             agents: vec!["Claude".into()],
             prompt: String::new(),
+            profiles: vec![],
             session_id: None,
             position: (0, 0),
             replicas: 1,
@@ -1856,6 +1865,7 @@ fn pipeline_step_labels_multi_agent_no_duplication() {
             name: "Writer".into(),
             agents: vec!["Claude".into(), "GPT".into()],
             prompt: String::new(),
+            profiles: vec![],
             session_id: None,
             position: (0, 0),
             replicas: 1,
@@ -1888,6 +1898,7 @@ fn pipeline_app_with_two_blocks() -> App {
         name: "A".into(),
         agents: vec!["Claude".into()],
         prompt: String::new(),
+        profiles: vec![],
         session_id: None,
         position: (0, 0),
         replicas: 1,
@@ -1897,6 +1908,7 @@ fn pipeline_app_with_two_blocks() -> App {
         name: "B".into(),
         agents: vec!["GPT".into()],
         prompt: String::new(),
+        profiles: vec![],
         session_id: None,
         position: (1, 0),
         replicas: 1,
@@ -2255,6 +2267,7 @@ fn setup_analysis_prompt_pipeline() {
             name: "Research".into(),
             agents: vec!["Claude".into()],
             prompt: "Do research".into(),
+            profiles: vec![],
             session_id: None,
             position: (0, 0),
             replicas: 1,
@@ -2264,6 +2277,7 @@ fn setup_analysis_prompt_pipeline() {
             name: "Analyze".into(),
             agents: vec!["OpenAI".into()],
             prompt: "Analyze results".into(),
+            profiles: vec![],
             session_id: Some("shared-1".into()),
             position: (1, 0),
             replicas: 1,
@@ -2296,6 +2310,7 @@ fn setup_analysis_prompt_pipeline_with_replicas() {
         name: "Worker".into(),
         agents: vec!["Claude".into()],
         prompt: "work".into(),
+        profiles: vec![],
         session_id: None,
         position: (0, 0),
         replicas: 3,
@@ -2491,6 +2506,7 @@ fn setup_analysis_pipeline_agent_invalid_runtime() {
         name: "A".into(),
         agents: vec!["CliAgent".into()],
         prompt: "test".into(),
+        profiles: vec![],
         session_id: None,
         position: (0, 0),
         replicas: 1,
@@ -2541,6 +2557,7 @@ fn setup_analysis_invalid_pipeline() {
         name: "A".into(),
         agents: vec!["Claude".into()],
         prompt: "test".into(),
+        profiles: vec![],
         session_id: None,
         position: (0, 0),
         replicas: 1,
@@ -2573,6 +2590,7 @@ fn setup_analysis_empty_pipeline_initial_prompt() {
         name: "A".into(),
         agents: vec!["Claude".into()],
         prompt: "test".into(),
+        profiles: vec![],
         session_id: None,
         position: (0, 0),
         replicas: 1,
@@ -2605,6 +2623,7 @@ fn setup_analysis_pipeline_unavailable_agent() {
         name: "A".into(),
         agents: vec!["MissingAgent".into()],
         prompt: "test".into(),
+        profiles: vec![],
         session_id: None,
         position: (0, 0),
         replicas: 1,
@@ -2702,6 +2721,7 @@ fn test_delete_internal_block_prunes_loop() {
             name: "A".into(),
             agents: vec!["Claude".into()],
             prompt: String::new(),
+            profiles: vec![],
             session_id: None,
             position: (0, 0),
             replicas: 1,
@@ -2711,6 +2731,7 @@ fn test_delete_internal_block_prunes_loop() {
             name: "B".into(),
             agents: vec!["Claude".into()],
             prompt: String::new(),
+            profiles: vec![],
             session_id: None,
             position: (1, 0),
             replicas: 1,
@@ -2720,6 +2741,7 @@ fn test_delete_internal_block_prunes_loop() {
             name: "C".into(),
             agents: vec!["Claude".into()],
             prompt: String::new(),
+            profiles: vec![],
             session_id: None,
             position: (2, 0),
             replicas: 1,
@@ -2753,5 +2775,87 @@ fn test_delete_internal_block_prunes_loop() {
     assert!(
         app.error_modal.is_some(),
         "user should be warned about pruned loop"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Profile order preservation tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn edit_dialog_save_preserves_profile_order() {
+    let mut app = pipeline_app_with_block();
+    // Set up block with specific profile order
+    app.pipeline.pipeline_def.blocks[0].profiles =
+        vec!["security".into(), "reviewer".into(), "writer".into()];
+
+    // Open edit dialog
+    handle_key(&mut app, key(KeyCode::Char('e')));
+    assert!(app.pipeline.pipeline_show_edit);
+
+    // Simulate the dialog state as if on-disk profiles are alphabetical
+    app.pipeline.pipeline_edit_profile_list =
+        vec!["reviewer".into(), "security".into(), "writer".into()];
+    app.pipeline.pipeline_edit_profile_selection = vec![true, true, true]; // all selected
+    app.pipeline.pipeline_edit_profile_orphaned = vec![];
+    // original_order was captured on dialog open
+    assert_eq!(
+        app.pipeline.pipeline_edit_profile_original_order,
+        vec!["security", "reviewer", "writer"]
+    );
+
+    // Save without changes (Enter on Name field)
+    handle_key(&mut app, key(KeyCode::Enter));
+    assert!(!app.pipeline.pipeline_show_edit);
+
+    // Order must be preserved — NOT rewritten to alphabetical
+    assert_eq!(
+        app.pipeline.pipeline_def.blocks[0].profiles,
+        vec!["security", "reviewer", "writer"]
+    );
+}
+
+#[test]
+fn edit_dialog_save_removes_deselected_preserves_order() {
+    let mut app = pipeline_app_with_block();
+    app.pipeline.pipeline_def.blocks[0].profiles =
+        vec!["security".into(), "reviewer".into(), "writer".into()];
+
+    handle_key(&mut app, key(KeyCode::Char('e')));
+
+    // Simulate: reviewer deselected, others kept
+    app.pipeline.pipeline_edit_profile_list =
+        vec!["reviewer".into(), "security".into(), "writer".into()];
+    app.pipeline.pipeline_edit_profile_selection = vec![false, true, true];
+    app.pipeline.pipeline_edit_profile_orphaned = vec![];
+
+    handle_key(&mut app, key(KeyCode::Enter));
+
+    // "security" should still come before "writer"
+    assert_eq!(
+        app.pipeline.pipeline_def.blocks[0].profiles,
+        vec!["security", "writer"]
+    );
+}
+
+#[test]
+fn edit_dialog_save_appends_new_profiles_after_existing() {
+    let mut app = pipeline_app_with_block();
+    app.pipeline.pipeline_def.blocks[0].profiles = vec!["security".into(), "writer".into()];
+
+    handle_key(&mut app, key(KeyCode::Char('e')));
+
+    // Simulate: "formatter" newly selected, existing kept
+    app.pipeline.pipeline_edit_profile_list =
+        vec!["formatter".into(), "security".into(), "writer".into()];
+    app.pipeline.pipeline_edit_profile_selection = vec![true, true, true];
+    app.pipeline.pipeline_edit_profile_orphaned = vec![];
+
+    handle_key(&mut app, key(KeyCode::Enter));
+
+    // Original order preserved, new profile appended at end
+    assert_eq!(
+        app.pipeline.pipeline_def.blocks[0].profiles,
+        vec!["security", "writer", "formatter"]
     );
 }

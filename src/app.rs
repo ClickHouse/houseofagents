@@ -345,6 +345,15 @@ pub(crate) struct PipelineState {
     pub(crate) pipeline_edit_agent_cursor: usize,
     pub(crate) pipeline_edit_agent_scroll: usize,
     pub(crate) pipeline_edit_agent_visible: Cell<usize>,
+    pub(crate) pipeline_edit_profile_selection: Vec<bool>,
+    pub(crate) pipeline_edit_profile_cursor: usize,
+    pub(crate) pipeline_edit_profile_scroll: usize,
+    pub(crate) pipeline_edit_profile_visible: Cell<usize>,
+    pub(crate) pipeline_edit_profile_list: Vec<String>,
+    /// Names of profiles assigned to the block but missing on disk — rendering marker for `[!]`.
+    pub(crate) pipeline_edit_profile_orphaned: Vec<String>,
+    /// Original profile order from block — used to preserve order on save.
+    pub(crate) pipeline_edit_profile_original_order: Vec<String>,
     pub(crate) pipeline_edit_prompt_buf: String,
     pub(crate) pipeline_edit_prompt_cursor: usize,
     pub(crate) pipeline_edit_session_buf: String,
@@ -507,6 +516,7 @@ pub(crate) struct BatchRunGroup {
 pub enum PipelineEditField {
     Name,
     Agent,
+    Profile,
     Prompt,
     SessionId,
     Replicas,
@@ -1216,6 +1226,13 @@ impl PipelineState {
             pipeline_edit_agent_cursor: 0,
             pipeline_edit_agent_scroll: 0,
             pipeline_edit_agent_visible: Cell::new(6),
+            pipeline_edit_profile_selection: Vec::new(),
+            pipeline_edit_profile_cursor: 0,
+            pipeline_edit_profile_scroll: 0,
+            pipeline_edit_profile_visible: Cell::new(4),
+            pipeline_edit_profile_list: Vec::new(),
+            pipeline_edit_profile_orphaned: Vec::new(),
+            pipeline_edit_profile_original_order: Vec::new(),
             pipeline_edit_prompt_buf: String::new(),
             pipeline_edit_prompt_cursor: 0,
             pipeline_edit_session_buf: String::new(),
@@ -1408,6 +1425,12 @@ mod tests {
         app.pipeline.pipeline_edit_agent_selection = vec![true, false];
         app.pipeline.pipeline_edit_agent_cursor = 1;
         app.pipeline.pipeline_edit_agent_scroll = 1;
+        app.pipeline.pipeline_edit_profile_selection = vec![true, false, true];
+        app.pipeline.pipeline_edit_profile_cursor = 2;
+        app.pipeline.pipeline_edit_profile_scroll = 1;
+        app.pipeline.pipeline_edit_profile_list = vec!["a".into(), "b".into(), "c".into()];
+        app.pipeline.pipeline_edit_profile_orphaned = vec!["orphan".into()];
+        app.pipeline.pipeline_edit_profile_original_order = vec!["c".into(), "a".into()];
         app.pipeline.pipeline_edit_prompt_buf = "prompt".into();
         app.pipeline.pipeline_edit_prompt_cursor = 3;
         app.pipeline.pipeline_edit_session_buf = "sid".into();
@@ -1497,6 +1520,12 @@ mod tests {
         assert!(app.pipeline.pipeline_edit_agent_selection.is_empty());
         assert_eq!(app.pipeline.pipeline_edit_agent_cursor, 0);
         assert_eq!(app.pipeline.pipeline_edit_agent_scroll, 0);
+        assert!(app.pipeline.pipeline_edit_profile_selection.is_empty());
+        assert_eq!(app.pipeline.pipeline_edit_profile_cursor, 0);
+        assert_eq!(app.pipeline.pipeline_edit_profile_scroll, 0);
+        assert!(app.pipeline.pipeline_edit_profile_list.is_empty());
+        assert!(app.pipeline.pipeline_edit_profile_orphaned.is_empty());
+        assert!(app.pipeline.pipeline_edit_profile_original_order.is_empty());
         assert_eq!(app.pipeline.pipeline_edit_prompt_buf, "");
         assert_eq!(app.pipeline.pipeline_edit_prompt_cursor, 0);
         assert_eq!(app.pipeline.pipeline_edit_session_buf, "");

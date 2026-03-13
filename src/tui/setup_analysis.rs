@@ -422,6 +422,8 @@ fn build_pipeline_prompt(app: &App, prompt: &mut String) {
         }
     ));
 
+    let profiles_dir = pipeline_mod::profiles_dir();
+
     // Blocks
     prompt.push_str("\nBlocks:\n");
     for block in &def.blocks {
@@ -453,6 +455,22 @@ fn build_pipeline_prompt(app: &App, prompt: &mut String) {
             if block.prompt.chars().count() > 200 {
                 line.push_str("...");
             }
+        }
+        if !block.profiles.is_empty() {
+            let labels: Vec<String> = block
+                .profiles
+                .iter()
+                .map(|p| {
+                    if !pipeline_mod::is_valid_profile_name(p) {
+                        format!("{p} [invalid]")
+                    } else if profiles_dir.join(format!("{p}.md")).is_file() {
+                        p.clone()
+                    } else {
+                        format!("{p} [missing]")
+                    }
+                })
+                .collect();
+            line.push_str(&format!(", profiles: {}", labels.join(", ")));
         }
         if block.replicas > 1 {
             line.push_str(&format!(", replicas: {}", block.replicas));
@@ -663,6 +681,22 @@ fn build_pipeline_prompt(app: &App, prompt: &mut String) {
                 if block.prompt.chars().count() > 200 {
                     line.push_str("...");
                 }
+            }
+            if !block.profiles.is_empty() {
+                let labels: Vec<String> = block
+                    .profiles
+                    .iter()
+                    .map(|p| {
+                        if !pipeline_mod::is_valid_profile_name(p) {
+                            format!("{p} [invalid]")
+                        } else if profiles_dir.join(format!("{p}.md")).is_file() {
+                            p.clone()
+                        } else {
+                            format!("{p} [missing]")
+                        }
+                    })
+                    .collect();
+                line.push_str(&format!(", profiles: {}", labels.join(", ")));
             }
             prompt.push_str(&line);
             prompt.push('\n');

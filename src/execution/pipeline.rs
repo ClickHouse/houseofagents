@@ -267,6 +267,8 @@ pub struct PipelineBlock {
     pub agents: Vec<String>,
     #[serde(default)]
     pub prompt: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub profiles: Vec<String>, // profile filenames without .md extension
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     pub position: (u16, u16), // grid coordinates (col, row)
@@ -292,6 +294,8 @@ impl<'de> Deserialize<'de> for PipelineBlock {
             agents: Option<Vec<String>>,
             #[serde(default)]
             prompt: String,
+            #[serde(default)]
+            profiles: Vec<String>,
             #[serde(default)]
             session_id: Option<String>,
             position: (u16, u16),
@@ -324,11 +328,20 @@ impl<'de> Deserialize<'de> for PipelineBlock {
             // Neither field present (legacy/minimal TOML) — default to Claude
             (None, None) => vec!["Claude".to_string()],
         };
+        // Validate profile names to prevent path traversal
+        for p in &raw.profiles {
+            if p.contains('/') || p.contains('\\') || p.contains("..") || p == "." || p.is_empty() {
+                return Err(serde::de::Error::custom(format!(
+                    "invalid profile name '{p}': must not contain path separators or '..'"
+                )));
+            }
+        }
         Ok(PipelineBlock {
             id: raw.id,
             name: raw.name,
             agents,
             prompt: raw.prompt,
+            profiles: raw.profiles,
             session_id: raw.session_id,
             position: raw.position,
             replicas: raw.replicas,
@@ -1507,6 +1520,39 @@ pub fn list_pipeline_files() -> io::Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+pub fn profiles_dir() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("houseofagents")
+        .join("profiles")
+}
+
+pub fn list_profile_files() -> io::Result<Vec<PathBuf>> {
+    let dir = profiles_dir();
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)?
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("md") && path.is_file() {
+                // Skip files whose stem would be an invalid profile name
+                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                if is_valid_profile_name(stem) {
+                    Some(path)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .collect();
+    files.sort();
+    Ok(files)
+}
+
 // ---------------------------------------------------------------------------
 // Execution engine
 // ---------------------------------------------------------------------------
@@ -1571,6 +1617,11 @@ pub async fn run_pipeline(
         progress_tx,
         cancel,
         |kind, cfg| {
+            let mut dirs = vec![output.run_dir().display().to_string()];
+            let pdir = profiles_dir();
+            if pdir.is_dir() {
+                dirs.push(pdir.display().to_string());
+            }
             provider::create_provider(
                 kind,
                 cfg,
@@ -1579,7 +1630,7 @@ pub async fn run_pipeline(
                 config.max_history_messages,
                 config.max_history_bytes,
                 cli_timeout_secs,
-                vec![output.run_dir().display().to_string()],
+                dirs,
             )
         },
     )
@@ -1604,6 +1655,18 @@ where
     if rt.entries.is_empty() {
         let _ = progress_tx.send(ProgressEvent::AllDone);
         return Ok(());
+    }
+
+    // Warn about missing profile files (soft — execution still proceeds)
+    for block in &def.blocks {
+        let missing = missing_profiles(&block.profiles);
+        if !missing.is_empty() {
+            let _ = output.append_error(&format!(
+                "Warning: block {} has missing profile(s): {} — skipped at runtime",
+                block.id,
+                missing.join(", ")
+            ));
+        }
     }
 
     // Account for loop re-runs in total task count
@@ -2399,6 +2462,77 @@ fn block_label(block: &PipelineBlock) -> String {
     }
 }
 
+fn resolve_profile_instructions(profiles: &[String], use_cli: bool) -> String {
+    resolve_profile_instructions_from_dir(&profiles_dir(), profiles, use_cli)
+}
+
+pub fn is_valid_profile_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains("..")
+        && name != "."
+}
+
+fn resolve_profile_instructions_from_dir(dir: &Path, profiles: &[String], use_cli: bool) -> String {
+    if profiles.is_empty() {
+        return String::new();
+    }
+    if use_cli {
+        let mut paths = Vec::new();
+        for name in profiles {
+            if !is_valid_profile_name(name) {
+                continue;
+            }
+            let path = dir.join(format!("{name}.md"));
+            if path.is_file() {
+                paths.push(format!("- {}", path.display()));
+            }
+        }
+        if paths.is_empty() {
+            return String::new();
+        }
+        let mut out = String::from("Read these profile instruction files:\n");
+        for p in &paths {
+            out.push_str(p);
+            out.push('\n');
+        }
+        out.push_str("Follow the instructions in each file.\n\n");
+        out
+    } else {
+        let mut content = String::new();
+        for name in profiles {
+            if !is_valid_profile_name(name) {
+                continue;
+            }
+            let path = dir.join(format!("{name}.md"));
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                if !content.is_empty() {
+                    content.push_str("\n\n");
+                }
+                content.push_str(&format!("--- Profile: {name} ---\n{text}"));
+            }
+        }
+        if !content.is_empty() {
+            content.push_str("\n\n");
+        }
+        content
+    }
+}
+
+/// Returns profile names that are configured on a block but missing from disk.
+fn missing_profiles(profiles: &[String]) -> Vec<String> {
+    if profiles.is_empty() {
+        return Vec::new();
+    }
+    let dir = profiles_dir();
+    profiles
+        .iter()
+        .filter(|p| is_valid_profile_name(p) && !dir.join(format!("{p}.md")).is_file())
+        .cloned()
+        .collect()
+}
+
 fn build_pipeline_block_message(
     block: &PipelineBlock,
     use_cli: bool,
@@ -2481,9 +2615,15 @@ fn build_pipeline_block_message(
         }
     };
 
+    let profile_prefix = resolve_profile_instructions(&block.profiles, use_cli);
+    let full_message = if profile_prefix.is_empty() {
+        base_message
+    } else {
+        format!("{profile_prefix}{base_message}")
+    };
     context
         .prompt_context
-        .augment_prompt_for_agent(&base_message, use_cli)
+        .augment_prompt_for_agent(&full_message, use_cli)
 }
 
 /// Loop-aware filename resolver for CLI upstream references.
@@ -2670,7 +2810,13 @@ fn build_loop_rerun_message_v2(
         }
     }
 
-    prompt_context.augment_prompt_for_agent(&message, use_cli)
+    let profile_prefix = resolve_profile_instructions(&block.profiles, use_cli);
+    let full_message = if profile_prefix.is_empty() {
+        message
+    } else {
+        format!("{profile_prefix}{message}")
+    };
+    prompt_context.augment_prompt_for_agent(&full_message, use_cli)
 }
 
 // ---------------------------------------------------------------------------
@@ -3100,6 +3246,24 @@ where
         return Ok(());
     }
 
+    // Warn about missing profile files in finalization blocks
+    for block in &def.finalization_blocks {
+        let missing = missing_profiles(&block.profiles);
+        if !missing.is_empty() {
+            let msg = format!(
+                "Warning: finalization block {} has missing profile(s): {} — skipped at runtime\n",
+                block.id,
+                missing.join(", ")
+            );
+            let err_path = output_root.join("_errors.log");
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&err_path)
+                .and_then(|mut f| std::io::Write::write_all(&mut f, msg.as_bytes()));
+        }
+    }
+
     // Create finalization output directory
     let fin_dir = output_root.join("finalization");
     std::fs::create_dir_all(&fin_dir)?;
@@ -3289,6 +3453,10 @@ where
 
                 let message = build_finalization_message(block, &feed_payloads, &upstream_outputs);
 
+                // Cache profile prefixes per block (once for CLI, once for API)
+                let profile_prefix_cli = resolve_profile_instructions(&block.profiles, true);
+                let profile_prefix_api = resolve_profile_instructions(&block.profiles, false);
+
                 // Execute each replica
                 let mut block_output_list: Vec<(String, String)> = Vec::new();
                 for entry in &block_entries {
@@ -3300,7 +3468,7 @@ where
                         loop_pass: 0,
                     });
 
-                    let (kind, cfg, _use_cli) = match agent_configs.get(&entry.agent) {
+                    let (kind, cfg, use_cli) = match agent_configs.get(&entry.agent) {
                         Some(c) => c,
                         None => {
                             let _ = progress_tx.send(ProgressEvent::BlockError {
@@ -3317,6 +3485,19 @@ where
                         }
                     };
 
+                    let full_message = {
+                        let prefix = if *use_cli {
+                            &profile_prefix_cli
+                        } else {
+                            &profile_prefix_api
+                        };
+                        if prefix.is_empty() {
+                            message.clone()
+                        } else {
+                            format!("{prefix}{message}")
+                        }
+                    };
+
                     let mut provider = provider_factory(*kind, cfg);
                     let rid = entry.runtime_id;
                     let agent_name = entry.agent.clone();
@@ -3324,7 +3505,7 @@ where
 
                     let result = crate::execution::run_with_cancellation(
                         &mut *provider,
-                        &message,
+                        &full_message,
                         &progress_tx,
                         &cancel,
                         {
@@ -3569,6 +3750,10 @@ where
 
             let message = build_finalization_message(block, &feed_payloads, &upstream_outputs);
 
+            // Cache profile prefixes per block (once for CLI, once for API)
+            let profile_prefix_cli = resolve_profile_instructions(&block.profiles, true);
+            let profile_prefix_api = resolve_profile_instructions(&block.profiles, false);
+
             // Execute each replica
             let mut block_output_list: Vec<(String, String)> = Vec::new();
             for entry in &block_entries {
@@ -3580,7 +3765,7 @@ where
                     loop_pass: 0,
                 });
 
-                let (kind, cfg, _use_cli) = match agent_configs.get(&entry.agent) {
+                let (kind, cfg, use_cli) = match agent_configs.get(&entry.agent) {
                     Some(c) => c,
                     None => {
                         let _ = progress_tx.send(ProgressEvent::BlockError {
@@ -3597,6 +3782,19 @@ where
                     }
                 };
 
+                let full_message = {
+                    let prefix = if *use_cli {
+                        &profile_prefix_cli
+                    } else {
+                        &profile_prefix_api
+                    };
+                    if prefix.is_empty() {
+                        message.clone()
+                    } else {
+                        format!("{prefix}{message}")
+                    }
+                };
+
                 let mut provider = provider_factory(*kind, cfg);
                 let rid = entry.runtime_id;
                 let agent_name = entry.agent.clone();
@@ -3604,7 +3802,7 @@ where
 
                 let result = crate::execution::run_with_cancellation(
                     &mut *provider,
-                    &message,
+                    &full_message,
                     &progress_tx,
                     &cancel,
                     {
@@ -3751,6 +3949,7 @@ mod tests {
             name: format!("Block#{id}"),
             agents: vec!["Claude".into()],
             prompt: format!("block {id}"),
+            profiles: vec![],
             session_id: None,
             position: (col, row),
             replicas: 1,
@@ -3776,6 +3975,101 @@ mod tests {
             finalization_connections: Vec::new(),
             data_feeds: Vec::new(),
         }
+    }
+
+    // -- is_valid_profile_name --
+
+    #[test]
+    fn valid_profile_names() {
+        assert!(is_valid_profile_name("reviewer"));
+        assert!(is_valid_profile_name("code-review"));
+        assert!(is_valid_profile_name("my_profile"));
+    }
+
+    #[test]
+    fn invalid_profile_names_path_traversal() {
+        assert!(!is_valid_profile_name(""));
+        assert!(!is_valid_profile_name("."));
+        assert!(!is_valid_profile_name(".."));
+        assert!(!is_valid_profile_name("../../secret"));
+        assert!(!is_valid_profile_name("foo/bar"));
+        assert!(!is_valid_profile_name("foo\\bar"));
+        assert!(!is_valid_profile_name("a..b"));
+    }
+
+    // -- resolve_profile_instructions_from_dir --
+
+    #[test]
+    fn resolve_profiles_empty_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = resolve_profile_instructions_from_dir(dir.path(), &[], false);
+        assert!(result.is_empty());
+        let result = resolve_profile_instructions_from_dir(dir.path(), &[], true);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn resolve_profiles_api_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("reviewer.md"), "Be a careful reviewer.").unwrap();
+        std::fs::write(dir.path().join("writer.md"), "Write clearly.").unwrap();
+        let result = resolve_profile_instructions_from_dir(
+            dir.path(),
+            &["reviewer".into(), "writer".into()],
+            false,
+        );
+        assert!(result.contains("--- Profile: reviewer ---"));
+        assert!(result.contains("Be a careful reviewer."));
+        assert!(result.contains("--- Profile: writer ---"));
+        assert!(result.contains("Write clearly."));
+    }
+
+    #[test]
+    fn resolve_profiles_cli_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("reviewer.md"), "Be a careful reviewer.").unwrap();
+        let result = resolve_profile_instructions_from_dir(dir.path(), &["reviewer".into()], true);
+        assert!(result.contains("Read these profile instruction files:"));
+        assert!(result.contains("reviewer.md"));
+        assert!(result.contains("Follow the instructions in each file."));
+        // Content should NOT be inlined for CLI mode
+        assert!(!result.contains("Be a careful reviewer."));
+    }
+
+    #[test]
+    fn resolve_profiles_missing_file_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("exists.md"), "content").unwrap();
+        let result = resolve_profile_instructions_from_dir(
+            dir.path(),
+            &["exists".into(), "missing".into()],
+            false,
+        );
+        assert!(result.contains("--- Profile: exists ---"));
+        assert!(!result.contains("missing"));
+    }
+
+    #[test]
+    fn resolve_profiles_path_traversal_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let result =
+            resolve_profile_instructions_from_dir(dir.path(), &["../../etc/passwd".into()], false);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn deserialize_block_rejects_path_traversal_profile() {
+        let toml_str = r#"
+            id = 1
+            agents = ["Claude"]
+            prompt = "test"
+            profiles = ["../../secret"]
+            position = [0, 0]
+        "#;
+        let result: Result<PipelineBlock, _> = toml::from_str(toml_str);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("invalid profile name"));
     }
 
     // -- root_blocks / terminal_blocks --
@@ -4121,6 +4415,7 @@ to = 1
                 name: "Root".into(),
                 agents: vec!["Claude".into()],
                 prompt: "block prompt".into(),
+                profiles: vec![],
                 session_id: None,
                 position: (0, 0),
                 replicas: 1,
@@ -4169,6 +4464,7 @@ to = 1
                 name: "Root".into(),
                 agents: vec!["Claude".into()],
                 prompt: String::new(),
+                profiles: vec![],
                 session_id: None,
                 position: (0, 0),
                 replicas: 1,
@@ -4250,6 +4546,7 @@ to = 1
                 name: "Root".into(),
                 agents: vec!["Claude".into()],
                 prompt: String::new(),
+                profiles: vec![],
                 session_id: None,
                 position: (0, 0),
                 replicas: 1,
@@ -4426,6 +4723,7 @@ to = 1
             name: "B".into(),
             agents: vec!["Claude".into()],
             prompt: String::new(),
+            profiles: vec![],
             session_id: Some("shared".into()),
             position: (0, 0),
             replicas: 1,
@@ -4450,6 +4748,7 @@ to = 1
                     name: "A".into(),
                     agents: vec!["Claude".into()],
                     prompt: String::new(),
+                    profiles: vec![],
                     session_id: Some("shared".into()),
                     position: (0, 0),
                     replicas: 1,
@@ -4459,6 +4758,7 @@ to = 1
                     name: "B".into(),
                     agents: vec!["Claude".into()],
                     prompt: String::new(),
+                    profiles: vec![],
                     session_id: Some("shared".into()),
                     position: (1, 0),
                     replicas: 1,
@@ -4483,6 +4783,7 @@ to = 1
                     name: "A".into(),
                     agents: vec!["Claude".into()],
                     prompt: String::new(),
+                    profiles: vec![],
                     session_id: Some("shared".into()),
                     position: (0, 0),
                     replicas: 1,
@@ -4492,6 +4793,7 @@ to = 1
                     name: "B".into(),
                     agents: vec!["GPT".into()],
                     prompt: String::new(),
+                    profiles: vec![],
                     session_id: Some("shared".into()),
                     position: (1, 0),
                     replicas: 1,
@@ -4520,6 +4822,7 @@ to = 1
                     name: "Z".into(),
                     agents: vec!["GPT".into()],
                     prompt: String::new(),
+                    profiles: vec![],
                     session_id: None,
                     position: (0, 0),
                     replicas: 1,
@@ -4529,6 +4832,7 @@ to = 1
                     name: "A".into(),
                     agents: vec!["Claude".into()],
                     prompt: String::new(),
+                    profiles: vec![],
                     session_id: None,
                     position: (1, 0),
                     replicas: 1,
@@ -4551,6 +4855,7 @@ to = 1
                     name: "Worker".into(),
                     agents: vec!["Claude".into()],
                     prompt: String::new(),
+                    profiles: vec![],
                     session_id: None,
                     position: (0, 0),
                     replicas: 1,
@@ -4560,6 +4865,7 @@ to = 1
                     name: "Worker".into(),
                     agents: vec!["Claude".into()],
                     prompt: String::new(),
+                    profiles: vec![],
                     session_id: None,
                     position: (1, 0),
                     replicas: 1,
@@ -4932,6 +5238,7 @@ keep_across_iterations = false
                     name: "A".into(),
                     agents: vec!["Claude".into()],
                     prompt: String::new(),
+                    profiles: vec![],
                     session_id: Some("shared".into()),
                     position: (0, 0),
                     replicas: 1,
@@ -4941,6 +5248,7 @@ keep_across_iterations = false
                     name: "B".into(),
                     agents: vec!["Claude".into()],
                     prompt: String::new(),
+                    profiles: vec![],
                     session_id: Some("shared".into()),
                     position: (1, 0),
                     replicas: 1,
@@ -6561,6 +6869,7 @@ keep_across_iterations = false
             name: format!("Fin#{id}"),
             agents: vec!["Claude".into()],
             prompt: format!("finalization {id}"),
+            profiles: vec![],
             session_id: None,
             position: (col, row),
             replicas: 1,

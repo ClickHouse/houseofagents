@@ -1393,6 +1393,11 @@ async fn run_single_pipeline(
                         progress_tx.clone(),
                         task_cancel,
                         |kind, cfg| {
+                            let mut dirs = vec![output.run_dir().display().to_string()];
+                            let pdir = pipeline_mod::profiles_dir();
+                            if pdir.is_dir() {
+                                dirs.push(pdir.display().to_string());
+                            }
                             provider::create_provider(
                                 kind,
                                 cfg,
@@ -1401,7 +1406,7 @@ async fn run_single_pipeline(
                                 config.max_history_messages,
                                 config.max_history_bytes,
                                 cli_timeout_secs,
-                                vec![output.run_dir().display().to_string()],
+                                dirs,
                             )
                         },
                     )
@@ -2014,6 +2019,11 @@ async fn run_batch_pipeline(
                     fin_tx,
                     cancel_for_fin,
                     |kind, cfg| {
+                        let mut dirs = vec![batch_root_for_fin.display().to_string()];
+                        let pdir = pipeline_mod::profiles_dir();
+                        if pdir.is_dir() {
+                            dirs.push(pdir.display().to_string());
+                        }
                         provider::create_provider(
                             kind,
                             cfg,
@@ -2022,7 +2032,7 @@ async fn run_batch_pipeline(
                             config_for_fin.max_history_messages,
                             config_for_fin.max_history_bytes,
                             cli_timeout_secs,
-                            vec![batch_root_for_fin.display().to_string()],
+                            dirs,
                         )
                     },
                 )

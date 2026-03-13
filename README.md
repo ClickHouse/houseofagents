@@ -338,7 +338,7 @@ Fields vary by mode for options, but every prompt flow includes Prompt, Session 
 | `?` | Open help popup (7 tabbed sections; Tab/Shift+Tab to cycle). Only when focus is not on a text field (initial prompt / session name). |
 | `Esc` | Cancel current action / back to home |
 
-Inside the **edit popup**: `Tab` cycles between Name, Agents (multiselect list — `Up`/`Down` to navigate, `Space` to toggle), Prompt (text area), Session ID, and Replicas fields. `Esc` closes the popup. Each block can have one or more agents selected. Setting Replicas > 1 spawns that many copies per agent. Total tasks per block = agents × replicas (max 32).
+Inside the **edit popup**: `Tab` cycles between Name, Agents (multiselect list — `Up`/`Down` to navigate, `Space` to toggle), Profiles (multiselect list of reusable instruction files), Prompt (text area), Session ID, and Replicas fields. `Esc` closes the popup. Each block can have one or more agents selected. Setting Replicas > 1 spawns that many copies per agent. Total tasks per block = agents × replicas (max 32).
 
 ### Order Screen (relay with 2+ agents)
 
@@ -427,6 +427,47 @@ prompt = "Refine based on feedback"
 ```
 
 `count` is the number of additional passes beyond the initial run. Each block in the sub-DAG runs `count + 1` times total. Loop wires are drawn as double-line in yellow on the canvas.
+
+### Profiles
+
+Profiles are reusable system instruction files (Markdown) stored in
+`~/.config/houseofagents/profiles/`. Assign them to pipeline blocks to
+inject instructions into every message sent by that block.
+
+**Create a profile:**
+```bash
+mkdir -p ~/.config/houseofagents/profiles
+cat > ~/.config/houseofagents/profiles/reviewer.md << 'EOF'
+You are a senior code reviewer. Focus on:
+- Security vulnerabilities
+- Performance implications
+- API contract violations
+EOF
+```
+
+**Assign profiles:** Open the pipeline builder, select a block, press `e` to edit,
+Tab to the Profiles field, and Space to toggle profiles on/off.
+
+**CLI vs API behavior:**
+- **API agents:** Profile content is read and inlined into the message.
+- **CLI agents:** Profile file paths are passed (the CLI tool reads them).
+
+Profiles persist in the pipeline TOML under each block's `profiles` key.
+Values are file stems without the `.md` extension:
+```toml
+[[blocks]]
+id = 1
+agents = ["Claude"]
+profiles = ["reviewer", "security"]
+prompt = "Review this PR"
+position = [0, 0]
+```
+
+Finalization blocks support profiles too since they share the same block model.
+
+**Missing profiles:** If a profile file is deleted or renamed after assignment, the
+edit dialog shows it in yellow with `[!]` and setup analysis marks it `[missing]`.
+Missing profiles are silently skipped at runtime — no instructions are injected for them.
 
 ### Finalization DAG
 

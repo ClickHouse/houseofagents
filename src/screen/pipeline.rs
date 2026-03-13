@@ -99,6 +99,32 @@ pub(crate) fn separator_y_offset(blocks: &[crate::execution::pipeline::PipelineB
     (max_row as i16 + 1) * CELL_H as i16
 }
 
+/// Prompt/profile label for block cell rendering.
+fn block_prompt_profile_label(
+    block: &crate::execution::pipeline::PipelineBlock,
+    max_width: usize,
+) -> String {
+    if block.profiles.is_empty() {
+        if block.prompt.is_empty() {
+            "Prompt: no".into()
+        } else {
+            "Prompt: yes".into()
+        }
+    } else {
+        let p = if block.prompt.is_empty() {
+            "P:no"
+        } else {
+            "P:yes"
+        };
+        let full = format!("{p} Prof:{}", block.profiles.len());
+        if full.len() <= max_width {
+            full
+        } else {
+            p.into()
+        }
+    }
+}
+
 /// Choose arrow character based on the direction of a wire segment's endpoint.
 fn arrow_for_seg(seg: &WireSeg) -> char {
     let dx = seg.x2 - seg.x1;
@@ -451,13 +477,9 @@ fn draw_canvas(f: &mut Frame, app: &App, area: Rect) {
             f.render_widget(agent_p, Rect::new(inner.x, inner.y, inner.width, 1));
         }
 
-        // Line 2: Prompt status
+        // Line 2: Prompt/profile status
         if inner.height > 1 && inner.width > 0 {
-            let prompt_label = if block.prompt.is_empty() {
-                "Prompt: no"
-            } else {
-                "Prompt: yes"
-            };
+            let prompt_label = block_prompt_profile_label(block, inner.width as usize);
             let prompt_p = Paragraph::new(Span::styled(
                 prompt_label,
                 Style::default().fg(Color::DarkGray),
@@ -879,13 +901,9 @@ fn draw_canvas(f: &mut Frame, app: &App, area: Rect) {
                 f.render_widget(agent_p, Rect::new(inner.x, inner.y, inner.width, 1));
             }
 
-            // Line 2: Prompt status
+            // Line 2: Prompt/profile status
             if inner.height > 1 && inner.width > 0 {
-                let prompt_label = if block.prompt.is_empty() {
-                    "Prompt: no"
-                } else {
-                    "Prompt: yes"
-                };
+                let prompt_label = block_prompt_profile_label(block, inner.width as usize);
                 let prompt_p = Paragraph::new(Span::styled(
                     prompt_label,
                     Style::default().fg(Color::DarkGray),
@@ -1563,11 +1581,7 @@ pub(crate) fn render_dag_readonly(
         }
 
         if inner.height > 1 && inner.width > 0 {
-            let prompt_label = if block.prompt.is_empty() {
-                "no prompt"
-            } else {
-                "has prompt"
-            };
+            let prompt_label = block_prompt_profile_label(block, inner.width as usize);
             let prompt_p = Paragraph::new(Span::styled(
                 prompt_label,
                 Style::default().fg(Color::DarkGray),
@@ -1798,20 +1812,28 @@ fn draw_edit_popup(f: &mut Frame, app: &App, area: Rect) {
 
     // Agent list height: 1 label + min(agent_count, 6) rows
     let agent_list_h = 1 + (app.config.agents.len() as u16).min(6);
+    let profile_count = app.pipeline.pipeline_edit_profile_list.len() as u16;
+    let profile_list_h = if profile_count == 0 {
+        2
+    } else {
+        1 + profile_count.min(4)
+    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2),            // Name          [0]
-            Constraint::Length(1),            // spacer        [1]
-            Constraint::Length(agent_list_h), // Agents list   [2]
-            Constraint::Length(1),            // spacer        [3]
-            Constraint::Min(6),               // Prompt        [4]
-            Constraint::Length(1),            // spacer        [5]
-            Constraint::Length(2),            // Session ID    [6]
-            Constraint::Length(1),            // spacer        [7]
-            Constraint::Length(2),            // Replicas      [8]
-            Constraint::Length(1),            // spacer        [9]
-            Constraint::Length(1),            // hint          [10]
+            Constraint::Length(2),              // [0]  Name
+            Constraint::Length(1),              // [1]  spacer
+            Constraint::Length(agent_list_h),   // [2]  Agents list
+            Constraint::Length(1),              // [3]  spacer
+            Constraint::Length(profile_list_h), // [4]  Profiles list
+            Constraint::Length(1),              // [5]  spacer
+            Constraint::Min(6),                 // [6]  Prompt
+            Constraint::Length(1),              // [7]  spacer
+            Constraint::Length(2),              // [8]  Session ID
+            Constraint::Length(1),              // [9]  spacer
+            Constraint::Length(2),              // [10] Replicas
+            Constraint::Length(1),              // [11] spacer
+            Constraint::Length(1),              // [12] hint
         ])
         .split(inner);
 
@@ -1881,6 +1903,80 @@ fn draw_edit_popup(f: &mut Frame, app: &App, area: Rect) {
     let agent_p = Paragraph::new(all_agent_lines).scroll((scroll_offset, 0));
     f.render_widget(agent_p, chunks[2]);
 
+    // Profile multiselect list
+    let profile_focus = app.pipeline.pipeline_edit_field == PipelineEditField::Profile;
+    if app.pipeline.pipeline_edit_profile_list.is_empty() {
+        let label = Line::from(Span::styled(
+            "Profiles:",
+            Style::default().fg(if profile_focus {
+                Color::Cyan
+            } else {
+                Color::White
+            }),
+        ));
+        let none_line = Line::from(Span::styled(
+            "(none found)",
+            Style::default().fg(Color::DarkGray),
+        ));
+        let profile_p = Paragraph::new(vec![label, none_line]);
+        f.render_widget(profile_p, chunks[4]);
+    } else {
+        let profile_lines: Vec<Line> = app
+            .pipeline
+            .pipeline_edit_profile_list
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                let selected = app
+                    .pipeline
+                    .pipeline_edit_profile_selection
+                    .get(i)
+                    .copied()
+                    .unwrap_or(false);
+                let is_orphan = app.pipeline.pipeline_edit_profile_orphaned.contains(name);
+                let checkbox = if selected { "[x] " } else { "[ ] " };
+                let color = if is_orphan {
+                    Color::Yellow
+                } else if selected {
+                    Color::Green
+                } else {
+                    Color::White
+                };
+                let label = if is_orphan {
+                    format!("{checkbox}{name} [!]")
+                } else {
+                    format!("{checkbox}{name}")
+                };
+                let is_cursor = profile_focus && i == app.pipeline.pipeline_edit_profile_cursor;
+                let style = if is_cursor {
+                    Style::default()
+                        .fg(color)
+                        .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+                } else {
+                    Style::default().fg(color)
+                };
+                Line::from(Span::styled(label, style))
+            })
+            .collect();
+        let profile_label = Line::from(Span::styled(
+            "Profiles:",
+            Style::default().fg(if profile_focus {
+                Color::Cyan
+            } else {
+                Color::White
+            }),
+        ));
+        let mut all_profile_lines = vec![profile_label];
+        all_profile_lines.extend(profile_lines);
+        let profile_visible_rows = (chunks[4].height as usize).saturating_sub(1);
+        app.pipeline
+            .pipeline_edit_profile_visible
+            .set(profile_visible_rows);
+        let profile_scroll_offset = app.pipeline.pipeline_edit_profile_scroll as u16;
+        let profile_p = Paragraph::new(all_profile_lines).scroll((profile_scroll_offset, 0));
+        f.render_widget(profile_p, chunks[4]);
+    }
+
     // Prompt textarea
     let prompt_focus = app.pipeline.pipeline_edit_field == PipelineEditField::Prompt;
     let prompt_style = if prompt_focus {
@@ -1892,8 +1988,8 @@ fn draw_edit_popup(f: &mut Frame, app: &App, area: Rect) {
         .title(" Prompt ")
         .borders(Borders::ALL)
         .border_style(prompt_style);
-    let prompt_inner = prompt_block.inner(chunks[4]);
-    f.render_widget(prompt_block, chunks[4]);
+    let prompt_inner = prompt_block.inner(chunks[6]);
+    f.render_widget(prompt_block, chunks[6]);
 
     let (prompt_scroll, prompt_cursor_col, prompt_cursor_row) = if prompt_focus {
         prompt_cursor_layout(
@@ -1933,7 +2029,7 @@ fn draw_edit_popup(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("Session ID: ", Style::default().fg(Color::White)),
             Span::styled("(managed by runtime)", Style::default().fg(Color::DarkGray)),
         ]);
-        f.render_widget(Paragraph::new(sess_line), chunks[6]);
+        f.render_widget(Paragraph::new(sess_line), chunks[8]);
     } else {
         let sess_focus = app.pipeline.pipeline_edit_field == PipelineEditField::SessionId;
         let sess_style = if sess_focus {
@@ -1947,7 +2043,7 @@ fn draw_edit_popup(f: &mut Frame, app: &App, area: Rect) {
             Span::raw(&app.pipeline.pipeline_edit_session_buf),
             Span::styled("]", sess_style),
         ]);
-        f.render_widget(Paragraph::new(sess_line), chunks[6]);
+        f.render_widget(Paragraph::new(sess_line), chunks[8]);
     }
 
     // Replicas
@@ -1984,12 +2080,12 @@ fn draw_edit_popup(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(rep_hint, Style::default().fg(Color::DarkGray)),
         ])
     };
-    f.render_widget(Paragraph::new(rep_line), chunks[8]);
+    f.render_widget(Paragraph::new(rep_line), chunks[10]);
 
     // Hint
-    let hint = Paragraph::new("  Tab: next  Enter: save  Esc: back")
+    let hint = Paragraph::new("  Tab: next  Space: toggle  Enter: save  Esc: back")
         .style(Style::default().fg(Color::DarkGray));
-    f.render_widget(hint, chunks[10]);
+    f.render_widget(hint, chunks[12]);
 }
 
 fn draw_file_dialog(f: &mut Frame, app: &App, area: Rect) {
@@ -2478,6 +2574,7 @@ mod routing_tests {
             name: String::new(),
             agents: vec!["test".into()],
             prompt: String::new(),
+            profiles: vec![],
             session_id: None,
             position: (col, row),
             replicas: 1,

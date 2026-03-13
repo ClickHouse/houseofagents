@@ -309,6 +309,11 @@ pub(super) fn start_pipeline_execution(app: &mut App) {
                     progress_tx.clone(),
                     cancel,
                     |kind, cfg| {
+                        let mut dirs = vec![run_dir.display().to_string()];
+                        let pdir = pipeline_mod::profiles_dir();
+                        if pdir.is_dir() {
+                            dirs.push(pdir.display().to_string());
+                        }
                         provider::create_provider(
                             kind,
                             cfg,
@@ -317,7 +322,7 @@ pub(super) fn start_pipeline_execution(app: &mut App) {
                             config.max_history_messages,
                             config.max_history_bytes,
                             cli_timeout,
-                            vec![run_dir.display().to_string()],
+                            dirs,
                         )
                     },
                 )
@@ -853,6 +858,11 @@ pub(super) fn start_multi_pipeline_execution(
                     fin_tx,
                     cancel_for_fin,
                     |kind, cfg| {
+                        let mut dirs = vec![batch_root_for_fin.display().to_string()];
+                        let pdir = pipeline_mod::profiles_dir();
+                        if pdir.is_dir() {
+                            dirs.push(pdir.display().to_string());
+                        }
                         provider::create_provider(
                             kind,
                             cfg,
@@ -861,7 +871,7 @@ pub(super) fn start_multi_pipeline_execution(
                             config_for_fin.max_history_messages,
                             config_for_fin.max_history_bytes,
                             cli_timeout,
-                            vec![batch_root_for_fin.display().to_string()],
+                            dirs,
                         )
                     },
                 )

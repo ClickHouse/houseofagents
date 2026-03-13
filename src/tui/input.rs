@@ -468,6 +468,7 @@ pub(super) fn handle_pipeline_paste(app: &mut App, text: &str) {
                     app.pipeline.pipeline_edit_session_buf.len();
             }
             PipelineEditField::Agent => {}
+            PipelineEditField::Profile => {}
             PipelineEditField::Replicas => {
                 let clean: String = text.chars().filter(|c| c.is_ascii_digit()).collect();
                 app.pipeline.pipeline_edit_replicas_buf.push_str(&clean);
@@ -866,6 +867,7 @@ pub(super) fn handle_pipeline_builder_key(app: &mut App, key: KeyEvent) {
                     name: format!("Block#{id}"),
                     agents: vec![default_agent],
                     prompt: String::new(),
+                    profiles: vec![],
                     session_id: None,
                     position: pos,
                     replicas: 1,
@@ -892,6 +894,7 @@ pub(super) fn handle_pipeline_builder_key(app: &mut App, key: KeyEvent) {
                     name: format!("Fin#{id}"),
                     agents: vec![default_agent],
                     prompt: String::new(),
+                    profiles: vec![],
                     session_id: None,
                     position: pos,
                     replicas: 1,
@@ -1082,6 +1085,36 @@ pub(super) fn handle_pipeline_builder_key(app: &mut App, key: KeyEvent) {
                         .collect();
                     app.pipeline.pipeline_edit_agent_cursor = 0;
                     app.pipeline.pipeline_edit_agent_scroll = 0;
+                    // Profile selection — include on-disk profiles + orphaned (missing) ones
+                    app.pipeline.pipeline_edit_profile_original_order = block.profiles.clone();
+                    let profile_files = pipeline_mod::list_profile_files().unwrap_or_default();
+                    let mut profile_list: Vec<String> = profile_files
+                        .iter()
+                        .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(String::from))
+                        .collect();
+                    // Append orphaned profiles (assigned but not on disk) so user can see/remove them
+                    let orphaned: Vec<String> = block
+                        .profiles
+                        .iter()
+                        .filter(|p| !profile_list.contains(p))
+                        .cloned()
+                        .collect();
+                    let orphan_start = profile_list.len();
+                    profile_list.extend(orphaned);
+                    app.pipeline.pipeline_edit_profile_list = profile_list;
+                    app.pipeline.pipeline_edit_profile_selection = app
+                        .pipeline
+                        .pipeline_edit_profile_list
+                        .iter()
+                        .map(|name| block.profiles.contains(name))
+                        .collect();
+                    // Track which entries are orphaned (for UI marker)
+                    app.pipeline.pipeline_edit_profile_orphaned = (orphan_start
+                        ..app.pipeline.pipeline_edit_profile_list.len())
+                        .map(|i| app.pipeline.pipeline_edit_profile_list[i].clone())
+                        .collect();
+                    app.pipeline.pipeline_edit_profile_cursor = 0;
+                    app.pipeline.pipeline_edit_profile_scroll = 0;
                     app.pipeline.pipeline_edit_prompt_buf = block.prompt.clone();
                     app.pipeline.pipeline_edit_prompt_cursor = block.prompt.len();
                     // Finalization blocks use hardcoded session keys at runtime,
@@ -1499,7 +1532,8 @@ pub(super) fn handle_pipeline_edit_key(app: &mut App, key: KeyEvent) {
                 .unwrap_or(false);
             app.pipeline.pipeline_edit_field = match app.pipeline.pipeline_edit_field {
                 PipelineEditField::Name => PipelineEditField::Agent,
-                PipelineEditField::Agent => PipelineEditField::Prompt,
+                PipelineEditField::Agent => PipelineEditField::Profile,
+                PipelineEditField::Profile => PipelineEditField::Prompt,
                 // Skip SessionId for finalization blocks (hardcoded at runtime)
                 PipelineEditField::Prompt if is_fin_block => PipelineEditField::Replicas,
                 PipelineEditField::Prompt => PipelineEditField::SessionId,
@@ -1511,6 +1545,7 @@ pub(super) fn handle_pipeline_edit_key(app: &mut App, key: KeyEvent) {
             match app.pipeline.pipeline_edit_field {
                 PipelineEditField::Name
                 | PipelineEditField::Agent
+                | PipelineEditField::Profile
                 | PipelineEditField::SessionId
                 | PipelineEditField::Replicas => {
                     // Confirm and save
@@ -1549,6 +1584,31 @@ pub(super) fn handle_pipeline_edit_key(app: &mut App, key: KeyEvent) {
                                     .unwrap_or_else(|| "Claude".into())];
                             }
                             block.prompt = app.pipeline.pipeline_edit_prompt_buf.clone();
+                            {
+                                // Collect selected profile names from UI
+                                let selected: Vec<String> = app
+                                    .pipeline
+                                    .pipeline_edit_profile_list
+                                    .iter()
+                                    .zip(&app.pipeline.pipeline_edit_profile_selection)
+                                    .filter(|(_, &selected)| selected)
+                                    .map(|(name, _)| name.clone())
+                                    .collect();
+                                // Preserve original order: keep existing profiles in their
+                                // original position, append newly-added ones at the end.
+                                let orig = &app.pipeline.pipeline_edit_profile_original_order;
+                                let mut ordered: Vec<String> = orig
+                                    .iter()
+                                    .filter(|p| selected.contains(p))
+                                    .cloned()
+                                    .collect();
+                                for name in &selected {
+                                    if !orig.contains(name) {
+                                        ordered.push(name.clone());
+                                    }
+                                }
+                                block.profiles = ordered;
+                            }
                             // Finalization blocks use hardcoded session keys at
                             // runtime — don't save user-edited session_id.
                             if !editing_fin {
@@ -1642,6 +1702,47 @@ pub(super) fn handle_pipeline_edit_key(app: &mut App, key: KeyEvent) {
                                 sync_pipeline_edit_replicas_buf(app);
                             }
                         }
+                    }
+                }
+                _ => {}
+            },
+            PipelineEditField::Profile => match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if !app.pipeline.pipeline_edit_profile_list.is_empty() {
+                        app.pipeline.pipeline_edit_profile_cursor =
+                            app.pipeline.pipeline_edit_profile_cursor.saturating_sub(1);
+                        if app.pipeline.pipeline_edit_profile_cursor
+                            < app.pipeline.pipeline_edit_profile_scroll
+                        {
+                            app.pipeline.pipeline_edit_profile_scroll =
+                                app.pipeline.pipeline_edit_profile_cursor;
+                        }
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if !app.pipeline.pipeline_edit_profile_list.is_empty() {
+                        let max = app
+                            .pipeline
+                            .pipeline_edit_profile_list
+                            .len()
+                            .saturating_sub(1);
+                        if app.pipeline.pipeline_edit_profile_cursor < max {
+                            app.pipeline.pipeline_edit_profile_cursor += 1;
+                        }
+                        let visible = app.pipeline.pipeline_edit_profile_visible.get().max(1);
+                        if app.pipeline.pipeline_edit_profile_cursor
+                            >= app.pipeline.pipeline_edit_profile_scroll + visible
+                        {
+                            app.pipeline.pipeline_edit_profile_scroll =
+                                app.pipeline.pipeline_edit_profile_cursor + 1 - visible;
+                        }
+                    }
+                }
+                KeyCode::Char(' ') => {
+                    let idx = app.pipeline.pipeline_edit_profile_cursor;
+                    if idx < app.pipeline.pipeline_edit_profile_selection.len() {
+                        app.pipeline.pipeline_edit_profile_selection[idx] =
+                            !app.pipeline.pipeline_edit_profile_selection[idx];
                     }
                 }
                 _ => {}
