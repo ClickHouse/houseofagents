@@ -3,7 +3,7 @@ use crate::app::{
     PipelineLoopEditField,
 };
 use crate::execution::pipeline::BlockId;
-use crate::execution::truncate_chars;
+use crate::execution::{fit_display_width, truncate_chars};
 use crate::screen::centered_rect;
 use crate::screen::help;
 use crate::screen::prompt::{char_wrap_text, prompt_cursor_layout};
@@ -2398,8 +2398,8 @@ fn draw_session_config_popup(f: &mut Frame, app: &App, area: Rect) {
         let session = &sessions[si];
         let is_selected = si == cursor;
 
-        let agent_col = truncate_chars(&session.agent, 14);
-        let label_col = truncate_chars(&session.display_label, 16);
+        let agent_col = fit_display_width(&session.agent, 15);
+        let label_col = fit_display_width(&session.display_label, 17);
         let keep_col = if session.keep_across_iterations {
             "[x]"
         } else {
@@ -2418,8 +2418,8 @@ fn draw_session_config_popup(f: &mut Frame, app: &App, area: Rect) {
         };
 
         let row = Line::from(vec![
-            Span::styled(format!("{agent_col:<15}"), style),
-            Span::styled(format!("{label_col:<17}"), style),
+            Span::styled(agent_col, style),
+            Span::styled(label_col, style),
             Span::styled(
                 format!("{keep_col:<6}"),
                 if session.keep_across_iterations {

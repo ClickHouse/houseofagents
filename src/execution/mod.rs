@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use unicode_width::UnicodeWidthChar;
 
 const DIAGNOSTIC_SUFFIX: &str =
     "Write any encountered issues (for example permission, tool, or environment issues) to an explicit \"Errors\" section of your report.";
@@ -333,6 +334,51 @@ pub fn truncate_chars(s: &str, max_chars: usize) -> String {
     }
 }
 
+/// Fit a string to exactly `width` terminal columns: truncate with "..." if
+/// wider, pad with trailing spaces if narrower.
+///
+/// Uses unicode display width so CJK and other wide glyphs are measured
+/// correctly. Only appends "..." when the string actually exceeds `width`,
+/// so borderline-length names are never truncated needlessly.
+///
+/// Requires `width >= 3` so "..." can fit. For `width < 3`, returns spaces.
+pub fn fit_display_width(s: &str, width: usize) -> String {
+    if width < 3 {
+        return " ".repeat(width);
+    }
+    let str_width: usize = s
+        .chars()
+        .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
+        .sum();
+    if str_width <= width {
+        let pad = width - str_width;
+        let mut out = s.to_string();
+        for _ in 0..pad {
+            out.push(' ');
+        }
+        return out;
+    }
+    // Truncate: fit chars into (width - 3) display columns, then append "..."
+    let target = width - 3; // safe: width >= 3
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in s.chars() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + w > target {
+            break;
+        }
+        out.push(ch);
+        used += w;
+    }
+    out.push_str("...");
+    // Pad remainder (e.g. wide char skipped left a gap before "...")
+    let total = used + 3;
+    for _ in total..width {
+        out.push(' ');
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,6 +422,54 @@ mod tests {
     #[test]
     fn truncate_chars_zero_limit() {
         assert_eq!(truncate_chars("abc", 0), "...");
+    }
+
+    #[test]
+    fn fit_display_width_pads_short_string() {
+        assert_eq!(fit_display_width("hello", 10), "hello     ");
+    }
+
+    #[test]
+    fn fit_display_width_exact_fit_no_pad() {
+        assert_eq!(fit_display_width("abcdefghijklmno", 15), "abcdefghijklmno");
+    }
+
+    #[test]
+    fn fit_display_width_truncates_ascii() {
+        // 16 chars in 15-wide column → 12 chars + "..." = 15 cols
+        assert_eq!(fit_display_width("abcdefghijklmnop", 15), "abcdefghijkl...");
+    }
+
+    #[test]
+    fn fit_display_width_cjk_truncate_and_pad() {
+        // "你好世界" = 8 cols, in 7-wide: target=4, "你好"(4)+"..."(3) = 7
+        assert_eq!(fit_display_width("你好世界", 7), "你好...");
+    }
+
+    #[test]
+    fn fit_display_width_cjk_fits_with_pad() {
+        // "你好世界" = 8 cols, in 10-wide: pad 2 spaces
+        assert_eq!(fit_display_width("你好世界", 10), "你好世界  ");
+    }
+
+    #[test]
+    fn fit_display_width_cjk_gap_after_truncation() {
+        // "你好世x" = 2+2+2+1 = 7 cols. In 6-wide column:
+        // target = 3 cols. "你"(2) fits, "好"(2+2=4) > 3, stop.
+        // "你"(2) + "..."(3) = 5, pad 1 space → 6 cols total
+        assert_eq!(fit_display_width("你好世x", 6), "你... ");
+    }
+
+    #[test]
+    fn fit_display_width_width_below_three() {
+        assert_eq!(fit_display_width("hello", 2), "  ");
+        assert_eq!(fit_display_width("hello", 0), "");
+    }
+
+    #[test]
+    fn fit_display_width_borderline_no_truncation() {
+        // 13-char agent name in 15-wide column: show fully, pad 2
+        assert_eq!(fit_display_width("thirteen_char", 15), "thirteen_char  ");
     }
 
     #[test]
