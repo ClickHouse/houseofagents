@@ -39,7 +39,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     draw_mode_panel(f, app, main_chunks[1]);
 
     // Help bar
-    let help = Paragraph::new(Line::from(vec![
+    let mut help_spans = vec![
         Span::styled("Space", Style::default().fg(Color::Yellow)),
         Span::raw(": toggle  "),
         Span::styled("Tab", Style::default().fg(Color::Yellow)),
@@ -48,12 +48,18 @@ pub fn draw(f: &mut Frame, app: &App) {
         Span::raw(": proceed  "),
         Span::styled("e", Style::default().fg(Color::Yellow)),
         Span::raw(": edit config  "),
+    ];
+    if app.memory.store.is_some() {
+        help_spans.push(Span::styled("M", Style::default().fg(Color::Yellow)));
+        help_spans.push(Span::raw(": memory  "));
+    }
+    help_spans.extend([
         Span::styled("?", Style::default().fg(Color::Yellow)),
         Span::raw(": help  "),
         Span::styled("q", Style::default().fg(Color::Yellow)),
         Span::raw(": quit"),
-    ]))
-    .block(Block::default().borders(Borders::TOP));
+    ]);
+    let help = Paragraph::new(Line::from(help_spans)).block(Block::default().borders(Borders::TOP));
     f.render_widget(help, chunks[2]);
 
     // Edit popup overlay

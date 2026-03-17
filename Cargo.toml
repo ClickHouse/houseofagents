@@ -25,6 +25,7 @@ pulldown-cmark = "0.10"
 fastrand = "2"
 uuid = { version = "1", features = ["v4"] }
 unicode-width = "0.2"
+rusqlite = { version = "0.33", features = ["bundled"] }
 
 [dev-dependencies]
 tempfile = "3"

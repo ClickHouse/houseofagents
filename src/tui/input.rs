@@ -53,6 +53,7 @@ pub(super) fn handle_key(app: &mut App, key: KeyEvent) {
         Screen::Running => handle_running_key(app, key),
         Screen::Results => handle_results_key(app, key),
         Screen::Pipeline => handle_pipeline_key(app, key),
+        Screen::Memory => handle_memory_key(app, key),
     }
 }
 
@@ -89,6 +90,12 @@ pub(super) fn handle_home_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('q') => app.should_quit = true,
         KeyCode::Char('?') => {
             app.help_popup.open(1);
+        }
+        KeyCode::Char('M') => {
+            if app.config.memory.enabled && app.memory.store.is_some() {
+                refresh_memory_list(app);
+                app.screen = Screen::Memory;
+            }
         }
         KeyCode::Char('e') => {
             app.edit_popup.visible = true;
@@ -2921,7 +2928,31 @@ pub(super) fn handle_edit_popup_key(app: &mut App, key: KeyEvent) {
                 if new_output_dir.is_empty() {
                     app.error_modal = Some("Output directory cannot be empty".into());
                 } else {
+                    let old_output_dir = app.config.output_dir.clone();
                     app.config.output_dir = new_output_dir.to_string();
+                    // Reopen memory store if db_path is derived from output_dir
+                    if app.config.memory.enabled
+                        && app.config.memory.db_path.is_empty()
+                        && new_output_dir != old_output_dir
+                    {
+                        let db_path = app.config.resolved_output_dir().join("memory.db");
+                        match crate::memory::store::MemoryStore::open(&db_path) {
+                            Ok(store) => {
+                                app.memory.store = Some(store);
+                                app.memory.project_id = crate::memory::project::detect_project_id(
+                                    &app.config.memory.project_id,
+                                );
+                            }
+                            Err(e) => {
+                                // Clear stale store so recall/insert don't silently
+                                // use the old DB while artifacts go to the new dir.
+                                app.memory.store = None;
+                                app.error_modal = Some(format!(
+                                    "Memory store failed to reopen at new output_dir: {e}"
+                                ));
+                            }
+                        }
+                    }
                 }
             } else if matches!(app.edit_popup.field, EditField::AgentName) {
                 commit_agent_rename(app);
@@ -3578,4 +3609,64 @@ fn sync_pipeline_edit_replicas_buf(app: &mut App) {
         .unwrap_or(1)
         .clamp(1, max);
     app.pipeline.pipeline_edit_replicas_buf = v.to_string();
+}
+
+// ---------------------------------------------------------------------------
+// Memory management screen
+// ---------------------------------------------------------------------------
+
+fn refresh_memory_list(app: &mut App) {
+    if let Some(ref store) = app.memory.store {
+        if let Ok(memories) = store.list(&app.memory.project_id, app.memory.management_kind_filter)
+        {
+            app.memory.management_memories = memories;
+            if app.memory.management_cursor >= app.memory.management_memories.len() {
+                app.memory.management_cursor =
+                    app.memory.management_memories.len().saturating_sub(1);
+            }
+        }
+    }
+}
+
+fn handle_memory_key(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.memory.management_cursor = app.memory.management_cursor.saturating_sub(1);
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            let max = app.memory.management_memories.len().saturating_sub(1);
+            if app.memory.management_cursor < max {
+                app.memory.management_cursor += 1;
+            }
+        }
+        KeyCode::Char('d') => {
+            if let Some(mem) = app
+                .memory
+                .management_memories
+                .get(app.memory.management_cursor)
+            {
+                let id = mem.id;
+                if let Some(ref store) = app.memory.store {
+                    let _ = store.delete(id);
+                }
+                refresh_memory_list(app);
+            }
+        }
+        KeyCode::Char('f') => {
+            // Cycle kind filter: None → Decision → Observation → Summary → Principle → None
+            use crate::memory::types::MemoryKind;
+            app.memory.management_kind_filter = match app.memory.management_kind_filter {
+                None => Some(MemoryKind::Decision),
+                Some(MemoryKind::Decision) => Some(MemoryKind::Observation),
+                Some(MemoryKind::Observation) => Some(MemoryKind::Summary),
+                Some(MemoryKind::Summary) => Some(MemoryKind::Principle),
+                Some(MemoryKind::Principle) => None,
+            };
+            refresh_memory_list(app);
+        }
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.screen = Screen::Home;
+        }
+        _ => {}
+    }
 }

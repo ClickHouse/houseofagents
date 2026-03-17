@@ -1,5 +1,6 @@
 pub mod help;
 pub mod home;
+pub mod memory;
 pub mod order;
 pub mod pipeline;
 pub mod prompt;
@@ -18,6 +19,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::Running => running::draw(f, app),
         Screen::Results => results::draw(f, app),
         Screen::Pipeline => pipeline::draw(f, app),
+        Screen::Memory => memory::draw(f, app),
     }
 }
 

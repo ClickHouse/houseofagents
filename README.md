@@ -45,6 +45,7 @@ Each agent can run in API mode or CLI mode (`use_cli = true`). Mix and match fre
 - **Config editor** — add/remove/rename agents, edit settings, timeouts, and models live with a popup (`e`)
 - **Model picker** — browse available models from the API directly inside the config editor (`l`)
 - **CLI print mode** — Anthropic agents in CLI mode can toggle between print (`-p`) and agent mode
+- **Cross-run memory** — SQLite-backed memory system that recalls relevant context from previous runs and extracts new memories post-run (decision, observation, summary, principle)
 
 ## Requirements
 
@@ -121,6 +122,7 @@ Headless mode (noninteractive):
       --consolidation-prompt <S>  Extra consolidation instructions
       --output-format <FMT>       Output format: text, json [default: text]
       --quiet                     Suppress stderr progress output
+      --no-memory                 Disable cross-run memory
 ```
 
 ## Noninteractive (Headless) Mode
@@ -246,6 +248,20 @@ extra_cli_args = ""
 | `pipeline_block_concurrency` | Max concurrent pipeline blocks. `0` = unlimited (default). |
 | `diagnostic_provider` | Agent name for the automatic diagnostics pass (disabled when unset) |
 
+**Memory settings** (`[memory]`):
+
+| Field | Description |
+|-------|-------------|
+| `enabled` | Enable cross-run memory (`true` by default) |
+| `db_path` | Custom SQLite database path (default: `{output_dir}/memory.db`) |
+| `project_id` | Override automatic project detection (default: derived from git remote or cwd) |
+| `max_recall` | Max memories to recall per run (default: 15) |
+| `max_recall_bytes` | Byte budget for recalled memory context (default: 8192) |
+| `extraction_agent` | Agent to use for post-run memory extraction (default: first participating agent, then first configured) |
+| `disable_extraction` | Disable post-run memory extraction (default: false) |
+| `observation_ttl_days` | Days before observations expire (default: 90) |
+| `summary_ttl_days` | Days before summaries expire (default: 180) |
+
 **Agent settings** (`[[agents]]`):
 
 | Field | Description |
@@ -272,9 +288,19 @@ Anthropic `thinking_effort = "max"` is rejected in API mode. In CLI mode, House 
 | `Space` | Toggle agent / mode selection |
 | `Tab` | Switch panels |
 | `e` | Open config editor |
+| `M` | Open memory management (when memory enabled) |
 | `?` | Open help popup |
 | `Enter` | Continue to prompt |
 | `q` | Quit |
+
+### Memory Management
+
+| Key | Action |
+|-----|--------|
+| `j` / `k` / `Up` / `Down` | Navigate memories |
+| `d` | Delete selected memory |
+| `f` | Cycle kind filter (all → decision → observation → summary → principle) |
+| `q` / `Esc` | Back to home |
 
 ### Config Editor
 
@@ -390,6 +416,7 @@ output_dir/
       OpenAI_iter2.md
       consolidated_Claude.md       # Optional: merged output
       errors.md                    # Optional: diagnostics report
+      _memories.json               # Optional: extracted memories from this run
       _errors.log                  # Application-level error log
     swift-falcon/                  # auto-generated name (no session provided)
       ...

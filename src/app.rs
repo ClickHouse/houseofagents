@@ -178,6 +178,7 @@ pub enum Screen {
     Running,
     Results,
     Pipeline,
+    Memory,
 }
 
 pub struct App {
@@ -215,8 +216,25 @@ pub struct App {
     // Setup analysis popup
     pub(crate) setup_analysis: SetupAnalysisState,
 
+    // Memory
+    pub(crate) memory: MemoryState,
+
     // Error modal
     pub(crate) error_modal: Option<String>,
+}
+
+#[derive(Default)]
+pub(crate) struct MemoryState {
+    pub store: Option<crate::memory::store::MemoryStore>,
+    pub project_id: String,
+    pub last_recalled_count: usize,
+    pub extraction_rx:
+        Vec<mpsc::UnboundedReceiver<Result<Vec<crate::memory::types::ExtractedMemory>, String>>>,
+    pub last_extraction_count: Option<usize>,
+    // Management screen state
+    pub management_memories: Vec<crate::memory::types::Memory>,
+    pub management_cursor: usize,
+    pub management_kind_filter: Option<crate::memory::types::MemoryKind>,
 }
 
 pub(crate) struct PromptState {
@@ -554,6 +572,29 @@ impl App {
         let session_overrides =
             crate::runtime_support::compute_session_overrides(&config.agents, &cli_available);
 
+        let memory = if config.memory.enabled {
+            let db_path = if config.memory.db_path.is_empty() {
+                config.resolved_output_dir().join("memory.db")
+            } else {
+                std::path::PathBuf::from(&config.memory.db_path)
+            };
+            match crate::memory::store::MemoryStore::open(&db_path) {
+                Ok(store) => MemoryState {
+                    store: Some(store),
+                    project_id: crate::memory::project::detect_project_id(
+                        &config.memory.project_id,
+                    ),
+                    ..Default::default()
+                },
+                Err(e) => {
+                    eprintln!("Warning: memory store failed to open ({db_path:?}): {e}");
+                    MemoryState::default()
+                }
+            }
+        } else {
+            MemoryState::default()
+        };
+
         Self {
             config,
             config_path_override: None,
@@ -577,6 +618,7 @@ impl App {
             cli_available,
             help_popup: HelpPopupState::new(),
             setup_analysis: SetupAnalysisState::new(),
+            memory,
             error_modal: None,
         }
     }
@@ -1347,6 +1389,7 @@ mod tests {
             max_history_bytes: 102400,
             pipeline_block_concurrency: 0,
             diagnostic_provider: None,
+            memory: crate::config::MemoryConfig::default(),
             agents,
             providers: HashMap::new(),
         }

@@ -287,7 +287,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
 
     // Help bar
-    let help_spans: Vec<Span> = match app.prompt.prompt_focus {
+    let mut help_spans: Vec<Span> = match app.prompt.prompt_focus {
         PromptFocus::Iterations => {
             vec![
                 Span::styled("Type", Style::default().fg(Color::Yellow)),
@@ -371,6 +371,12 @@ pub fn draw(f: &mut Frame, app: &App) {
             ]
         }
     };
+    if app.config.memory.enabled && app.memory.store.is_some() {
+        help_spans.push(Span::styled(
+            "  Memory: on",
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
     let help_bar =
         Paragraph::new(Line::from(help_spans)).block(Block::default().borders(Borders::TOP));
     f.render_widget(help_bar, chunks[6]);

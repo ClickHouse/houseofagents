@@ -22,6 +22,7 @@ pub struct PromptRuntimeContext {
     raw_prompt: String,
     diagnostics_suffix: Option<&'static str>,
     cli_working_directory_prefix: Option<String>,
+    memory_context: Option<String>,
 }
 
 impl PromptRuntimeContext {
@@ -40,11 +41,22 @@ impl PromptRuntimeContext {
             raw_prompt: raw_prompt.into(),
             diagnostics_suffix: diagnostics_enabled.then_some(DIAGNOSTIC_SUFFIX),
             cli_working_directory_prefix,
+            memory_context: None,
         }
     }
 
     pub fn raw_prompt(&self) -> &str {
         &self.raw_prompt
+    }
+
+    pub fn set_memory_context(&mut self, context: String) {
+        if !context.is_empty() {
+            self.memory_context = Some(context);
+        }
+    }
+
+    pub fn memory_context(&self) -> Option<&str> {
+        self.memory_context.as_deref()
     }
 
     pub fn initial_prompt_for_agent(&self, is_cli: bool) -> String {
@@ -57,9 +69,20 @@ impl PromptRuntimeContext {
         if is_cli {
             if let Some(prefix) = &self.cli_working_directory_prefix {
                 prompt.push_str(prefix);
-                if !base_prompt.is_empty() || self.diagnostics_suffix.is_some() {
+                if !base_prompt.is_empty()
+                    || self.memory_context.is_some()
+                    || self.diagnostics_suffix.is_some()
+                {
                     prompt.push_str("\n\n");
                 }
+            }
+        }
+
+        // Memory context between cwd prefix and base prompt
+        if let Some(ref mem) = self.memory_context {
+            prompt.push_str(mem);
+            if !base_prompt.is_empty() || self.diagnostics_suffix.is_some() {
+                prompt.push_str("\n\n");
             }
         }
 
@@ -496,6 +519,31 @@ mod tests {
 
         assert!(prompt.starts_with("base prompt"));
         assert!(prompt.contains("explicit \"Errors\" section"));
+    }
+
+    #[test]
+    fn prompt_runtime_context_memory_ordering() {
+        let mut context = PromptRuntimeContext::new("base prompt", true);
+        context.set_memory_context("<project_memory>recalled</project_memory>".to_string());
+
+        // API agent: [memory] → [base] → [diagnostics]
+        let api_prompt = context.augment_prompt_for_agent("base prompt", false);
+        let mem_pos = api_prompt.find("<project_memory>").unwrap();
+        let base_pos = api_prompt.find("base prompt").unwrap();
+        let diag_pos = api_prompt.find("Errors").unwrap();
+        assert!(mem_pos < base_pos, "memory should come before base prompt");
+        assert!(
+            base_pos < diag_pos,
+            "base prompt should come before diagnostics"
+        );
+
+        // CLI agent: [cwd] → [memory] → [base] → [diagnostics]
+        let cli_prompt = context.augment_prompt_for_agent("base prompt", true);
+        let cwd_pos = cli_prompt.find("Working directory").unwrap();
+        let mem_pos = cli_prompt.find("<project_memory>").unwrap();
+        let base_pos = cli_prompt.find("base prompt").unwrap();
+        assert!(cwd_pos < mem_pos, "cwd should come before memory");
+        assert!(mem_pos < base_pos, "memory should come before base prompt");
     }
 
     #[tokio::test]

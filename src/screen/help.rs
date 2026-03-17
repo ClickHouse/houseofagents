@@ -88,6 +88,35 @@ pub fn home_help_lines() -> &'static [Line<'static>] {
             Line::from("  Pass --prompt/--prompt-file or --pipeline to skip the TUI."),
             Line::from("  Run houseofagents --help for full flag reference."),
             Line::from(""),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Memory",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from("  Cross-run memory powered by SQLite+FTS5. Memories from"),
+            Line::from("  past runs are recalled and injected into prompts."),
+            Line::from("  Post-run extraction stores new memories automatically."),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("  M", Style::default().fg(Color::Yellow)),
+                Span::raw(": Open memory management (on home screen)"),
+            ]),
+            Line::from(""),
+            Line::from("  In memory management:"),
+            Line::from(vec![
+                Span::styled("  j/k", Style::default().fg(Color::Yellow)),
+                Span::raw(": navigate  "),
+                Span::styled("d", Style::default().fg(Color::Yellow)),
+                Span::raw(": delete  "),
+                Span::styled("f", Style::default().fg(Color::Yellow)),
+                Span::raw(": filter by kind  "),
+                Span::styled("q/Esc", Style::default().fg(Color::Yellow)),
+                Span::raw(": back"),
+            ]),
+            Line::from(""),
         ]
     });
     &LINES
