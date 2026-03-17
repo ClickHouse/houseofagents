@@ -435,6 +435,42 @@ impl OutputManager {
         Ok(())
     }
 
+    /// Write the recalled memory context that was injected into the prompt.
+    /// Saved as a separate file so prompt.md stays as the pure user prompt
+    /// (important for resume and reproducibility).
+    pub fn write_recalled_context(&self, context: &str) -> Result<(), AppError> {
+        if context.is_empty() {
+            return Ok(());
+        }
+        std::fs::write(self.run_dir.join("_recalled_memories.md"), context)?;
+        Ok(())
+    }
+
+    /// Best-effort variant that logs failures to the run error log instead of
+    /// propagating. Use at non-critical sites where a missing recalled-context
+    /// file degrades resume but should not abort the run.
+    pub fn write_recalled_context_logged(&self, context: &str) {
+        if let Err(e) = self.write_recalled_context(context) {
+            let _ = self.append_error(&format!("Failed to write recalled memories: {e}"));
+        }
+    }
+
+    pub fn write_memories(
+        &self,
+        memories: &[crate::memory::types::ExtractedMemory],
+    ) -> Result<(), AppError> {
+        let json = serde_json::to_string_pretty(memories)?;
+        std::fs::write(self.run_dir.join("_memories.json"), json)?;
+        Ok(())
+    }
+
+    /// Best-effort variant that logs failures to the run error log.
+    pub fn write_memories_logged(&self, memories: &[crate::memory::types::ExtractedMemory]) {
+        if let Err(e) = self.write_memories(memories) {
+            let _ = self.append_error(&format!("Failed to write _memories.json: {e}"));
+        }
+    }
+
     /// Write session metadata. agents is a list of (agent_name, provider_kind_key) pairs.
     pub fn write_session_info(
         &self,

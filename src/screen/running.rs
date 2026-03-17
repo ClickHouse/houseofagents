@@ -148,6 +148,14 @@ fn draw_title_bar(f: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(Color::DarkGray),
             ),
             Span::styled(iter_display, Style::default().fg(Color::Magenta)),
+            if app.memory.last_recalled_count > 0 {
+                Span::styled(
+                    format!("  {} memories", app.memory.last_recalled_count),
+                    Style::default().fg(Color::DarkGray),
+                )
+            } else {
+                Span::raw("")
+            },
             Span::raw("  "),
             Span::styled(status_text, Style::default().fg(Color::Yellow)),
         ]),
@@ -1270,6 +1278,7 @@ mod tests {
             max_history_bytes: 102400,
             pipeline_block_concurrency: 0,
             diagnostic_provider: None,
+            memory: crate::config::MemoryConfig::default(),
             agents: Vec::new(),
             providers: std::collections::HashMap::new(),
         })

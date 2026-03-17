@@ -493,6 +493,20 @@ impl Default for PipelineDefinition {
 }
 
 impl PipelineDefinition {
+    /// Collect unique agent names from all blocks (including finalization).
+    pub fn all_agent_names(&self) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
+        let mut agents = Vec::new();
+        for block in self.blocks.iter().chain(self.finalization_blocks.iter()) {
+            for agent in &block.agents {
+                if seen.insert(agent.clone()) {
+                    agents.push(agent.clone());
+                }
+            }
+        }
+        agents
+    }
+
     pub fn effective_sessions(&self) -> Vec<EffectiveSession> {
         let mut map: HashMap<(String, String), (String, Vec<BlockId>, u32)> = HashMap::new();
         for block in &self.blocks {

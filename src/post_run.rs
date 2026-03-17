@@ -270,6 +270,40 @@ pub(crate) fn discover_final_outputs(
     files
 }
 
+/// Collect finalization `.md` outputs from `run_dir/finalization/` (if present).
+/// Returns `(filename, path)` pairs suitable for appending to extraction file lists.
+pub(crate) fn discover_finalization_outputs(
+    run_dir: &std::path::Path,
+) -> Vec<(String, std::path::PathBuf)> {
+    let fin_dir = run_dir.join("finalization");
+    if !fin_dir.is_dir() {
+        return Vec::new();
+    }
+    let mut files: Vec<(String, std::path::PathBuf)> = std::fs::read_dir(&fin_dir)
+        .ok()
+        .into_iter()
+        .flat_map(|entries| entries.flatten())
+        .filter_map(|entry| {
+            let path = entry.path();
+            if !path.is_file() {
+                return None;
+            }
+            let name = path.file_name()?.to_str()?.to_string();
+            if name.ends_with(".md")
+                && name != "prompt.md"
+                && !name.starts_with("consolidated_")
+                && !name.starts_with('_')
+            {
+                Some((name, path))
+            } else {
+                None
+            }
+        })
+        .collect();
+    files.sort_by(|a, b| natural_cmp(&a.0, &b.0));
+    files
+}
+
 pub(crate) async fn discover_final_outputs_async(
     run_dir: &std::path::Path,
     mode: ExecutionMode,
@@ -337,22 +371,39 @@ pub(crate) async fn discover_final_outputs_async(
 
 pub(crate) const POST_RUN_SYNTHESIS_MAX_INPUT_BYTES: u64 = 200 * 1024;
 pub(crate) const CROSS_RUN_MAX_INPUT_BYTES: u64 = POST_RUN_SYNTHESIS_MAX_INPUT_BYTES;
+pub(crate) const EXTRACTION_MAX_INPUT_BYTES: u64 = 100 * 1024;
 
 pub(crate) struct PostRunPromptBudget {
     used_bytes: u64,
+    limit: u64,
 }
 
 impl PostRunPromptBudget {
     pub(crate) fn new() -> Self {
-        Self { used_bytes: 0 }
+        Self {
+            used_bytes: 0,
+            limit: POST_RUN_SYNTHESIS_MAX_INPUT_BYTES,
+        }
+    }
+
+    pub(crate) fn with_limit(limit: u64) -> Self {
+        Self {
+            used_bytes: 0,
+            limit,
+        }
+    }
+
+    /// Returns `true` if adding `bytes` would exceed the budget limit.
+    pub(crate) fn would_exceed(&self, bytes: usize) -> bool {
+        self.used_bytes.saturating_add(bytes as u64) > self.limit
     }
 
     pub(crate) fn add_bytes(&mut self, bytes: u64, context: &str) -> Result<(), String> {
         self.used_bytes = self.used_bytes.saturating_add(bytes);
-        if self.used_bytes > POST_RUN_SYNTHESIS_MAX_INPUT_BYTES {
+        if self.used_bytes > self.limit {
             return Err(format!(
                 "{context} is too large to inline into a post-run synthesis prompt (limit: {} KB). Reduce the number of reports or shorten the outputs.",
-                POST_RUN_SYNTHESIS_MAX_INPUT_BYTES / 1024
+                self.limit / 1024
             ));
         }
         Ok(())
@@ -640,7 +691,7 @@ pub(crate) fn collect_report_files(run_dir: &std::path::Path) -> Vec<std::path::
                     .and_then(|ext| ext.to_str())
                     .map(|ext| ext.eq_ignore_ascii_case("md"))
                     .unwrap_or(false);
-                if is_md && name != "prompt.md" && name != "errors.md" {
+                if is_md && name != "prompt.md" && name != "errors.md" && !name.starts_with('_') {
                     Some(path)
                 } else {
                     None
@@ -880,5 +931,56 @@ mod tests {
             parse_agent_iteration_filename("anthropic_iter.md", "anthropic"),
             None
         );
+    }
+
+    #[test]
+    fn discover_finalization_outputs_filters_correctly() {
+        let dir = tempfile::tempdir().unwrap();
+        let fin_dir = dir.path().join("finalization");
+        std::fs::create_dir_all(&fin_dir).unwrap();
+
+        // Should be included
+        std::fs::write(fin_dir.join("block1_iter1.md"), "ok").unwrap();
+        std::fs::write(fin_dir.join("summary.md"), "ok").unwrap();
+
+        // Should be excluded
+        std::fs::write(fin_dir.join("prompt.md"), "skip").unwrap();
+        std::fs::write(fin_dir.join("consolidated_final.md"), "skip").unwrap();
+        std::fs::write(fin_dir.join("data.json"), "skip").unwrap();
+
+        let files = discover_finalization_outputs(dir.path());
+        let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"block1_iter1.md"));
+        assert!(names.contains(&"summary.md"));
+        assert!(!names.contains(&"prompt.md"));
+        assert!(!names.contains(&"consolidated_final.md"));
+        assert!(!names.contains(&"data.json"));
+        assert_eq!(files.len(), 2);
+    }
+
+    #[test]
+    fn discover_finalization_outputs_empty_when_no_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = discover_finalization_outputs(dir.path());
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn collect_report_files_excludes_recalled_memories() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("agent_iter1.md"), "ok").unwrap();
+        std::fs::write(dir.path().join("_recalled_memories.md"), "skip").unwrap();
+        std::fs::write(dir.path().join("prompt.md"), "skip").unwrap();
+        std::fs::write(dir.path().join("errors.md"), "skip").unwrap();
+
+        let files = collect_report_files(dir.path());
+        let names: Vec<String> = files
+            .iter()
+            .map(|p| p.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+        assert!(names.contains(&"agent_iter1.md".to_string()));
+        assert!(!names.contains(&"_recalled_memories.md".to_string()));
+        assert!(!names.contains(&"prompt.md".to_string()));
+        assert!(!names.contains(&"errors.md".to_string()));
     }
 }

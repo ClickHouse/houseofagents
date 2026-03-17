@@ -1,6 +1,17 @@
 use super::*;
 use std::collections::HashSet;
 
+/// Internal memory files that should be hidden from the results tree.
+/// Uses an explicit list (not blanket `_`-prefix) to avoid hiding
+/// `_errors.log` and agent outputs from sanitized names like `_Claude`.
+const MEMORY_INTERNAL_FILES: &[&str] = &["_recalled_memories.md", "_memories.json"];
+
+fn is_memory_internal_file(path: &std::path::Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| MEMORY_INTERNAL_FILES.contains(&n))
+}
+
 pub(super) fn load_results(app: &mut App) {
     let Some(run_dir) = app.running.run_dir.clone() else {
         app.results.reset_to_home();
@@ -100,7 +111,9 @@ fn load_results_sync(
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_file() {
-                root_files.push(path);
+                if !is_memory_internal_file(&path) {
+                    root_files.push(path);
+                }
                 continue;
             }
 
@@ -123,7 +136,10 @@ fn load_results_sync(
                 .flatten()
                 .filter_map(|entry| {
                     let path = entry.path();
-                    path.is_file().then_some(path)
+                    if !path.is_file() || is_memory_internal_file(&path) {
+                        return None;
+                    }
+                    Some(path)
                 })
                 .collect::<Vec<_>>();
             files.sort();
@@ -141,7 +157,7 @@ fn load_results_sync(
             if let Ok(entries) = std::fs::read_dir(&fin_dir) {
                 for entry in entries.flatten() {
                     let path = entry.path();
-                    if path.is_file() {
+                    if path.is_file() && !is_memory_internal_file(&path) {
                         finalization_files.push(path);
                     }
                 }
@@ -163,7 +179,10 @@ fn load_results_sync(
         .flatten()
         .filter_map(|entry| {
             let path = entry.path();
-            path.is_file().then_some(path)
+            if !path.is_file() || is_memory_internal_file(&path) {
+                return None;
+            }
+            Some(path)
         })
         .collect::<Vec<_>>();
 
@@ -173,7 +192,7 @@ fn load_results_sync(
         if let Ok(entries) = std::fs::read_dir(&fin_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.is_file() {
+                if path.is_file() && !is_memory_internal_file(&path) {
                     files.push(path);
                 }
             }
