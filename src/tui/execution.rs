@@ -14,7 +14,7 @@ type BuiltExecutionOutput = (u32, Option<String>, HashMap<String, String>, Outpu
 fn inject_memory_recall(app: &mut App, prompt_context: &mut PromptRuntimeContext) {
     app.memory.last_recalled_count = 0;
     app.memory.last_extraction_count = None;
-    if !app.config.memory.enabled {
+    if !app.effective_memory_enabled() {
         return;
     }
     // Drain any completed extraction results so their memories are in SQLite
@@ -28,8 +28,8 @@ fn inject_memory_recall(app: &mut App, prompt_context: &mut PromptRuntimeContext
         store,
         &app.memory.project_id,
         prompt_context.raw_prompt(),
-        app.config.memory.max_recall,
-        app.config.memory.max_recall_bytes,
+        app.effective_memory_max_recall(),
+        app.effective_memory_max_recall_bytes(),
     ) {
         app.memory.last_recalled_count = recalled.memories.len();
         prompt_context.set_memory_context(crate::memory::recall::format_memory_context(&recalled));
@@ -1781,7 +1781,7 @@ pub(super) fn maybe_start_memory_extraction(app: &mut App) {
     use crate::post_run;
     use std::path::PathBuf;
 
-    if !app.config.memory.enabled || app.config.memory.disable_extraction {
+    if !app.effective_memory_enabled() || app.effective_memory_disable_extraction() {
         return;
     }
     // Skip extraction if user cancelled — partial outputs aren't reliable for learning
@@ -1834,8 +1834,9 @@ pub(super) fn maybe_start_memory_extraction(app: &mut App) {
     }
 
     // Pick extraction agent: explicit config > first participating agent > first configured
-    let agent_name = if !app.config.memory.extraction_agent.is_empty() {
-        app.config.memory.extraction_agent.clone()
+    let effective_extraction_agent = app.effective_memory_extraction_agent().to_string();
+    let agent_name = if !effective_extraction_agent.is_empty() {
+        effective_extraction_agent
     } else if let Some(first) = agents.first() {
         first.clone()
     } else {
@@ -1903,7 +1904,7 @@ pub(super) fn maybe_start_memory_extraction(app: &mut App) {
     let run_dir_owned = run_dir.clone();
     let store = store.clone();
     let project_id = app.memory.project_id.clone();
-    let memory_config = app.config.memory.clone();
+    let memory_config = app.effective_memory_config();
 
     let (tx, rx) = mpsc::unbounded_channel();
     app.memory.extraction_rx.push(rx);

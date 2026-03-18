@@ -306,8 +306,8 @@ Anthropic `thinking_effort = "max"` is rejected in API mode. In CLI mode, House 
 
 | Key | Action |
 |-----|--------|
-| `j` / `k` | Navigate agents or timeouts |
-| `Tab` | Switch section (Agents / Timeouts) |
+| `j` / `k` | Navigate agents, timeouts, or memory settings |
+| `Tab` / `Shift+Tab` | Switch section (Agents / Timeouts / Memory) |
 | `n` | Add new agent |
 | `Del` / `Backspace` | Remove agent |
 | `r` | Rename agent |
@@ -321,7 +321,8 @@ Anthropic `thinking_effort = "max"` is rejected in API mode. In CLI mode, House 
 | `x` | Edit extra CLI args |
 | `d` | Toggle diagnostic agent |
 | `o` | Edit output directory |
-| `e` | Edit selected timeout (Timeouts section) |
+| `e` / `Enter` | Edit selected value (Timeouts / Memory sections) |
+| `Space` | Toggle boolean setting (Memory section) |
 | `s` | Save config to disk |
 | `Esc` | Close (keep changes for session) |
 

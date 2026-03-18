@@ -189,6 +189,19 @@ pub struct App {
     pub(crate) session_http_timeout_seconds: Option<u64>,
     pub(crate) session_model_fetch_timeout_seconds: Option<u64>,
     pub(crate) session_cli_timeout_seconds: Option<u64>,
+    // Session-level memory config overrides (TUI only).
+    // headless.rs reads config.memory.* directly because it has no session
+    // override mechanism — that's intentional, not an oversight.
+    // Note: db_path and project_id are intentionally excluded — they are
+    // structural path fields resolved once at startup and not meaningful to
+    // change mid-session via the config popup.
+    pub(crate) session_memory_enabled: Option<bool>,
+    pub(crate) session_memory_max_recall: Option<usize>,
+    pub(crate) session_memory_max_recall_bytes: Option<usize>,
+    pub(crate) session_memory_observation_ttl_days: Option<u32>,
+    pub(crate) session_memory_summary_ttl_days: Option<u32>,
+    pub(crate) session_memory_extraction_agent: Option<String>,
+    pub(crate) session_memory_disable_extraction: Option<bool>,
     pub(crate) screen: Screen,
     pub(crate) should_quit: bool,
 
@@ -329,6 +342,7 @@ pub(crate) struct EditPopupState {
     pub(crate) section: EditPopupSection,
     pub(crate) cursor: usize,
     pub(crate) timeout_cursor: usize,
+    pub(crate) memory_cursor: usize,
     pub(crate) field: EditField,
     pub(crate) editing: bool,
     pub(crate) edit_buffer: String,
@@ -339,7 +353,7 @@ pub(crate) struct EditPopupState {
     pub(crate) model_picker_cursor: usize,
     pub(crate) model_picker_rx: Option<mpsc::UnboundedReceiver<Result<Vec<String>, String>>>,
     pub(crate) config_save_in_progress: bool,
-    pub(crate) config_save_rx: Option<mpsc::UnboundedReceiver<Result<(), String>>>,
+    pub(crate) config_save_rx: Option<mpsc::UnboundedReceiver<Result<AppConfig, String>>>,
 }
 
 pub(crate) struct PipelineState {
@@ -468,12 +482,14 @@ pub enum EditField {
     OutputDir,
     TimeoutSeconds,
     AgentName,
+    MemoryValue,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditPopupSection {
     Providers,
     Timeouts,
+    Memory,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -605,6 +621,13 @@ impl App {
             session_http_timeout_seconds: None,
             session_model_fetch_timeout_seconds: None,
             session_cli_timeout_seconds: None,
+            session_memory_enabled: None,
+            session_memory_max_recall: None,
+            session_memory_max_recall_bytes: None,
+            session_memory_observation_ttl_days: None,
+            session_memory_summary_ttl_days: None,
+            session_memory_extraction_agent: None,
+            session_memory_disable_extraction: None,
             screen: Screen::Home,
             should_quit: false,
             selected_agents: Vec::new(),
@@ -667,6 +690,59 @@ impl App {
     pub fn effective_cli_timeout_seconds(&self) -> u64 {
         self.session_cli_timeout_seconds
             .unwrap_or(self.config.cli_timeout_seconds)
+    }
+
+    pub fn effective_memory_enabled(&self) -> bool {
+        self.session_memory_enabled
+            .unwrap_or(self.config.memory.enabled)
+    }
+
+    pub fn effective_memory_max_recall(&self) -> usize {
+        self.session_memory_max_recall
+            .unwrap_or(self.config.memory.max_recall)
+    }
+
+    pub fn effective_memory_max_recall_bytes(&self) -> usize {
+        self.session_memory_max_recall_bytes
+            .unwrap_or(self.config.memory.max_recall_bytes)
+    }
+
+    pub fn effective_memory_observation_ttl_days(&self) -> u32 {
+        self.session_memory_observation_ttl_days
+            .unwrap_or(self.config.memory.observation_ttl_days)
+    }
+
+    pub fn effective_memory_summary_ttl_days(&self) -> u32 {
+        self.session_memory_summary_ttl_days
+            .unwrap_or(self.config.memory.summary_ttl_days)
+    }
+
+    pub fn effective_memory_extraction_agent(&self) -> &str {
+        match &self.session_memory_extraction_agent {
+            Some(s) => s.as_str(),
+            None => &self.config.memory.extraction_agent,
+        }
+    }
+
+    pub fn effective_memory_disable_extraction(&self) -> bool {
+        self.session_memory_disable_extraction
+            .unwrap_or(self.config.memory.disable_extraction)
+    }
+
+    /// Return a MemoryConfig with all session overrides applied.
+    /// Used by extraction and other runtime paths that need the full config.
+    pub fn effective_memory_config(&self) -> crate::config::MemoryConfig {
+        crate::config::MemoryConfig {
+            enabled: self.effective_memory_enabled(),
+            db_path: self.config.memory.db_path.clone(),
+            project_id: self.config.memory.project_id.clone(),
+            max_recall: self.effective_memory_max_recall(),
+            max_recall_bytes: self.effective_memory_max_recall_bytes(),
+            extraction_agent: self.effective_memory_extraction_agent().to_string(),
+            disable_extraction: self.effective_memory_disable_extraction(),
+            observation_ttl_days: self.effective_memory_observation_ttl_days(),
+            summary_ttl_days: self.effective_memory_summary_ttl_days(),
+        }
     }
 
     pub fn toggle_agent(&mut self, name: &str) {
@@ -1239,6 +1315,7 @@ impl EditPopupState {
             section: EditPopupSection::Providers,
             cursor: 0,
             timeout_cursor: 0,
+            memory_cursor: 0,
             field: EditField::ApiKey,
             editing: false,
             edit_buffer: String::new(),
@@ -1727,6 +1804,50 @@ mod tests {
         assert_eq!(app.effective_http_timeout_seconds(), 9);
         assert_eq!(app.effective_model_fetch_timeout_seconds(), 8);
         assert_eq!(app.effective_cli_timeout_seconds(), 7);
+    }
+
+    #[test]
+    fn effective_memory_values_use_global_defaults() {
+        let app = app_with_known_cli();
+        assert!(app.effective_memory_enabled());
+        assert_eq!(app.effective_memory_max_recall(), 15);
+        assert_eq!(app.effective_memory_max_recall_bytes(), 8192);
+        assert_eq!(app.effective_memory_observation_ttl_days(), 90);
+        assert_eq!(app.effective_memory_summary_ttl_days(), 180);
+        assert_eq!(app.effective_memory_extraction_agent(), "");
+        assert!(!app.effective_memory_disable_extraction());
+    }
+
+    #[test]
+    fn effective_memory_values_use_session_overrides() {
+        let mut app = app_with_known_cli();
+        app.session_memory_enabled = Some(false);
+        app.session_memory_max_recall = Some(5);
+        app.session_memory_max_recall_bytes = Some(2048);
+        app.session_memory_observation_ttl_days = Some(30);
+        app.session_memory_summary_ttl_days = Some(60);
+        app.session_memory_extraction_agent = Some("Claude".into());
+        app.session_memory_disable_extraction = Some(true);
+        assert!(!app.effective_memory_enabled());
+        assert_eq!(app.effective_memory_max_recall(), 5);
+        assert_eq!(app.effective_memory_max_recall_bytes(), 2048);
+        assert_eq!(app.effective_memory_observation_ttl_days(), 30);
+        assert_eq!(app.effective_memory_summary_ttl_days(), 60);
+        assert_eq!(app.effective_memory_extraction_agent(), "Claude");
+        assert!(app.effective_memory_disable_extraction());
+    }
+
+    #[test]
+    fn effective_memory_config_applies_all_overrides() {
+        let mut app = app_with_known_cli();
+        app.session_memory_max_recall = Some(3);
+        app.session_memory_observation_ttl_days = Some(10);
+        let cfg = app.effective_memory_config();
+        assert_eq!(cfg.max_recall, 3);
+        assert_eq!(cfg.observation_ttl_days, 10);
+        // Non-overridden fields should come from config defaults
+        assert_eq!(cfg.max_recall_bytes, 8192);
+        assert_eq!(cfg.summary_ttl_days, 180);
     }
 
     #[test]
