@@ -53,16 +53,20 @@ const EXIT_VALIDATION: i32 = 1;
 const EXIT_EXECUTION: i32 = 2;
 const EXIT_CANCELLED: i32 = 130;
 
+/// Inject recalled memories into the prompt context. Returns the IDs so the
+/// caller can commit recall tracking after setup succeeds.
 fn inject_memory_recall_headless(
     config: &AppConfig,
     store: &Option<crate::memory::store::MemoryStore>,
     project_id: &str,
     prompt_context: &mut PromptRuntimeContext,
-) {
+) -> Vec<i64> {
     if !config.memory.enabled {
-        return;
+        return vec![];
     }
-    let Some(ref store) = store else { return };
+    let Some(ref store) = store else {
+        return vec![];
+    };
     if let Ok(recalled) = crate::memory::recall::recall_for_prompt(
         store,
         project_id,
@@ -70,7 +74,25 @@ fn inject_memory_recall_headless(
         config.memory.max_recall,
         config.memory.max_recall_bytes,
     ) {
+        let ids: Vec<i64> = recalled.memories.iter().map(|m| m.id).collect();
         prompt_context.set_memory_context(crate::memory::recall::format_memory_context(&recalled));
+        ids
+    } else {
+        vec![]
+    }
+}
+
+fn commit_memory_recall_headless(
+    store: &Option<crate::memory::store::MemoryStore>,
+    recalled_ids: &[i64],
+) {
+    if recalled_ids.is_empty() {
+        return;
+    }
+    if let Some(ref store) = store {
+        // Best-effort: recall tracking is non-critical metadata.
+        // Silently ignore errors to avoid breaking --quiet / JSON output contracts.
+        let _ = store.mark_recalled(recalled_ids);
     }
 }
 
@@ -974,7 +996,19 @@ pub(crate) async fn run(args: HeadlessArgs, config: AppConfig) -> i32 {
             ),
             Err(e) => {
                 if !args.quiet {
-                    eprintln!("Warning: memory store failed to open ({db_path:?}): {e}");
+                    match args.output_format {
+                        OutputFormat::Json => {
+                            let obj = serde_json::json!({
+                                "event": "warning",
+                                "component": "memory_store",
+                                "message": format!("memory store failed to open ({db_path:?}): {e}"),
+                            });
+                            eprintln!("{}", serde_json::to_string(&obj).unwrap_or_default());
+                        }
+                        OutputFormat::Text => {
+                            eprintln!("Warning: memory store failed to open ({db_path:?}): {e}");
+                        }
+                    }
                 }
                 (None, String::new())
             }
@@ -1203,7 +1237,8 @@ async fn run_single_standard(
 
     let mut prompt_context =
         PromptRuntimeContext::new(prompt.clone(), config.diagnostic_provider.is_some());
-    inject_memory_recall_headless(config, memory_store, memory_project_id, &mut prompt_context);
+    let recalled_ids =
+        inject_memory_recall_headless(config, memory_store, memory_project_id, &mut prompt_context);
     let output = OutputManager::new(&output_dir, args.session_name.as_deref())
         .map_err(|e| format!("Failed to create output directory: {e}"))?;
     let run_dir = output.run_dir().display().to_string();
@@ -1242,6 +1277,9 @@ async fn run_single_standard(
             args.keep_session,
         )
         .map_err(|e| format!("Failed to write session metadata: {e}"))?;
+
+    // All setup complete — commit recall tracking.
+    commit_memory_recall_headless(memory_store, &recalled_ids);
 
     let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
     let mut logger = ProgressLogger::new(args.output_format, args.quiet, iterations, 1);
@@ -1376,7 +1414,8 @@ async fn run_single_pipeline(
         pipeline_def.initial_prompt.clone(),
         config.diagnostic_provider.is_some(),
     );
-    inject_memory_recall_headless(config, memory_store, memory_project_id, &mut prompt_context);
+    let recalled_ids =
+        inject_memory_recall_headless(config, memory_store, memory_project_id, &mut prompt_context);
 
     let rt = pipeline_mod::build_runtime_table(&pipeline_def);
     let loop_extra = pipeline_mod::loop_extra_tasks(&pipeline_def);
@@ -1428,6 +1467,8 @@ async fn run_single_pipeline(
     }
 
     let has_finalization = pipeline_def.has_finalization();
+    commit_memory_recall_headless(memory_store, &recalled_ids);
+
     let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
     let mut logger =
         ProgressLogger::new(args.output_format, args.quiet, pipeline_def.iterations, 1);
@@ -1598,7 +1639,8 @@ async fn run_batch_standard(
 
     let mut prompt_context =
         PromptRuntimeContext::new(prompt.clone(), config.diagnostic_provider.is_some());
-    inject_memory_recall_headless(config, memory_store, memory_project_id, &mut prompt_context);
+    let recalled_ids =
+        inject_memory_recall_headless(config, memory_store, memory_project_id, &mut prompt_context);
     let output_dir = config.resolved_output_dir();
     let batch_root = OutputManager::new_batch_parent(&output_dir, args.session_name.as_deref())
         .map_err(|e| format!("Failed to create batch directory: {e}"))?;
@@ -1631,6 +1673,9 @@ async fn run_batch_standard(
         .timeout(std::time::Duration::from_secs(http_timeout_secs))
         .build()
         .map_err(|e| format!("HTTP client error: {e}"))?;
+
+    // Commit recall after all fallible setup (HTTP client, output dirs) has succeeded.
+    commit_memory_recall_headless(memory_store, &recalled_ids);
 
     let handle = tokio::spawn(async move {
         run_multi(
@@ -1941,7 +1986,9 @@ async fn run_batch_pipeline(
             pipeline_def.initial_prompt.clone(),
             config.diagnostic_provider.is_some(),
         );
-        inject_memory_recall_headless(config, memory_store, memory_project_id, &mut tmp_ctx);
+        let recalled_ids =
+            inject_memory_recall_headless(config, memory_store, memory_project_id, &mut tmp_ctx);
+        commit_memory_recall_headless(memory_store, &recalled_ids);
         tmp_ctx.memory_context().map(|s| s.to_string())
     };
 
@@ -2290,7 +2337,19 @@ async fn run_post_steps(
                     .await
             {
                 if !args.quiet {
-                    eprintln!("Memory extraction failed (non-blocking): {e}");
+                    match args.output_format {
+                        OutputFormat::Json => {
+                            let obj = serde_json::json!({
+                                "event": "warning",
+                                "component": "memory_extraction",
+                                "message": format!("Memory extraction failed (non-blocking): {e}"),
+                            });
+                            eprintln!("{}", serde_json::to_string(&obj).unwrap_or_default());
+                        }
+                        OutputFormat::Text => {
+                            eprintln!("Memory extraction failed (non-blocking): {e}");
+                        }
+                    }
                 }
             }
         }
@@ -2333,7 +2392,19 @@ async fn run_post_steps(
         .await
         {
             if !args.quiet {
-                eprintln!("Diagnostics failed (non-blocking): {e}");
+                match args.output_format {
+                    OutputFormat::Json => {
+                        let obj = serde_json::json!({
+                            "event": "warning",
+                            "component": "diagnostics",
+                            "message": format!("Diagnostics failed (non-blocking): {e}"),
+                        });
+                        eprintln!("{}", serde_json::to_string(&obj).unwrap_or_default());
+                    }
+                    OutputFormat::Text => {
+                        eprintln!("Diagnostics failed (non-blocking): {e}");
+                    }
+                }
             }
         }
     }
@@ -2635,18 +2706,18 @@ async fn run_memory_extraction(
         return Ok(());
     }
 
-    let prompt = crate::memory::extraction::build_extraction_prompt(&files)?;
+    let prompt = crate::memory::extraction::build_extraction_prompt(
+        &files,
+        config.memory.observation_ttl_days,
+        config.memory.summary_ttl_days,
+    )?;
 
-    // Pick extraction agent: explicit config > first participating agent > first configured
-    let agent_name = if !config.memory.extraction_agent.is_empty() {
-        config.memory.extraction_agent.clone()
-    } else if let Some(first) = agents.first() {
-        first.clone()
-    } else {
-        match config.agents.first() {
-            Some(a) => a.name.clone(),
-            None => return Ok(()),
-        }
+    let Some(agent_name) = crate::app::resolve_extraction_agent(
+        &config.memory.extraction_agent,
+        agents,
+        &config.agents,
+    ) else {
+        return Ok(());
     };
     let cli_available = rs::detect_cli_availability();
     let session_overrides = rs::compute_session_overrides(&config.agents, &cli_available);

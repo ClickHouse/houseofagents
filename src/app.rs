@@ -251,6 +251,14 @@ pub(crate) struct MemoryState {
     pub management_memories: Vec<crate::memory::types::Memory>,
     pub management_cursor: usize,
     pub management_kind_filter: Option<crate::memory::types::MemoryKind>,
+    /// When true, the list only shows memories with recall_count == 0.
+    pub management_never_recalled_filter: bool,
+    /// Total matching memories (ignoring LIMIT 500), for the header display.
+    pub management_total_count: u64,
+    /// Cached DB size in bytes, updated on memory screen entry / refresh.
+    pub cached_db_size: Option<u64>,
+    /// Two-step bulk delete: first D sets this, second D executes.
+    pub pending_bulk_delete: bool,
 }
 
 pub(crate) struct PromptState {
@@ -434,6 +442,9 @@ pub(crate) struct PendingSingleExecution {
     pub(crate) keep_session: bool,
     pub(crate) iterations: u32,
     pub(crate) cli_timeout_secs: u64,
+    /// IDs of memories injected during recall, to be marked as recalled
+    /// once execution is confirmed to be running.
+    pub(crate) recalled_ids: Vec<i64>,
 }
 
 pub(crate) struct ResumePreparation {
@@ -722,6 +733,22 @@ impl App {
             Some(s) => s.as_str(),
             None => &self.config.memory.extraction_agent,
         }
+    }
+
+    /// Resolve the extraction agent through the full fallback chain:
+    /// explicit config/session override → first participant → first configured agent.
+    /// Mode-aware: for Pipeline mode, participants come from the DAG definition.
+    pub fn resolved_extraction_agent(&self) -> Option<String> {
+        let participants = if self.selected_mode == ExecutionMode::Pipeline {
+            self.pipeline.pipeline_def.all_agent_names()
+        } else {
+            self.selected_agents.clone()
+        };
+        resolve_extraction_agent(
+            self.effective_memory_extraction_agent(),
+            &participants,
+            &self.config.agents,
+        )
     }
 
     pub fn effective_memory_disable_extraction(&self) -> bool {
@@ -1432,6 +1459,23 @@ impl RunState {
             self.recent_logs.pop_front();
         }
     }
+}
+
+/// Shared extraction-agent resolution: explicit config → first participant → first configured.
+/// Used by TUI execution, headless, and the Home screen display.
+pub(crate) fn resolve_extraction_agent(
+    extraction_agent_config: &str,
+    participants: &[String],
+    configured_agents: &[crate::config::AgentConfig],
+) -> Option<String> {
+    let trimmed = extraction_agent_config.trim();
+    if !trimmed.is_empty() {
+        return Some(trimmed.to_string());
+    }
+    if let Some(first) = participants.first() {
+        return Some(first.clone());
+    }
+    configured_agents.first().map(|a| a.name.clone())
 }
 
 #[cfg(test)]

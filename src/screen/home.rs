@@ -554,11 +554,14 @@ fn draw_edit_popup(f: &mut Frame, app: &App) {
                     label: "Extraction Agent",
                     description: "Agent used for post-run memory extraction (empty = auto).",
                     value: {
-                        let v = app.effective_memory_extraction_agent();
-                        if v.is_empty() {
-                            "(auto)".to_string()
+                        let explicit = app.effective_memory_extraction_agent();
+                        if explicit.is_empty() {
+                            match app.resolved_extraction_agent() {
+                                Some(name) => format!("(auto: {name})"),
+                                None => "(auto: none)".to_string(),
+                            }
                         } else {
-                            v.to_string()
+                            explicit.to_string()
                         }
                     },
                     has_override: app.session_memory_extraction_agent.is_some(),

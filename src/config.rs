@@ -371,6 +371,7 @@ max_history_bytes = 102400
 # max_recall = 15               # max memories injected per run
 # max_recall_bytes = 8192       # max total bytes of recalled memory context
 # extraction_agent = ""         # empty = first participating agent, then first configured
+                                # Tip: stronger models produce higher-quality memories
 # disable_extraction = false    # set true to skip post-run extraction
 # observation_ttl_days = 90
 # summary_ttl_days = 180

@@ -96,6 +96,11 @@ pub(super) fn handle_home_key(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Char('M') => {
             if app.effective_memory_enabled() && app.memory.store.is_some() {
+                // Purge expired memories so long-lived sessions stay clean.
+                if let Some(ref store) = app.memory.store {
+                    let _ = store.cleanup_expired();
+                }
+                app.memory.pending_bulk_delete = false;
                 refresh_memory_list(app);
                 app.screen = Screen::Memory;
             }
@@ -2783,9 +2788,9 @@ pub(super) fn handle_edit_popup_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
-    // While a config save is in flight, only allow Esc (to close) and
-    // navigation (Tab/arrows). All edits are blocked so the user cannot
-    // modify state that the completion handler will overwrite.
+    // While a config save is in flight, only allow Esc (to close).
+    // All other keys are blocked so the user cannot modify state that
+    // the completion handler will overwrite.
     if app.edit_popup.config_save_in_progress {
         if key.code == KeyCode::Esc {
             app.edit_popup.visible = false;
@@ -3867,14 +3872,25 @@ fn sync_pipeline_edit_replicas_buf(app: &mut App) {
 
 fn refresh_memory_list(app: &mut App) {
     if let Some(ref store) = app.memory.store {
-        if let Ok(memories) = store.list(&app.memory.project_id, app.memory.management_kind_filter)
-        {
+        if let Ok(memories) = store.list(
+            &app.memory.project_id,
+            app.memory.management_kind_filter,
+            app.memory.management_never_recalled_filter,
+        ) {
             app.memory.management_memories = memories;
             if app.memory.management_cursor >= app.memory.management_memories.len() {
                 app.memory.management_cursor =
                     app.memory.management_memories.len().saturating_sub(1);
             }
         }
+        app.memory.management_total_count = store
+            .count(
+                &app.memory.project_id,
+                app.memory.management_kind_filter,
+                app.memory.management_never_recalled_filter,
+            )
+            .unwrap_or(app.memory.management_memories.len() as u64);
+        app.memory.cached_db_size = store.db_size_bytes();
     }
 }
 
@@ -3902,6 +3918,29 @@ fn handle_memory_key(app: &mut App, key: KeyEvent) {
                 refresh_memory_list(app);
             }
         }
+        KeyCode::Char('D') => {
+            if app.memory.management_memories.is_empty() {
+                return;
+            }
+            if app.memory.pending_bulk_delete {
+                // Second D: execute bulk delete in a single batched statement
+                let ids: Vec<i64> = app
+                    .memory
+                    .management_memories
+                    .iter()
+                    .map(|m| m.id)
+                    .collect();
+                if let Some(ref store) = app.memory.store {
+                    let _ = store.delete_batch(&ids);
+                }
+                app.memory.pending_bulk_delete = false;
+                refresh_memory_list(app);
+            } else {
+                // First D: arm confirmation
+                app.memory.pending_bulk_delete = true;
+            }
+            return; // skip the pending_bulk_delete reset below
+        }
         KeyCode::Char('f') => {
             // Cycle kind filter: None → Decision → Observation → Summary → Principle → None
             use crate::memory::types::MemoryKind;
@@ -3914,9 +3953,18 @@ fn handle_memory_key(app: &mut App, key: KeyEvent) {
             };
             refresh_memory_list(app);
         }
+        KeyCode::Char('r') => {
+            // Toggle "never recalled" filter
+            app.memory.management_never_recalled_filter =
+                !app.memory.management_never_recalled_filter;
+            refresh_memory_list(app);
+        }
         KeyCode::Esc | KeyCode::Char('q') => {
             app.screen = Screen::Home;
         }
         _ => {}
     }
+    // Any key other than D clears the pending bulk-delete confirmation.
+    // The D arm returns early to skip this line.
+    app.memory.pending_bulk_delete = false;
 }
