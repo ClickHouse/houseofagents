@@ -1867,7 +1867,13 @@ fn config_save_failure_preserves_config() {
 #[test]
 fn popup_locked_during_in_flight_save() {
     let mut app = test_app();
-    app.config.agents.push(test_agent("Claude", ProviderKind::Anthropic, "m", false, None));
+    app.config.agents.push(test_agent(
+        "Claude",
+        ProviderKind::Anthropic,
+        "m",
+        false,
+        None,
+    ));
     app.edit_popup.visible = true;
     app.edit_popup.config_save_in_progress = true;
     app.edit_popup.section = EditPopupSection::Memory;
@@ -1885,8 +1891,16 @@ fn popup_locked_during_in_flight_save() {
 #[test]
 fn remove_agent_clears_extraction_agent() {
     let mut app = test_app();
-    app.config.agents.push(test_agent("Claude", ProviderKind::Anthropic, "m", false, None));
-    app.config.agents.push(test_agent("GPT", ProviderKind::OpenAI, "m", false, None));
+    app.config.agents.push(test_agent(
+        "Claude",
+        ProviderKind::Anthropic,
+        "m",
+        false,
+        None,
+    ));
+    app.config
+        .agents
+        .push(test_agent("GPT", ProviderKind::OpenAI, "m", false, None));
     app.config.memory.extraction_agent = "Claude".to_string();
     app.session_memory_extraction_agent = Some("Claude".to_string());
     app.edit_popup.cursor = 0; // points at "Claude"
@@ -1898,7 +1912,13 @@ fn remove_agent_clears_extraction_agent() {
 #[test]
 fn rename_agent_updates_extraction_agent() {
     let mut app = test_app();
-    app.config.agents.push(test_agent("Claude", ProviderKind::Anthropic, "m", false, None));
+    app.config.agents.push(test_agent(
+        "Claude",
+        ProviderKind::Anthropic,
+        "m",
+        false,
+        None,
+    ));
     app.config.memory.extraction_agent = "Claude".to_string();
     app.session_memory_extraction_agent = Some("Claude".to_string());
     app.edit_popup.cursor = 0;

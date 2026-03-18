@@ -650,9 +650,9 @@ fn draw_edit_popup(f: &mut Frame, app: &App) {
                 {
                     // Indices match MEM_* constants in tui/input.rs
                     let unit_hint = match app.edit_popup.memory_cursor {
-                        1 => " (count)",      // MEM_MAX_RECALL
-                        2 => " (bytes)",      // MEM_MAX_RECALL_BYTES
-                        3 | 4 => " (days)",   // MEM_OBSERVATION_TTL | MEM_SUMMARY_TTL
+                        1 => " (count)",    // MEM_MAX_RECALL
+                        2 => " (bytes)",    // MEM_MAX_RECALL_BYTES
+                        3 | 4 => " (days)", // MEM_OBSERVATION_TTL | MEM_SUMMARY_TTL
                         _ => "",
                     };
                     selected_line_start = body_lines.len();

@@ -3436,11 +3436,7 @@ pub(super) fn remove_agent(app: &mut App) {
     if app.config.memory.extraction_agent == removed_name {
         app.config.memory.extraction_agent = String::new();
     }
-    if app
-        .session_memory_extraction_agent
-        .as_deref()
-        == Some(removed_name.as_str())
-    {
+    if app.session_memory_extraction_agent.as_deref() == Some(removed_name.as_str()) {
         app.session_memory_extraction_agent = None;
     }
     app.edit_popup.cursor = app
@@ -3684,10 +3680,7 @@ pub(super) fn set_memory_override_from_buffer(app: &mut App) -> Result<(), Strin
             // Empty string means "auto" — always valid.
             if !raw.is_empty()
                 && !app.config.agents.iter().any(|a| a.name == raw)
-                && !app
-                    .session_overrides
-                    .values()
-                    .any(|a| a.name == raw)
+                && !app.session_overrides.values().any(|a| a.name == raw)
             {
                 let mut names: Vec<&str> =
                     app.config.agents.iter().map(|a| a.name.as_str()).collect();
