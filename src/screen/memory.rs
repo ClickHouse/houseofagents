@@ -26,11 +26,32 @@ pub fn draw(f: &mut Frame, app: &App) {
         .split(f.area());
 
     // Title
-    let filter_text = match app.memory.management_kind_filter {
-        Some(kind) => format!(" [filter: {}]", kind.as_str()),
-        None => String::new(),
+    let mut filter_parts = Vec::new();
+    if let Some(kind) = app.memory.management_kind_filter {
+        filter_parts.push(kind.as_str().to_string());
+    }
+    if app.memory.management_never_recalled_filter {
+        filter_parts.push("never recalled".to_string());
+    }
+    let filter_text = if filter_parts.is_empty() {
+        String::new()
+    } else {
+        format!(" [filter: {}]", filter_parts.join(", "))
     };
-    let title = Paragraph::new(Line::from(vec![
+    let db_size_text = app
+        .memory
+        .cached_db_size
+        .map(|b| {
+            if b < 1024 {
+                format!(", {b} B")
+            } else if b < 1024 * 1024 {
+                format!(", {} KB", b / 1024)
+            } else {
+                format!(", {:.1} MB", b as f64 / (1024.0 * 1024.0))
+            }
+        })
+        .unwrap_or_default();
+    let mut title_spans = vec![
         Span::styled(
             " Memory Management ",
             Style::default()
@@ -38,15 +59,26 @@ pub fn draw(f: &mut Frame, app: &App) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!(
-                "({} memories{})",
-                app.memory.management_memories.len(),
-                filter_text
-            ),
+            {
+                let loaded = app.memory.management_memories.len() as u64;
+                let total = app.memory.management_total_count;
+                if total > loaded {
+                    format!("(showing {loaded} of {total} memories{db_size_text}{filter_text})")
+                } else {
+                    format!("({loaded} memories{db_size_text}{filter_text})")
+                }
+            },
             Style::default().fg(Color::DarkGray),
         ),
-    ]))
-    .block(Block::default().borders(Borders::BOTTOM));
+    ];
+    if app.memory.pending_bulk_delete {
+        title_spans.push(Span::styled(
+            "  Press D again to confirm bulk delete",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ));
+    }
+    let title =
+        Paragraph::new(Line::from(title_spans)).block(Block::default().borders(Borders::BOTTOM));
     f.render_widget(title, chunks[0]);
 
     // Content: split into list + detail
@@ -147,6 +179,18 @@ pub fn draw(f: &mut Frame, app: &App) {
                 Span::raw(format!("{}", mem.evidence_count)),
             ]));
         }
+        if mem.recall_count > 0 {
+            lines.push(Line::from(vec![
+                Span::styled("Recalled: ", Style::default().fg(Color::Yellow)),
+                Span::raw(format!("{} times", mem.recall_count)),
+            ]));
+        }
+        if let Some(ref recalled_at) = mem.last_recalled_at {
+            lines.push(Line::from(vec![
+                Span::styled("Last recalled: ", Style::default().fg(Color::DarkGray)),
+                Span::raw(recalled_at.chars().take(19).collect::<String>()),
+            ]));
+        }
         lines.push(Line::from(vec![
             Span::styled("Created: ", Style::default().fg(Color::DarkGray)),
             Span::raw(mem.created_at.chars().take(19).collect::<String>()),
@@ -174,8 +218,12 @@ pub fn draw(f: &mut Frame, app: &App) {
         Span::raw(": navigate  "),
         Span::styled("d", Style::default().fg(Color::Yellow)),
         Span::raw(": delete  "),
+        Span::styled("D", Style::default().fg(Color::Yellow)),
+        Span::raw(": bulk delete  "),
         Span::styled("f", Style::default().fg(Color::Yellow)),
         Span::raw(": filter kind  "),
+        Span::styled("r", Style::default().fg(Color::Yellow)),
+        Span::raw(": never recalled  "),
         Span::styled("q/Esc", Style::default().fg(Color::Yellow)),
         Span::raw(": back"),
     ]))

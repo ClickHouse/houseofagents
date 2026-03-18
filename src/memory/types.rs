@@ -70,6 +70,8 @@ pub struct Memory {
     pub created_at: String,
     pub expires_at: Option<String>,
     pub updated_at: String,
+    pub recall_count: i64,
+    pub last_recalled_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

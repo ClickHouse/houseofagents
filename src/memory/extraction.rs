@@ -1,16 +1,35 @@
 use super::types::ExtractedMemory;
 use crate::post_run::{PostRunPromptBudget, EXTRACTION_MAX_INPUT_BYTES};
 
-pub fn build_extraction_prompt(files: &[(String, std::path::PathBuf)]) -> Result<String, String> {
-    let mut prompt = String::from(
+pub fn build_extraction_prompt(
+    files: &[(String, std::path::PathBuf)],
+    observation_ttl_days: u32,
+    summary_ttl_days: u32,
+) -> Result<String, String> {
+    let mut prompt = format!(
         "Extract reusable memories from these agent outputs. Return a JSON array.\n\n\
-         Each object: {\"kind\": \"decision|observation|summary|principle\", \
-         \"content\": \"...\", \"reasoning\": \"...\", \"tags\": [\"...\"]}\n\n\
-         Rules:\n\
-         - decision: a choice made and why (permanent)\n\
-         - observation: a factual finding (temporary)\n\
-         - summary: high-level run summary (temporary)\n\
-         - principle: reusable rule/pattern (permanent, reinforced if repeated)\n\n\
+         Each object: {{\"kind\": \"decision|observation|summary|principle\", \
+         \"content\": \"...\", \"reasoning\": \"...\", \"tags\": [\"...\"]}}\n\n\
+         Kinds:\n\
+         - decision: a choice made and why (permanent). Be specific about what was chosen and the alternatives rejected.\n\
+         - observation: a factual finding about the environment, APIs, or tools (temporary, expires after {observation_ttl_days} days).\n\
+         - summary: high-level run summary capturing the goal and outcome (temporary, expires after {summary_ttl_days} days). Limit to 1 per run.\n\
+         - principle: a reusable rule or pattern worth following again (permanent, reinforced if repeated).\n\n\
+         Quality rules:\n\
+         - A memory should be useful to an agent that has never seen this run.\n\
+         - Be specific about *what* and *why*, not *where* (file paths) or *when* (timestamps).\n\
+         - Extract 3-8 memories per run. Fewer high-quality memories beat many low-quality ones.\n\
+         - Use 1-3 lowercase domain tags per memory (e.g., \"database\", \"auth\", \"perf\").\n\n\
+         Examples of GOOD memories:\n\
+         - decision: \"Use connection pooling with max 20 connections for PostgreSQL\" reasoning: \"Single connections caused timeouts under load\"\n\
+         - observation: \"The Gemini API returns 429 errors above 60 requests/minute\" reasoning: \"Discovered during load testing\"\n\
+         - principle: \"Always validate pagination parameters before passing to SQL queries\" reasoning: \"Unbounded LIMIT/OFFSET caused full table scans\"\n\
+         - summary: \"Implemented user authentication with OAuth2, replacing the legacy session-based system\" reasoning: \"Security audit required modern auth\"\n\n\
+         Examples of BAD memories (do NOT produce these):\n\
+         - \"Changed the database code\" (too vague, no actionable detail)\n\
+         - \"Be careful with code\" (too generic, not actionable)\n\
+         - \"The run completed successfully\" (trivial, not reusable)\n\
+         - \"Modified line 42 in foo.rs\" (too specific to file location, ephemeral)\n\n\
          Return only the JSON array.\n\nAgent outputs:\n",
     );
 
@@ -47,9 +66,7 @@ pub fn build_extraction_prompt(files: &[(String, std::path::PathBuf)]) -> Result
                 _ => continue,
             };
             let truncated = if content.len() > limit {
-                // Truncate to byte-safe boundary
-                let end = floor_char_boundary(&content, limit);
-                &content[..end]
+                &content[..floor_char_boundary(&content, limit)]
             } else {
                 &content
             };
@@ -68,52 +85,67 @@ pub fn build_extraction_prompt(files: &[(String, std::path::PathBuf)]) -> Result
     Ok(prompt)
 }
 
+/// Maximum memories accepted from a single extraction. Prevents a chatty model
+/// from flooding the database even when the prompt asks for 3-8.
+const MAX_EXTRACTED_MEMORIES: usize = 10;
+
 pub fn parse_extraction_response(response: &str) -> Vec<ExtractedMemory> {
     let trimmed = response.trim();
 
+    let mut result = None;
+
     // Try 1: raw JSON array
-    if let Ok(memories) = serde_json::from_str::<Vec<ExtractedMemory>>(trimmed) {
-        return memories;
+    if result.is_none() {
+        if let Ok(memories) = serde_json::from_str::<Vec<ExtractedMemory>>(trimmed) {
+            result = Some(memories);
+        }
     }
 
     // Try 2: extract from ```json ... ``` fence
-    if let Some(json_str) = extract_fenced_json(trimmed) {
-        if let Ok(memories) = serde_json::from_str::<Vec<ExtractedMemory>>(json_str) {
-            return memories;
+    if result.is_none() {
+        if let Some(json_str) = extract_fenced_json(trimmed) {
+            if let Ok(memories) = serde_json::from_str::<Vec<ExtractedMemory>>(json_str) {
+                result = Some(memories);
+            }
         }
     }
 
     // Try 3: bare ``` ... ``` fence
-    if let Some(start) = trimmed.find("```") {
-        let after = &trimmed[start + 3..];
-        // Skip optional language tag on same line
-        let content_start = after.find('\n').map(|i| i + 1).unwrap_or(0);
-        if let Some(end) = after[content_start..].find("```") {
-            let json_str = after[content_start..content_start + end].trim();
-            if let Ok(memories) = serde_json::from_str::<Vec<ExtractedMemory>>(json_str) {
-                return memories;
+    if result.is_none() {
+        if let Some(start) = trimmed.find("```") {
+            let after = &trimmed[start + 3..];
+            // Skip optional language tag on same line
+            let content_start = after.find('\n').map(|i| i + 1).unwrap_or(0);
+            if let Some(end) = after[content_start..].find("```") {
+                let json_str = after[content_start..content_start + end].trim();
+                if let Ok(memories) = serde_json::from_str::<Vec<ExtractedMemory>>(json_str) {
+                    result = Some(memories);
+                }
             }
         }
     }
 
     // Try 4: {"memories": [...]} wrapper
-    if let Ok(wrapper) = serde_json::from_str::<serde_json::Value>(trimmed) {
-        if let Some(arr) = wrapper.get("memories").and_then(|v| v.as_array()) {
-            if let Ok(memories) = serde_json::from_value::<Vec<ExtractedMemory>>(
-                serde_json::Value::Array(arr.clone()),
-            ) {
-                return memories;
+    if result.is_none() {
+        if let Ok(wrapper) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            if let Some(arr) = wrapper.get("memories").and_then(|v| v.as_array()) {
+                if let Ok(memories) = serde_json::from_value::<Vec<ExtractedMemory>>(
+                    serde_json::Value::Array(arr.clone()),
+                ) {
+                    result = Some(memories);
+                }
             }
         }
     }
 
-    // Give up gracefully
-    Vec::new()
+    // Apply hard cap to prevent DB flooding from chatty models
+    let mut memories = result.unwrap_or_default();
+    memories.truncate(MAX_EXTRACTED_MEMORIES);
+    memories
 }
 
-/// Find the largest byte index ≤ `max` that is a valid char boundary.
-/// Equivalent to the nightly `str::floor_char_boundary`.
-fn floor_char_boundary(s: &str, max: usize) -> usize {
+/// Find the largest byte index <= `max` that is a valid char boundary.
+pub(super) fn floor_char_boundary(s: &str, max: usize) -> usize {
     if max >= s.len() {
         return s.len();
     }
@@ -146,7 +178,7 @@ mod tests {
         let file = dir.path().join("test.md");
         std::fs::write(&file, "Agent output content here").unwrap();
 
-        let prompt = build_extraction_prompt(&[("Agent1".into(), file)]).unwrap();
+        let prompt = build_extraction_prompt(&[("Agent1".into(), file)], 90, 180).unwrap();
         assert!(prompt.contains("Agent output content here"));
         assert!(prompt.contains("--- Agent1 ---"));
     }
@@ -162,7 +194,7 @@ mod tests {
             files.push((format!("Agent{i}"), file));
         }
 
-        let prompt = build_extraction_prompt(&files).unwrap();
+        let prompt = build_extraction_prompt(&files, 90, 180).unwrap();
         // Should not fail, just truncate
         assert!(prompt.len() < 150 * 1024);
     }
@@ -174,7 +206,7 @@ mod tests {
         // Create a single file larger than the extraction budget
         std::fs::write(&file, "y".repeat(200 * 1024)).unwrap();
 
-        let prompt = build_extraction_prompt(&[("Agent1".into(), file)]).unwrap();
+        let prompt = build_extraction_prompt(&[("Agent1".into(), file)], 90, 180).unwrap();
         assert!(prompt.contains("truncated to fit extraction budget"));
         // Should be capped close to 100KB, not the full 200KB
         assert!(prompt.len() < 110 * 1024);
@@ -222,5 +254,20 @@ mod tests {
     fn parse_empty_returns_empty() {
         let memories = parse_extraction_response("");
         assert!(memories.is_empty());
+    }
+
+    #[test]
+    fn parse_truncates_to_hard_cap() {
+        // Generate 15 valid memories — should be capped to MAX_EXTRACTED_MEMORIES
+        let items: Vec<String> = (0..15)
+            .map(|i| {
+                format!(
+                    r#"{{"kind":"observation","content":"Finding number {i}","reasoning":"test"}}"#
+                )
+            })
+            .collect();
+        let response = format!("[{}]", items.join(","));
+        let memories = parse_extraction_response(&response);
+        assert_eq!(memories.len(), MAX_EXTRACTED_MEMORIES);
     }
 }

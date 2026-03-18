@@ -148,6 +148,8 @@ mod tests {
                 created_at: String::new(),
                 expires_at: None,
                 updated_at: String::new(),
+                recall_count: 0,
+                last_recalled_at: None,
             }],
             total_bytes: 10,
         };
@@ -174,6 +176,8 @@ mod tests {
                 created_at: String::new(),
                 expires_at: None,
                 updated_at: String::new(),
+                recall_count: 0,
+                last_recalled_at: None,
             }],
             total_bytes: 20,
         };
@@ -198,6 +202,8 @@ mod tests {
                     created_at: String::new(),
                     expires_at: None,
                     updated_at: String::new(),
+                    recall_count: 0,
+                    last_recalled_at: None,
                 },
                 Memory {
                     id: 2,
@@ -212,6 +218,8 @@ mod tests {
                     created_at: String::new(),
                     expires_at: None,
                     updated_at: String::new(),
+                    recall_count: 0,
+                    last_recalled_at: None,
                 },
             ],
             total_bytes: 30,
@@ -242,6 +250,8 @@ mod tests {
                 created_at: String::new(),
                 expires_at: None,
                 updated_at: String::new(),
+                recall_count: 0,
+                last_recalled_at: None,
             }],
             total_bytes: 10,
         };

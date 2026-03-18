@@ -257,7 +257,7 @@ extra_cli_args = ""
 | `project_id` | Override automatic project detection (default: derived from git remote or cwd) |
 | `max_recall` | Max memories to recall per run (default: 15) |
 | `max_recall_bytes` | Byte budget for recalled memory context (default: 8192) |
-| `extraction_agent` | Agent to use for post-run memory extraction (default: first participating agent, then first configured) |
+| `extraction_agent` | Agent to use for post-run memory extraction (default: first participating agent, then first configured). Stronger models produce higher-quality memories. |
 | `disable_extraction` | Disable post-run memory extraction (default: false) |
 | `observation_ttl_days` | Days before observations expire (default: 90) |
 | `summary_ttl_days` | Days before summaries expire (default: 180) |
@@ -299,7 +299,9 @@ Anthropic `thinking_effort = "max"` is rejected in API mode. In CLI mode, House 
 |-----|--------|
 | `j` / `k` / `Up` / `Down` | Navigate memories |
 | `d` | Delete selected memory |
+| `D` | Bulk delete all visible memories (press twice to confirm) |
 | `f` | Cycle kind filter (all → decision → observation → summary → principle) |
+| `r` | Toggle "never recalled" filter |
 | `q` / `Esc` | Back to home |
 
 ### Config Editor
