@@ -117,6 +117,17 @@ pub fn home_help_lines() -> &'static [Line<'static>] {
                 Span::raw(": back"),
             ]),
             Line::from(""),
+            Line::from("  Memory settings are configurable in the config popup"),
+            Line::from("  (press e on home screen, then Tab to the Memory tab)."),
+            Line::from(vec![
+                Span::styled("  Space", Style::default().fg(Color::Yellow)),
+                Span::raw(": toggle  "),
+                Span::styled("Enter/e", Style::default().fg(Color::Yellow)),
+                Span::raw(": edit value  "),
+                Span::styled("s", Style::default().fg(Color::Yellow)),
+                Span::raw(": save to disk"),
+            ]),
+            Line::from(""),
         ]
     });
     &LINES

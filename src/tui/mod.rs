@@ -107,7 +107,7 @@ pub async fn run(app: &mut App) -> anyhow::Result<()> {
                 if let Some(ref mut rx) = app.edit_popup.config_save_rx {
                     rx.recv().await
                 } else {
-                    std::future::pending::<Option<Result<(), String>>>().await
+                    std::future::pending::<Option<Result<crate::config::AppConfig, String>>>().await
                 }
             } => {
                 input::handle_config_save_result(app, save_result);

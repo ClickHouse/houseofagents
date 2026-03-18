@@ -8,6 +8,7 @@ use super::results::{
 use super::text_edit::*;
 use super::*;
 use crate::app::PipelineFeedEditField;
+use crate::config::AppConfig;
 
 /// Upper bound for numeric fields such as iterations, runs, and concurrency.
 const MAX_NUMERIC_FIELD: u32 = 99;
@@ -94,7 +95,7 @@ pub(super) fn handle_home_key(app: &mut App, key: KeyEvent) {
             app.help_popup.open(1);
         }
         KeyCode::Char('M') => {
-            if app.config.memory.enabled && app.memory.store.is_some() {
+            if app.effective_memory_enabled() && app.memory.store.is_some() {
                 refresh_memory_list(app);
                 app.screen = Screen::Memory;
             }
@@ -104,6 +105,7 @@ pub(super) fn handle_home_key(app: &mut App, key: KeyEvent) {
             app.edit_popup.section = EditPopupSection::Providers;
             app.edit_popup.cursor = 0;
             app.edit_popup.timeout_cursor = 0;
+            app.edit_popup.memory_cursor = 0;
             app.edit_popup.editing = false;
             app.edit_popup.edit_buffer.clear();
         }
@@ -2781,6 +2783,16 @@ pub(super) fn handle_edit_popup_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
+    // While a config save is in flight, only allow Esc (to close) and
+    // navigation (Tab/arrows). All edits are blocked so the user cannot
+    // modify state that the completion handler will overwrite.
+    if app.edit_popup.config_save_in_progress {
+        if key.code == KeyCode::Esc {
+            app.edit_popup.visible = false;
+        }
+        return;
+    }
+
     match key.code {
         KeyCode::Esc => {
             if app.edit_popup.editing {
@@ -2793,7 +2805,16 @@ pub(super) fn handle_edit_popup_key(app: &mut App, key: KeyEvent) {
         KeyCode::Tab if !app.edit_popup.editing => {
             app.edit_popup.section = match app.edit_popup.section {
                 EditPopupSection::Providers => EditPopupSection::Timeouts,
+                EditPopupSection::Timeouts => EditPopupSection::Memory,
+                EditPopupSection::Memory => EditPopupSection::Providers,
+            };
+            app.edit_popup.edit_buffer.clear();
+        }
+        KeyCode::BackTab if !app.edit_popup.editing => {
+            app.edit_popup.section = match app.edit_popup.section {
+                EditPopupSection::Providers => EditPopupSection::Memory,
                 EditPopupSection::Timeouts => EditPopupSection::Providers,
+                EditPopupSection::Memory => EditPopupSection::Timeouts,
             };
             app.edit_popup.edit_buffer.clear();
         }
@@ -2804,6 +2825,9 @@ pub(super) fn handle_edit_popup_key(app: &mut App, key: KeyEvent) {
                 }
                 EditPopupSection::Timeouts => {
                     app.edit_popup.timeout_cursor = app.edit_popup.timeout_cursor.saturating_sub(1);
+                }
+                EditPopupSection::Memory => {
+                    app.edit_popup.memory_cursor = app.edit_popup.memory_cursor.saturating_sub(1);
                 }
             }
         }
@@ -2819,6 +2843,12 @@ pub(super) fn handle_edit_popup_key(app: &mut App, key: KeyEvent) {
                     let max = timeout_field_count().saturating_sub(1);
                     if app.edit_popup.timeout_cursor < max {
                         app.edit_popup.timeout_cursor += 1;
+                    }
+                }
+                EditPopupSection::Memory => {
+                    let max = MEM_FIELD_COUNT.saturating_sub(1);
+                    if app.edit_popup.memory_cursor < max {
+                        app.edit_popup.memory_cursor += 1;
                     }
                 }
             }
@@ -2908,22 +2938,33 @@ pub(super) fn handle_edit_popup_key(app: &mut App, key: KeyEvent) {
         {
             remove_agent(app);
         }
-        KeyCode::Char('e') if !app.edit_popup.editing => {
-            if app.edit_popup.section == EditPopupSection::Timeouts {
-                begin_timeout_edit(app);
-            }
+        KeyCode::Char('e') if !app.edit_popup.editing => match app.edit_popup.section {
+            EditPopupSection::Timeouts => begin_timeout_edit(app),
+            EditPopupSection::Memory => begin_memory_edit(app),
+            _ => {}
+        },
+        KeyCode::Char(' ')
+            if !app.edit_popup.editing && app.edit_popup.section == EditPopupSection::Memory =>
+        {
+            toggle_memory_field(app);
         }
-        KeyCode::Enter if !app.edit_popup.editing => {
-            if app.edit_popup.section == EditPopupSection::Timeouts {
-                begin_timeout_edit(app);
-            } else {
+        KeyCode::Enter if !app.edit_popup.editing => match app.edit_popup.section {
+            EditPopupSection::Timeouts => begin_timeout_edit(app),
+            EditPopupSection::Memory => {
+                if is_memory_toggle_field(app.edit_popup.memory_cursor) {
+                    toggle_memory_field(app);
+                } else {
+                    begin_memory_edit(app);
+                }
+            }
+            _ => {
                 app.edit_popup.field = EditField::ApiKey;
                 app.edit_popup.edit_buffer = effective_section_config(app)
                     .map(|c| c.api_key)
                     .unwrap_or_default();
                 app.edit_popup.editing = true;
             }
-        }
+        },
         KeyCode::Enter if app.edit_popup.editing => {
             if matches!(app.edit_popup.field, EditField::OutputDir) {
                 let new_output_dir = app.edit_popup.edit_buffer.trim();
@@ -2933,7 +2974,7 @@ pub(super) fn handle_edit_popup_key(app: &mut App, key: KeyEvent) {
                     let old_output_dir = app.config.output_dir.clone();
                     app.config.output_dir = new_output_dir.to_string();
                     // Reopen memory store if db_path is derived from output_dir
-                    if app.config.memory.enabled
+                    if app.effective_memory_enabled()
                         && app.config.memory.db_path.is_empty()
                         && new_output_dir != old_output_dir
                     {
@@ -2966,6 +3007,11 @@ pub(super) fn handle_edit_popup_key(app: &mut App, key: KeyEvent) {
                     app.error_modal = Some(e);
                     return;
                 }
+            } else if matches!(app.edit_popup.field, EditField::MemoryValue) {
+                if let Err(e) = set_memory_override_from_buffer(app) {
+                    app.error_modal = Some(e);
+                    return;
+                }
             } else {
                 let mut config =
                     effective_section_config(app).unwrap_or_else(empty_provider_config);
@@ -2975,7 +3021,10 @@ pub(super) fn handle_edit_popup_key(app: &mut App, key: KeyEvent) {
                     EditField::ExtraCliArgs => {
                         config.extra_cli_args = app.edit_popup.edit_buffer.clone()
                     }
-                    EditField::OutputDir | EditField::TimeoutSeconds | EditField::AgentName => {}
+                    EditField::OutputDir
+                    | EditField::TimeoutSeconds
+                    | EditField::AgentName
+                    | EditField::MemoryValue => {}
                 }
                 set_section_config_override(app, config);
             }
@@ -2988,6 +3037,11 @@ pub(super) fn handle_edit_popup_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char(c) if app.edit_popup.editing => {
             if matches!(app.edit_popup.field, EditField::TimeoutSeconds) {
                 if c.is_ascii_digit() {
+                    app.edit_popup.edit_buffer.push(c);
+                }
+            } else if matches!(app.edit_popup.field, EditField::MemoryValue) {
+                // Extraction agent allows any char; other memory fields are numeric
+                if app.edit_popup.memory_cursor == MEM_EXTRACTION_AGENT || c.is_ascii_digit() {
                     app.edit_popup.edit_buffer.push(c);
                 }
             } else {
@@ -3151,34 +3205,63 @@ pub(super) fn save_config_globally(app: &mut App) {
         return;
     }
 
-    // Merge session agent overrides into config.agents
+    // Build a merged config clone for saving. We do NOT mutate app.config here
+    // so that a save failure leaves it untouched. The success handler applies
+    // the merge once we know the write succeeded.
+    let mut config_to_save = app.config.clone();
     for (name, override_agent) in &app.session_overrides {
-        if let Some(idx) = app.config.agents.iter().position(|a| &a.name == name) {
-            app.config.agents[idx] = override_agent.clone();
+        if let Some(idx) = config_to_save.agents.iter().position(|a| &a.name == name) {
+            config_to_save.agents[idx] = override_agent.clone();
         }
     }
     if let Some(value) = app.session_http_timeout_seconds {
-        app.config.http_timeout_seconds = value;
+        config_to_save.http_timeout_seconds = value;
     }
     if let Some(value) = app.session_model_fetch_timeout_seconds {
-        app.config.model_fetch_timeout_seconds = value;
+        config_to_save.model_fetch_timeout_seconds = value;
     }
     if let Some(value) = app.session_cli_timeout_seconds {
-        app.config.cli_timeout_seconds = value;
+        config_to_save.cli_timeout_seconds = value;
+    }
+    if let Some(v) = app.session_memory_enabled {
+        config_to_save.memory.enabled = v;
+    }
+    if let Some(v) = app.session_memory_max_recall {
+        config_to_save.memory.max_recall = v;
+    }
+    if let Some(v) = app.session_memory_max_recall_bytes {
+        config_to_save.memory.max_recall_bytes = v;
+    }
+    if let Some(v) = app.session_memory_observation_ttl_days {
+        config_to_save.memory.observation_ttl_days = v;
+    }
+    if let Some(v) = app.session_memory_summary_ttl_days {
+        config_to_save.memory.summary_ttl_days = v;
+    }
+    if let Some(ref v) = app.session_memory_extraction_agent {
+        config_to_save.memory.extraction_agent = v.clone();
+    }
+    if let Some(v) = app.session_memory_disable_extraction {
+        config_to_save.memory.disable_extraction = v;
     }
     app.edit_popup.config_save_in_progress = true;
-    let config_to_save = app.config.clone();
     let path_override = app.config_path_override.clone();
 
     let (tx, rx) = mpsc::unbounded_channel();
     app.edit_popup.config_save_rx = Some(rx);
 
     tokio::spawn(async move {
-        let result = tokio::task::spawn_blocking(move || match path_override.as_deref() {
-            Some(path) => config_to_save
-                .save_with_override(Some(path))
-                .map_err(|e| e.to_string()),
-            None => config_to_save.save().map_err(|e| e.to_string()),
+        let result = tokio::task::spawn_blocking(move || {
+            let save_result = match path_override.as_deref() {
+                Some(path) => config_to_save
+                    .save_with_override(Some(path))
+                    .map_err(|e| e.to_string()),
+                None => config_to_save.save().map_err(|e| e.to_string()),
+            };
+            // On success, return the exact config that was written to disk.
+            // This eliminates the race where overrides change between save
+            // dispatch and the success handler.
+            save_result.map(|()| config_to_save)
         })
         .await;
 
@@ -3190,16 +3273,27 @@ pub(super) fn save_config_globally(app: &mut App) {
     });
 }
 
-pub(super) fn handle_config_save_result(app: &mut App, result: Result<(), String>) {
+pub(super) fn handle_config_save_result(app: &mut App, result: Result<AppConfig, String>) {
     app.edit_popup.config_save_in_progress = false;
     app.edit_popup.config_save_rx = None;
 
     match result {
-        Ok(()) => {
+        Ok(saved_config) => {
+            // Replace app.config with the exact config written to disk.
+            // This eliminates the race where the user edits overrides while
+            // the async save is in flight — we always converge to the saved state.
+            app.config = saved_config;
             app.session_overrides.clear();
             app.session_http_timeout_seconds = None;
             app.session_model_fetch_timeout_seconds = None;
             app.session_cli_timeout_seconds = None;
+            app.session_memory_enabled = None;
+            app.session_memory_max_recall = None;
+            app.session_memory_max_recall_bytes = None;
+            app.session_memory_observation_ttl_days = None;
+            app.session_memory_summary_ttl_days = None;
+            app.session_memory_extraction_agent = None;
+            app.session_memory_disable_extraction = None;
             app.error_modal = None;
             app.info_modal = Some("Config saved to disk".into());
         }
@@ -3338,6 +3432,17 @@ pub(super) fn remove_agent(app: &mut App) {
     if app.config.diagnostic_provider.as_deref() == Some(removed_name.as_str()) {
         app.config.diagnostic_provider = None;
     }
+    // Clear extraction agent if it referenced the removed agent
+    if app.config.memory.extraction_agent == removed_name {
+        app.config.memory.extraction_agent = String::new();
+    }
+    if app
+        .session_memory_extraction_agent
+        .as_deref()
+        == Some(removed_name.as_str())
+    {
+        app.session_memory_extraction_agent = None;
+    }
     app.edit_popup.cursor = app
         .edit_popup
         .cursor
@@ -3412,7 +3517,14 @@ pub(super) fn commit_agent_rename(app: &mut App) {
         }
     }
     if app.config.diagnostic_provider.as_deref() == Some(old_name.as_str()) {
-        app.config.diagnostic_provider = Some(new_name);
+        app.config.diagnostic_provider = Some(new_name.clone());
+    }
+    // Follow rename for extraction agent references
+    if app.config.memory.extraction_agent == old_name {
+        app.config.memory.extraction_agent = new_name.clone();
+    }
+    if app.session_memory_extraction_agent.as_deref() == Some(old_name.as_str()) {
+        app.session_memory_extraction_agent = Some(new_name);
     }
     app.edit_popup.edit_buffer.clear();
     app.edit_popup.editing = false;
@@ -3453,6 +3565,147 @@ pub(super) fn set_timeout_override_from_buffer(app: &mut App) -> Result<(), Stri
         _ => return Err("Invalid timeout field".into()),
     }
 
+    Ok(())
+}
+
+// Memory config field indices. Keep in sync with the MemoryRow vec in
+// screen/home.rs::draw_edit_popup (EditPopupSection::Memory branch).
+pub(crate) const MEM_ENABLED: usize = 0;
+pub(crate) const MEM_MAX_RECALL: usize = 1;
+pub(crate) const MEM_MAX_RECALL_BYTES: usize = 2;
+pub(crate) const MEM_OBSERVATION_TTL: usize = 3;
+pub(crate) const MEM_SUMMARY_TTL: usize = 4;
+pub(crate) const MEM_EXTRACTION_AGENT: usize = 5;
+pub(crate) const MEM_DISABLE_EXTRACTION: usize = 6;
+pub(crate) const MEM_FIELD_COUNT: usize = 7;
+
+// Compile-time guard: if you add a new MEM_* field, bump MEM_FIELD_COUNT too.
+const _: () = assert!(MEM_DISABLE_EXTRACTION + 1 == MEM_FIELD_COUNT);
+
+/// Whether the given memory cursor index is a boolean toggle field.
+pub(super) fn is_memory_toggle_field(cursor: usize) -> bool {
+    matches!(cursor, MEM_ENABLED | MEM_DISABLE_EXTRACTION)
+}
+
+pub(super) fn toggle_memory_field(app: &mut App) {
+    match app.edit_popup.memory_cursor {
+        MEM_ENABLED => {
+            let current = app.effective_memory_enabled();
+            app.session_memory_enabled = Some(!current);
+            if current {
+                // Disabling: drop the store so a later re-enable (possibly
+                // after an output_dir change) opens a fresh one.
+                app.memory.store = None;
+            } else if app.memory.store.is_none() {
+                let db_path = if app.config.memory.db_path.is_empty() {
+                    app.config.resolved_output_dir().join("memory.db")
+                } else {
+                    std::path::PathBuf::from(&app.config.memory.db_path)
+                };
+                match crate::memory::store::MemoryStore::open(&db_path) {
+                    Ok(store) => {
+                        app.memory.store = Some(store);
+                        app.memory.project_id = crate::memory::project::detect_project_id(
+                            &app.config.memory.project_id,
+                        );
+                    }
+                    Err(e) => {
+                        app.error_modal = Some(format!("Failed to open memory store: {e}"));
+                    }
+                }
+            }
+        }
+        MEM_DISABLE_EXTRACTION => {
+            let current = app.effective_memory_disable_extraction();
+            app.session_memory_disable_extraction = Some(!current);
+        }
+        _ => {}
+    }
+}
+
+pub(super) fn begin_memory_edit(app: &mut App) {
+    // Don't start text edit for toggle fields
+    if is_memory_toggle_field(app.edit_popup.memory_cursor) {
+        toggle_memory_field(app);
+        return;
+    }
+    app.edit_popup.field = EditField::MemoryValue;
+    app.edit_popup.edit_buffer = match app.edit_popup.memory_cursor {
+        MEM_MAX_RECALL => app.effective_memory_max_recall().to_string(),
+        MEM_MAX_RECALL_BYTES => app.effective_memory_max_recall_bytes().to_string(),
+        MEM_OBSERVATION_TTL => app.effective_memory_observation_ttl_days().to_string(),
+        MEM_SUMMARY_TTL => app.effective_memory_summary_ttl_days().to_string(),
+        MEM_EXTRACTION_AGENT => app.effective_memory_extraction_agent().to_string(),
+        _ => String::new(),
+    };
+    app.edit_popup.editing = true;
+}
+
+pub(super) fn set_memory_override_from_buffer(app: &mut App) -> Result<(), String> {
+    let raw = app.edit_popup.edit_buffer.trim().to_string();
+    match app.edit_popup.memory_cursor {
+        MEM_MAX_RECALL => {
+            let v = raw
+                .parse::<usize>()
+                .map_err(|_| "Max recall must be a positive integer".to_string())?;
+            if v == 0 {
+                return Err("Max recall must be at least 1".into());
+            }
+            app.session_memory_max_recall = Some(v);
+        }
+        MEM_MAX_RECALL_BYTES => {
+            let v = raw
+                .parse::<usize>()
+                .map_err(|_| "Max recall bytes must be a positive integer".to_string())?;
+            if v == 0 {
+                return Err("Max recall bytes must be at least 1".into());
+            }
+            app.session_memory_max_recall_bytes = Some(v);
+        }
+        MEM_OBSERVATION_TTL => {
+            let v = raw
+                .parse::<u32>()
+                .map_err(|_| "Observation TTL must be a positive integer".to_string())?;
+            if v == 0 {
+                return Err("Observation TTL must be at least 1 day".into());
+            }
+            app.session_memory_observation_ttl_days = Some(v);
+        }
+        MEM_SUMMARY_TTL => {
+            let v = raw
+                .parse::<u32>()
+                .map_err(|_| "Summary TTL must be a positive integer".to_string())?;
+            if v == 0 {
+                return Err("Summary TTL must be at least 1 day".into());
+            }
+            app.session_memory_summary_ttl_days = Some(v);
+        }
+        MEM_EXTRACTION_AGENT => {
+            // Empty string means "auto" — always valid.
+            if !raw.is_empty()
+                && !app.config.agents.iter().any(|a| a.name == raw)
+                && !app
+                    .session_overrides
+                    .values()
+                    .any(|a| a.name == raw)
+            {
+                let mut names: Vec<&str> =
+                    app.config.agents.iter().map(|a| a.name.as_str()).collect();
+                for ov in app.session_overrides.values() {
+                    if !names.contains(&ov.name.as_str()) {
+                        names.push(&ov.name);
+                    }
+                }
+                return Err(format!(
+                    "No agent named '{}'. Available: {}",
+                    raw,
+                    names.join(", ")
+                ));
+            }
+            app.session_memory_extraction_agent = Some(raw);
+        }
+        _ => return Err("Invalid memory field".into()),
+    }
     Ok(())
 }
 

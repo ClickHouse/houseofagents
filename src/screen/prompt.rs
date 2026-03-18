@@ -373,7 +373,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             ]
         }
     };
-    if app.config.memory.enabled && app.memory.store.is_some() {
+    if app.effective_memory_enabled() && app.memory.store.is_some() {
         help_spans.push(Span::styled(
             "  Memory: on",
             Style::default().fg(Color::DarkGray),
