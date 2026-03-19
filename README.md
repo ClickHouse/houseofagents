@@ -112,7 +112,7 @@ Headless mode (noninteractive):
       --mode <MODE>               Execution mode: relay, swarm, pipeline [default: swarm]
       --agents <A,B,...>          Comma-separated agent names
       --order <A,B,...>           Explicit relay order (defaults to --agents order)
-      --iterations <N>            Number of iterations
+      --iterations <N>            Number of iterations (relay/swarm only; ignored for pipeline)
       --runs <N>                  Independent runs [default: 1]
       --concurrency <N>           Batch concurrency, 0 = unlimited [default: 0]
       --session-name <NAME>       Output directory label
@@ -155,8 +155,8 @@ houseofagents --prompt "Analyze" --agents Claude --output-format json --quiet
 # Run a saved pipeline
 houseofagents --pipeline my_pipeline.toml
 
-# Override iterations and run in batch
-houseofagents --pipeline my_pipeline.toml --iterations 5 --runs 3
+# Batch: 3 independent runs
+houseofagents --pipeline my_pipeline.toml --runs 3
 
 # Pipeline with consolidation
 houseofagents --pipeline my_pipeline.toml --consolidate Claude
@@ -342,13 +342,13 @@ Anthropic `thinking_effort = "max"` is rejected in API mode. In CLI mode, House 
 | `?` | Open help (unavailable while editing text fields: prompt, session name) |
 | `Esc` | Back |
 
-Fields vary by mode for options, but every prompt flow includes Prompt, Session Name, Iterations, Runs, and Concurrency.
+Fields vary by mode for options, but every prompt flow includes Prompt, Session Name, Runs, and Concurrency. Relay and swarm modes also include Iterations.
 
 ### Pipeline Builder Screen
 
 | Key | Action |
 |-----|--------|
-| `Tab` / `Shift+Tab` | Cycle focus: Initial Prompt → Session Name → Iterations → Runs → Concurrency → Builder |
+| `Tab` / `Shift+Tab` | Cycle focus: Initial Prompt → Session Name → Runs → Concurrency → Builder |
 | `a` | Add a new block |
 | `d` | Delete selected block |
 | `e` | Edit selected block (name, agents, prompt, session ID, replicas) |
@@ -358,11 +358,11 @@ Fields vary by mode for options, but every prompt flow includes Prompt, Session 
 | `A` | Add a finalization block (placed below the separator in the finalization region) |
 | `f` | Create or edit data feed — on an execution block, enters feed-connect mode (navigate to a finalization block and press Enter to create the feed); on a finalization block with multiple feeds, opens a feed list picker for selecting and editing individual feeds (opens edit directly if only one feed) |
 | `F` | Remove a data feed — removes directly if only one feed on the block; on a finalization block with multiple feeds, opens the feed list picker to select which one; on an execution block with multiple feeds, prompts to use the finalization block instead |
-| `s` | Open session configuration popup — toggle per-session history persistence |
+| `s` | Open session configuration popup — toggle per-session Loop history persistence |
 | `Arrow keys` / `h j k l` | Navigate/select blocks spatially without moving |
 | `Shift+Arrow keys` / `Shift+H J K L` | Move selected block (swap with occupied target cell, otherwise move) |
 | `Ctrl+Arrow keys` | Scroll the builder canvas |
-| `↑`/`+` `↓`/`-` | Increment / decrement iterations, runs, or concurrency on the focused numeric field |
+| `↑`/`+` `↓`/`-` | Increment / decrement runs or concurrency on the focused numeric field |
 | `Ctrl+S` | Save pipeline (always prompts for filename, prefills current name) |
 | `Ctrl+L` | Load pipeline from file (type to search, Tab toggles search/list focus, j/k navigates list) |
 | `Ctrl+E` | Analyze setup — sends current pipeline to `diagnostic_provider` for a plain-language explanation |
@@ -510,7 +510,7 @@ Pipeline mode supports an optional **finalization phase** that runs after the ex
 
 | Setting | Options | Description |
 |---------|---------|-------------|
-| **Collection** | `last_iteration` (default), `all_iterations` | Which iteration outputs to collect from execution blocks |
+| **Collection** | `last_pass` (default), `all_passes` | `last_pass` deduplicates loop passes, keeping only the latest output per block. `all_passes` feeds every output including all loop pass variants. |
 | **Granularity** | `per_run` (default), `all_runs` | Whether the finalization block runs once per successful run or once across all runs |
 
 A **per-run** finalization block runs independently for each successful run, receiving only that run's execution outputs. An **all-runs** finalization block runs once, receiving outputs from all successful runs. Per-run blocks can feed into all-runs blocks via finalization connections, enabling patterns like "summarize each run, then synthesize across summaries."
@@ -553,7 +553,6 @@ Example pipeline TOML with finalization:
 
 ```toml
 initial_prompt = "Analyze the codebase"
-iterations = 2
 
 [[blocks]]
 id = 1
@@ -586,7 +585,7 @@ col = 0
 [[data_feeds]]
 from = 0
 to = 3
-collection = "last_iteration"
+collection = "last_pass"
 granularity = "per_run"
 ```
 
@@ -622,7 +621,7 @@ Legacy directories (`YYYYMMDD_HHMMSS_NNN[_session]` and `YYYY-MM-DD/HH-MM-SS[_se
   - Batch roots are excluded from resume lookup; resume is currently single-run only
   - Note: resuming a `keep_session = true` run across app restarts does not restore provider conversation history — providers are recreated fresh, though inter-agent handoff context is preserved
 - **Forward Prompt** (toggle with `Space` on Prompt screen) — relay mode only; when enabled, downstream agents receive the original prompt alongside the previous agent's output, preventing context loss in the handoff chain
-- **Keep Session** (toggle with `Space` on Prompt screen) — on by default; controls whether providers retain their conversation history across iterations. When turned off, each provider's history is cleared before every iteration after the first, so agents treat each round as a fresh conversation. Inter-agent handoff context (relay's previous output, swarm's round outputs) is always preserved regardless of this setting. Pipeline mode has its own per-session session configuration popup accessible via `s` in the Builder screen — each effective session (shared or isolated) can independently toggle two settings: **Iter** (keep across iterations, default on) and **Loop** (keep across loop passes, default on). When Loop is off, provider history is cleared between loop pass advances within a single iteration. Use `h`/`l` to switch columns and `Space` to toggle. Non-default settings are stored in `pipeline.toml` as `[[session_configs]]` entries
+- **Keep Session** (toggle with `Space` on Prompt screen) — on by default; controls whether providers retain their conversation history across iterations. When turned off, each provider's history is cleared before every iteration after the first, so agents treat each round as a fresh conversation. Inter-agent handoff context (relay's previous output, swarm's round outputs) is always preserved regardless of this setting. Pipeline mode has its own per-session session configuration popup accessible via `s` in the Builder screen — each effective session (shared or isolated) can toggle **Loop** (keep across loop passes, default on). When Loop is off, provider history is cleared between loop pass advances. Use `Space` to toggle. Non-default settings are stored in `pipeline.toml` as `[[session_configs]]` entries
 - **Consolidation**
   - Single-run: offered after non-cancelled swarm/pipeline runs with 2+ final outputs
   - Batch: first offers per-run consolidation, then optional cross-run consolidation across successful runs

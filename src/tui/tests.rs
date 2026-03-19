@@ -1562,7 +1562,7 @@ fn session_config_popup_closes_with_esc() {
 fn session_config_popup_toggle_sets_false() {
     let mut app = pipeline_app_with_block();
     handle_key(&mut app, key(KeyCode::Char('s')));
-    // Default is true (keep_across_iterations), toggle to false
+    // Default is true (keep_across_loop_passes), toggle to false
     handle_key(&mut app, key(KeyCode::Char(' ')));
     let sessions = app.pipeline.pipeline_def.effective_sessions();
     assert!(!sessions.is_empty());
@@ -1570,7 +1570,7 @@ fn session_config_popup_toggle_sets_false() {
     assert!(!app
         .pipeline
         .pipeline_def
-        .keep_session_across_iterations(&first.agent, &first.session_key));
+        .keep_session_across_loop_passes(&first.agent, &first.session_key));
 }
 
 #[test]
@@ -1585,7 +1585,7 @@ fn session_config_popup_toggle_back_to_true() {
     assert!(app
         .pipeline
         .pipeline_def
-        .keep_session_across_iterations(&first.agent, &first.session_key));
+        .keep_session_across_loop_passes(&first.agent, &first.session_key));
 }
 
 #[test]
@@ -1617,7 +1617,7 @@ fn session_config_normalizes_on_block_delete() {
     // Set keep=false for block 1's session
     app.pipeline
         .pipeline_def
-        .set_keep_session_across_iterations("Claude", "__block_1", false);
+        .set_keep_session_across_loop_passes("Claude", "__block_1", false);
     assert_eq!(app.pipeline.pipeline_def.session_configs.len(), 1);
     // Delete the block via 'd' key
     handle_key(&mut app, key(KeyCode::Char('d')));
@@ -1631,7 +1631,7 @@ fn session_config_normalizes_on_edit_confirm() {
     // Set keep=false for block 1's session
     app.pipeline
         .pipeline_def
-        .set_keep_session_across_iterations("Claude", "__block_1", false);
+        .set_keep_session_across_loop_passes("Claude", "__block_1", false);
     assert_eq!(app.pipeline.pipeline_def.session_configs.len(), 1);
     // Open edit dialog
     handle_key(&mut app, key(KeyCode::Char('e')));
@@ -1948,7 +1948,7 @@ fn pipeline_step_labels_expands_replicas() {
     use crate::execution::pipeline::{PipelineBlock, PipelineDefinition};
     let def = PipelineDefinition {
         initial_prompt: "go".into(),
-        iterations: 1,
+
         blocks: vec![
             PipelineBlock {
                 id: 1,
@@ -1991,7 +1991,7 @@ fn pipeline_step_labels_unnamed_blocks_no_agent_duplication() {
     use crate::execution::pipeline::{PipelineBlock, PipelineDefinition};
     let def = PipelineDefinition {
         initial_prompt: "go".into(),
-        iterations: 1,
+
         blocks: vec![PipelineBlock {
             id: 5,
             name: String::new(),
@@ -2019,7 +2019,7 @@ fn pipeline_step_labels_multi_agent_no_duplication() {
     use crate::execution::pipeline::{PipelineBlock, PipelineDefinition};
     let def = PipelineDefinition {
         initial_prompt: "go".into(),
-        iterations: 1,
+
         blocks: vec![PipelineBlock {
             id: 1,
             name: "Writer".into(),
@@ -3424,7 +3424,7 @@ fn pipeline_app_with_fin_and_feeds(n: usize) -> App {
         app.pipeline.pipeline_def.data_feeds.push(DataFeed {
             from: i as u32,
             to: fin_id,
-            collection: FeedCollection::LastIteration,
+            collection: FeedCollection::LastPass,
             granularity: FeedGranularity::PerRun,
         });
     }
@@ -3632,13 +3632,13 @@ fn feed_list_f_deletes_exact_feed_by_index() {
     app.pipeline.pipeline_def.data_feeds.push(DataFeed {
         from: 1,
         to: fin_id,
-        collection: FeedCollection::AllIterations,
+        collection: FeedCollection::AllPasses,
         granularity: FeedGranularity::AllRuns,
     });
     // Now there are 3 feeds to fin_id: from=1, from=2, from=1(dup)
     handle_key(&mut app, key(KeyCode::Char('f')));
     assert!(app.pipeline.pipeline_show_feed_list);
-    // Cursor at 0 → first feed (from=1, LastIteration)
+    // Cursor at 0 → first feed (from=1, LastPass)
     handle_key(&mut app, key(KeyCode::Char('F')));
     // Should delete exactly 1 feed, leaving 2
     let remaining: Vec<_> = app
@@ -3649,10 +3649,10 @@ fn feed_list_f_deletes_exact_feed_by_index() {
         .filter(|f| f.to == fin_id)
         .collect();
     assert_eq!(remaining.len(), 2);
-    // The duplicate (from=1, AllIterations) should still be present
+    // The duplicate (from=1, AllPasses) should still be present
     assert!(remaining
         .iter()
-        .any(|f| f.from == 1 && f.collection == FeedCollection::AllIterations));
+        .any(|f| f.from == 1 && f.collection == FeedCollection::AllPasses));
 }
 
 #[test]
@@ -3701,7 +3701,7 @@ fn canvas_f_on_exec_with_multi_feeds_shows_error() {
     app.pipeline.pipeline_def.data_feeds.push(DataFeed {
         from: 1,
         to: 10,
-        collection: FeedCollection::LastIteration,
+        collection: FeedCollection::LastPass,
         granularity: FeedGranularity::PerRun,
     });
     // Cursor on execution block 1, which now has 2 outgoing feeds

@@ -155,8 +155,6 @@ pub(super) fn handle_home_key(app: &mut App, key: KeyEvent) {
                 app.pipeline.pipeline_focus = PipelineFocus::InitialPrompt;
                 app.pipeline.pipeline_prompt_cursor =
                     app.pipeline.pipeline_def.initial_prompt.len();
-                app.pipeline.pipeline_iterations_buf =
-                    app.pipeline.pipeline_def.iterations.to_string();
                 app.pipeline.pipeline_runs_buf = app.pipeline.pipeline_runs.to_string();
                 app.pipeline.pipeline_concurrency_buf =
                     app.pipeline.pipeline_concurrency.to_string();
@@ -523,22 +521,6 @@ pub(super) fn handle_pipeline_paste(app: &mut App, text: &str) {
                 let clean = text.replace(['\n', '\r'], "");
                 app.pipeline.pipeline_session_name.push_str(&clean);
             }
-            PipelineFocus::Iterations => {
-                for ch in text.chars() {
-                    if ch.is_ascii_digit() {
-                        app.pipeline.pipeline_iterations_buf.push(ch);
-                    }
-                }
-                if !app.pipeline.pipeline_iterations_buf.is_empty() {
-                    let v: u32 = app
-                        .pipeline
-                        .pipeline_iterations_buf
-                        .parse()
-                        .unwrap_or(1)
-                        .clamp(1, MAX_NUMERIC_FIELD);
-                    app.pipeline.pipeline_iterations_buf = v.to_string();
-                }
-            }
             PipelineFocus::Runs => {
                 for ch in text.chars() {
                     if ch.is_ascii_digit() {
@@ -696,7 +678,6 @@ pub(super) fn handle_pipeline_key(app: &mut App, key: KeyEvent) {
     // Normal pipeline keys
     match key.code {
         KeyCode::Esc => {
-            sync_pipeline_iterations_buf(app);
             sync_pipeline_runs_buf(app);
             sync_pipeline_concurrency_buf(app);
             app.screen = Screen::Home;
@@ -704,8 +685,7 @@ pub(super) fn handle_pipeline_key(app: &mut App, key: KeyEvent) {
         KeyCode::Tab => {
             app.pipeline.pipeline_focus = match app.pipeline.pipeline_focus {
                 PipelineFocus::InitialPrompt => PipelineFocus::SessionName,
-                PipelineFocus::SessionName => PipelineFocus::Iterations,
-                PipelineFocus::Iterations => PipelineFocus::Runs,
+                PipelineFocus::SessionName => PipelineFocus::Runs,
                 PipelineFocus::Runs => PipelineFocus::Concurrency,
                 PipelineFocus::Concurrency => PipelineFocus::Builder,
                 PipelineFocus::Builder => PipelineFocus::InitialPrompt,
@@ -715,8 +695,7 @@ pub(super) fn handle_pipeline_key(app: &mut App, key: KeyEvent) {
             app.pipeline.pipeline_focus = match app.pipeline.pipeline_focus {
                 PipelineFocus::InitialPrompt => PipelineFocus::Builder,
                 PipelineFocus::SessionName => PipelineFocus::InitialPrompt,
-                PipelineFocus::Iterations => PipelineFocus::SessionName,
-                PipelineFocus::Runs => PipelineFocus::Iterations,
+                PipelineFocus::Runs => PipelineFocus::SessionName,
                 PipelineFocus::Concurrency => PipelineFocus::Runs,
                 PipelineFocus::Builder => PipelineFocus::Concurrency,
             };
@@ -780,37 +759,6 @@ pub(super) fn handle_pipeline_key(app: &mut App, key: KeyEvent) {
                 KeyCode::Char(c) => app.pipeline.pipeline_session_name.push(c),
                 KeyCode::Backspace => {
                     app.pipeline.pipeline_session_name.pop();
-                }
-                _ => {}
-            },
-            PipelineFocus::Iterations => match key.code {
-                KeyCode::Char(c) if c.is_ascii_digit() => {
-                    app.pipeline.pipeline_iterations_buf.push(c);
-                    sync_pipeline_iterations_buf(app);
-                }
-                KeyCode::Backspace => {
-                    app.pipeline.pipeline_iterations_buf.pop();
-                    if app.pipeline.pipeline_iterations_buf.is_empty() {
-                        app.pipeline.pipeline_def.iterations = 1;
-                    } else {
-                        sync_pipeline_iterations_buf(app);
-                    }
-                }
-                KeyCode::Up | KeyCode::Char('+') => {
-                    app.pipeline.pipeline_def.iterations =
-                        (app.pipeline.pipeline_def.iterations + 1).min(MAX_NUMERIC_FIELD);
-                    app.pipeline.pipeline_iterations_buf =
-                        app.pipeline.pipeline_def.iterations.to_string();
-                }
-                KeyCode::Down | KeyCode::Char('-') => {
-                    app.pipeline.pipeline_def.iterations = app
-                        .pipeline
-                        .pipeline_def
-                        .iterations
-                        .saturating_sub(1)
-                        .max(1);
-                    app.pipeline.pipeline_iterations_buf =
-                        app.pipeline.pipeline_def.iterations.to_string();
                 }
                 _ => {}
             },
@@ -1397,14 +1345,6 @@ fn handle_pipeline_session_config_key(app: &mut App, key: KeyEvent) {
                     (app.pipeline.pipeline_session_config_cursor + 1).min(sessions.len() - 1);
             }
         }
-        KeyCode::Left | KeyCode::Char('h') => {
-            app.pipeline.pipeline_session_config_col =
-                app.pipeline.pipeline_session_config_col.saturating_sub(1);
-        }
-        KeyCode::Right | KeyCode::Char('l') => {
-            app.pipeline.pipeline_session_config_col =
-                (app.pipeline.pipeline_session_config_col + 1).min(1);
-        }
         KeyCode::Char(' ') | KeyCode::Enter => {
             let sessions = app.pipeline.pipeline_def.effective_sessions();
             if sessions.is_empty() {
@@ -1415,26 +1355,14 @@ fn handle_pipeline_session_config_key(app: &mut App, key: KeyEvent) {
                 .pipeline_session_config_cursor
                 .min(sessions.len() - 1);
             let session = &sessions[cursor];
-            let col = app.pipeline.pipeline_session_config_col;
-            if col == 0 {
-                let new_keep = !session.keep_across_iterations;
-                app.pipeline
-                    .pipeline_def
-                    .set_keep_session_across_iterations(
-                        &session.agent,
-                        &session.session_key,
-                        new_keep,
-                    );
-            } else {
-                let new_keep = !session.keep_across_loop_passes;
-                app.pipeline
-                    .pipeline_def
-                    .set_keep_session_across_loop_passes(
-                        &session.agent,
-                        &session.session_key,
-                        new_keep,
-                    );
-            }
+            let new_keep = !session.keep_across_loop_passes;
+            app.pipeline
+                .pipeline_def
+                .set_keep_session_across_loop_passes(
+                    &session.agent,
+                    &session.session_key,
+                    new_keep,
+                );
             app.pipeline.pipeline_def.normalize_session_configs();
             // Re-clamp cursor
             let sessions = app.pipeline.pipeline_def.effective_sessions();
@@ -2254,7 +2182,7 @@ fn handle_pipeline_feed_connect_key(app: &mut App, key: KeyEvent) {
                         .push(pipeline_mod::DataFeed {
                             from,
                             to,
-                            collection: pipeline_mod::FeedCollection::LastIteration,
+                            collection: pipeline_mod::FeedCollection::LastPass,
                             granularity: pipeline_mod::FeedGranularity::PerRun,
                         });
                     app.pipeline.pipeline_feed_connecting_from = None;
@@ -2299,11 +2227,11 @@ fn handle_pipeline_feed_edit_key(app: &mut App, key: KeyEvent) {
                     match app.pipeline.pipeline_feed_edit_field {
                         PipelineFeedEditField::Collection => {
                             feed.collection = match feed.collection {
-                                pipeline_mod::FeedCollection::LastIteration => {
-                                    pipeline_mod::FeedCollection::AllIterations
+                                pipeline_mod::FeedCollection::LastPass => {
+                                    pipeline_mod::FeedCollection::AllPasses
                                 }
-                                pipeline_mod::FeedCollection::AllIterations => {
-                                    pipeline_mod::FeedCollection::LastIteration
+                                pipeline_mod::FeedCollection::AllPasses => {
+                                    pipeline_mod::FeedCollection::LastPass
                                 }
                             };
                         }
@@ -3844,20 +3772,6 @@ pub(super) fn sync_concurrency_buf(app: &mut App) {
             .min(MAX_NUMERIC_FIELD);
     }
     app.prompt.concurrency_buf = app.prompt.concurrency.to_string();
-}
-
-pub(super) fn sync_pipeline_iterations_buf(app: &mut App) {
-    if app.pipeline.pipeline_iterations_buf.is_empty() {
-        app.pipeline.pipeline_def.iterations = 1;
-    } else {
-        app.pipeline.pipeline_def.iterations = app
-            .pipeline
-            .pipeline_iterations_buf
-            .parse()
-            .unwrap_or(1)
-            .clamp(1, MAX_NUMERIC_FIELD);
-    }
-    app.pipeline.pipeline_iterations_buf = app.pipeline.pipeline_def.iterations.to_string();
 }
 
 pub(super) fn sync_pipeline_runs_buf(app: &mut App) {

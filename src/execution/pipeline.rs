@@ -13,7 +13,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 
-const MAX_TERMINAL_OUTPUTS_BYTES: usize = 512 * 1024; // 512 KB cap
+const MAX_FEED_ASSEMBLY_BYTES: usize = 512 * 1024; // 512 KB cap
 
 pub type BlockId = u32;
 /// Sentinel value for wildcard data feeds: "all execution blocks".
@@ -36,7 +36,6 @@ struct PipelineMessageContext<'a> {
     def: &'a PipelineDefinition,
     iteration: u32,
     block_outputs: &'a HashMap<u32, String>,
-    previous_terminal_outputs: &'a str,
     output: &'a OutputManager,
     prompt_context: &'a PromptRuntimeContext,
     runtime_table: &'a RuntimeReplicaTable,
@@ -70,14 +69,12 @@ pub(crate) struct RuntimeReplicaInfo {
 pub(crate) struct RuntimeReplicaTable {
     pub entries: Vec<RuntimeReplicaInfo>,
     pub logical_to_runtime: HashMap<BlockId, Vec<u32>>,
-    pub keep_policy: HashMap<(String, String), bool>,
     pub keep_loop_policy: HashMap<(String, String), bool>,
 }
 
 pub(crate) fn build_runtime_table(def: &PipelineDefinition) -> RuntimeReplicaTable {
     let mut entries = Vec::new();
     let mut logical_to_runtime: HashMap<BlockId, Vec<u32>> = HashMap::new();
-    let mut keep_policy: HashMap<(String, String), bool> = HashMap::new();
     let mut keep_loop_policy: HashMap<(String, String), bool> = HashMap::new();
     let mut next_id: u32 = 0;
 
@@ -102,7 +99,6 @@ pub(crate) fn build_runtime_table(def: &PipelineDefinition) -> RuntimeReplicaTab
         let mut runtime_ids = Vec::new();
         for agent in &block.agents {
             let agent_file_key = OutputManager::sanitize_session_name(agent);
-            let base_keep = def.keep_session_across_iterations(agent, &base_session_key);
             let base_keep_loops = def.keep_session_across_loop_passes(agent, &base_session_key);
 
             for ri in 0..num_replicas {
@@ -133,7 +129,6 @@ pub(crate) fn build_runtime_table(def: &PipelineDefinition) -> RuntimeReplicaTab
                     }
                 };
 
-                keep_policy.insert((agent.clone(), session_key.clone()), base_keep);
                 keep_loop_policy.insert((agent.clone(), session_key.clone()), base_keep_loops);
 
                 entries.push(RuntimeReplicaInfo {
@@ -157,7 +152,6 @@ pub(crate) fn build_runtime_table(def: &PipelineDefinition) -> RuntimeReplicaTab
     RuntimeReplicaTable {
         entries,
         logical_to_runtime,
-        keep_policy,
         keep_loop_policy,
     }
 }
@@ -403,15 +397,17 @@ pub struct DataFeed {
 #[serde(rename_all = "snake_case")]
 pub enum FeedCollection {
     #[default]
-    LastIteration,
-    AllIterations,
+    #[serde(alias = "last_iteration")]
+    LastPass,
+    #[serde(alias = "all_iterations")]
+    AllPasses,
 }
 
 impl FeedCollection {
     pub fn as_str(&self) -> &'static str {
         match self {
-            FeedCollection::LastIteration => "last_iteration",
-            FeedCollection::AllIterations => "all_iterations",
+            FeedCollection::LastPass => "last_pass",
+            FeedCollection::AllPasses => "all_passes",
         }
     }
 }
@@ -437,8 +433,6 @@ impl FeedGranularity {
 pub struct SessionConfig {
     pub agent: String,
     pub session_key: String,
-    #[serde(default = "default_keep_across_iterations")]
-    pub keep_across_iterations: bool,
     #[serde(default = "default_keep_across_loop_passes")]
     pub keep_across_loop_passes: bool,
 }
@@ -449,17 +443,14 @@ pub struct EffectiveSession {
     pub session_key: String,
     pub display_label: String,
     pub block_ids: Vec<BlockId>,
-    pub keep_across_iterations: bool,
     pub keep_across_loop_passes: bool,
     pub total_replicas: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PipelineDefinition {
     #[serde(default)]
     pub initial_prompt: String,
-    #[serde(default = "default_iterations")]
-    pub iterations: u32,
     #[serde(default)]
     pub blocks: Vec<PipelineBlock>,
     #[serde(default)]
@@ -476,32 +467,8 @@ pub struct PipelineDefinition {
     pub data_feeds: Vec<DataFeed>,
 }
 
-fn default_iterations() -> u32 {
-    1
-}
-
-fn default_keep_across_iterations() -> bool {
-    true
-}
-
 fn default_keep_across_loop_passes() -> bool {
     true
-}
-
-impl Default for PipelineDefinition {
-    fn default() -> Self {
-        Self {
-            initial_prompt: String::new(),
-            iterations: 1,
-            blocks: Vec::new(),
-            connections: Vec::new(),
-            session_configs: Vec::new(),
-            loop_connections: Vec::new(),
-            finalization_blocks: Vec::new(),
-            finalization_connections: Vec::new(),
-            data_feeds: Vec::new(),
-        }
-    }
 }
 
 impl PipelineDefinition {
@@ -542,14 +509,12 @@ impl PipelineDefinition {
             .into_iter()
             .map(
                 |((agent, session_key), (display_label, block_ids, total_replicas))| {
-                    let keep = self.keep_session_across_iterations(&agent, &session_key);
                     let keep_loops = self.keep_session_across_loop_passes(&agent, &session_key);
                     EffectiveSession {
                         agent,
                         session_key,
                         display_label,
                         block_ids,
-                        keep_across_iterations: keep,
                         keep_across_loop_passes: keep_loops,
                         total_replicas,
                     }
@@ -581,41 +546,6 @@ impl PipelineDefinition {
         sessions
     }
 
-    pub fn keep_session_across_iterations(&self, agent: &str, session_key: &str) -> bool {
-        self.session_configs
-            .iter()
-            .find(|c| c.agent == agent && c.session_key == session_key)
-            .map(|c| c.keep_across_iterations)
-            .unwrap_or(true)
-    }
-
-    pub fn set_keep_session_across_iterations(
-        &mut self,
-        agent: &str,
-        session_key: &str,
-        keep: bool,
-    ) {
-        if let Some(existing) = self
-            .session_configs
-            .iter_mut()
-            .find(|c| c.agent == agent && c.session_key == session_key)
-        {
-            existing.keep_across_iterations = keep;
-            // Remove entry entirely if both fields are back to default
-            if keep && existing.keep_across_loop_passes {
-                self.session_configs
-                    .retain(|c| !(c.agent == agent && c.session_key == session_key));
-            }
-        } else if !keep {
-            self.session_configs.push(SessionConfig {
-                agent: agent.to_string(),
-                session_key: session_key.to_string(),
-                keep_across_iterations: false,
-                keep_across_loop_passes: true,
-            });
-        }
-    }
-
     pub fn keep_session_across_loop_passes(&self, agent: &str, session_key: &str) -> bool {
         self.session_configs
             .iter()
@@ -636,8 +566,8 @@ impl PipelineDefinition {
             .find(|c| c.agent == agent && c.session_key == session_key)
         {
             existing.keep_across_loop_passes = keep;
-            // Remove entry entirely if both fields are back to default
-            if keep && existing.keep_across_iterations {
+            // Remove entry entirely if field is back to default
+            if keep {
                 self.session_configs
                     .retain(|c| !(c.agent == agent && c.session_key == session_key));
             }
@@ -645,7 +575,6 @@ impl PipelineDefinition {
             self.session_configs.push(SessionConfig {
                 agent: agent.to_string(),
                 session_key: session_key.to_string(),
-                keep_across_iterations: true,
                 keep_across_loop_passes: false,
             });
         }
@@ -708,10 +637,9 @@ impl PipelineDefinition {
             })
             .collect();
 
-        // Drop stale rows and rows where both fields are at default (true)
+        // Drop stale rows and rows where field is at default (true)
         self.session_configs.retain(|c| {
-            (!c.keep_across_iterations || !c.keep_across_loop_passes)
-                && valid.contains(&(c.agent.clone(), c.session_key.clone()))
+            !c.keep_across_loop_passes && valid.contains(&(c.agent.clone(), c.session_key.clone()))
         });
 
         // Sort for stability
@@ -1776,39 +1704,16 @@ where
         .map(|p| p.block_to_loop.clone())
         .unwrap_or_default();
 
-    let terminals = terminal_blocks(def);
-    let mut previous_terminal_outputs = String::new();
+    let iteration: u32 = 1;
 
-    for iteration in 1..=def.iterations {
-        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-            break;
-        }
-        if progress_tx.is_closed() {
-            break;
-        }
-
-        // Clear history for sessions configured to reset between iterations
-        if iteration > 1 {
-            for ((agent, session_key), provider_arc) in &provider_pool {
-                let keep = rt
-                    .keep_policy
-                    .get(&(agent.clone(), session_key.clone()))
-                    .copied()
-                    .unwrap_or(true);
-                if !keep {
-                    let mut guard = provider_arc.lock().await;
-                    guard.clear_history();
-                }
-            }
-        }
-
+    {
         let mut current_in_degree = in_degree.clone();
         let mut failed_replicas: HashSet<u32> = HashSet::new();
         let mut failed_logical: HashSet<BlockId> = HashSet::new();
         let mut replica_outputs: HashMap<u32, String> = HashMap::new();
         let mut completed = 0usize;
 
-        // Loop runtime state per iteration (clone from prepared sub_dags)
+        // Loop runtime state (clone from prepared sub_dags)
         let mut loop_state: HashMap<(BlockId, BlockId), LoopRuntimeState> =
             if let Some(ref p) = prepared {
                 def.loop_connections
@@ -2053,7 +1958,7 @@ where
                                         &ls.sub_dag.blocks, loop_from,
                                         current_loop_pass, lc.count + 1,
                                         &ls.prompt, &replica_outputs, &rt, output,
-                                        iteration, &previous_terminal_outputs,
+                                        iteration,
                                         prompt_context, &block_to_loop, &block_loop_pass,
                                     )
                                 } else {
@@ -2062,7 +1967,6 @@ where
                                         &PipelineMessageContext {
                                             def, iteration,
                                             block_outputs: &replica_outputs,
-                                            previous_terminal_outputs: &previous_terminal_outputs,
                                             output, prompt_context, runtime_table: &rt,
                                             block_to_loop: &block_to_loop,
                                             block_loop_pass: &block_loop_pass,
@@ -2078,7 +1982,6 @@ where
                                 &PipelineMessageContext {
                                     def, iteration,
                                     block_outputs: &replica_outputs,
-                                    previous_terminal_outputs: &previous_terminal_outputs,
                                     output, prompt_context, runtime_table: &rt,
                                     block_to_loop: &block_to_loop,
                                     block_loop_pass: &block_loop_pass,
@@ -2512,45 +2415,6 @@ where
         }
 
         let _ = progress_tx.send(ProgressEvent::IterationComplete { iteration });
-
-        // Collect labeled terminal outputs for next iteration
-        previous_terminal_outputs.clear();
-        for &tid in &terminals {
-            if let Some(rids) = rt.logical_to_runtime.get(&tid) {
-                let needs_label = block_map
-                    .get(&tid)
-                    .map(|b| b.replicas > 1 || b.agents.len() > 1)
-                    .unwrap_or(false);
-                for &rid in rids {
-                    if let Some(content) = replica_outputs.get(&rid) {
-                        if !previous_terminal_outputs.is_empty() {
-                            previous_terminal_outputs.push_str("\n\n---\n\n");
-                        }
-                        if needs_label {
-                            let info = &rt.entries[rid as usize];
-                            previous_terminal_outputs.push_str(&format!(
-                                "--- Output from {} ---\n{}",
-                                info.display_label, content
-                            ));
-                        } else {
-                            previous_terminal_outputs.push_str(content);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Free full LLM responses now that terminal outputs have been collected
-        replica_outputs.clear();
-
-        if previous_terminal_outputs.len() > MAX_TERMINAL_OUTPUTS_BYTES {
-            // Floor to a char boundary to avoid panicking on multibyte UTF-8
-            let mut end = MAX_TERMINAL_OUTPUTS_BYTES;
-            while end > 0 && !previous_terminal_outputs.is_char_boundary(end) {
-                end -= 1;
-            }
-            previous_terminal_outputs.truncate(end);
-        }
     }
 
     let _ = progress_tx.send(ProgressEvent::AllDone);
@@ -2642,22 +2506,12 @@ fn build_pipeline_block_message(
     context: &PipelineMessageContext<'_>,
 ) -> String {
     let is_root = upstream_of(context.def, block.id).is_empty();
-    let base_message = if is_root && context.iteration == 1 {
+    let base_message = if is_root {
         if block.prompt.is_empty() {
             context.def.initial_prompt.clone()
         } else {
             format!("{}\n\n{}", block.prompt, context.def.initial_prompt)
         }
-    } else if is_root {
-        let base = if block.prompt.is_empty() {
-            context.def.initial_prompt.clone()
-        } else {
-            block.prompt.clone()
-        };
-        format!(
-            "{base}\n\n--- Previous iteration outputs ---\n{}",
-            context.previous_terminal_outputs
-        )
     } else {
         let upstream_ids = upstream_of(context.def, block.id);
         let prefix = if block.prompt.is_empty() {
@@ -2768,7 +2622,6 @@ fn build_loop_rerun_message_v2(
     runtime_table: &RuntimeReplicaTable,
     output: &OutputManager,
     iteration: u32,
-    previous_terminal_outputs: &str,
     prompt_context: &PromptRuntimeContext,
     block_to_loop: &HashMap<BlockId, (BlockId, BlockId)>,
     block_loop_pass: &HashMap<BlockId, u32>,
@@ -2783,18 +2636,9 @@ fn build_loop_rerun_message_v2(
 
     let is_root = upstream_of(def, block.id).is_empty();
     if is_root {
-        // Root restart target: match build_pipeline_block_message root semantics.
-        // On iteration 1: initial_prompt is always included.
-        // On iteration > 1 with block prompt: only block.prompt + prev outputs
-        //   (initial_prompt omitted — block.prompt is appended later).
-        // On iteration > 1 without block prompt: initial_prompt + prev outputs.
-        if (iteration == 1 || block.prompt.is_empty()) && !def.initial_prompt.is_empty() {
+        // Root restart target: include initial_prompt
+        if !def.initial_prompt.is_empty() {
             message.push_str(&def.initial_prompt);
-            message.push_str("\n\n");
-        }
-        if iteration > 1 && !previous_terminal_outputs.is_empty() {
-            message.push_str("--- Previous iteration outputs ---\n");
-            message.push_str(previous_terminal_outputs);
             message.push_str("\n\n");
         }
     } else if !external_parents.is_empty() {
@@ -2858,9 +2702,9 @@ fn build_loop_rerun_message_v2(
         }
     }
 
-    // Loop iteration header
+    // Loop pass header
     message.push_str(&format!(
-        "[Loop iteration {} of {}]\n\n",
+        "[Loop pass {} of {}]\n\n",
         current_pass + 1,
         total_passes
     ));
@@ -3147,7 +2991,7 @@ fn collect_feed_data(
     };
 
     let mut assembled = String::new();
-    let budget = MAX_TERMINAL_OUTPUTS_BYTES;
+    let budget = MAX_FEED_ASSEMBLY_BYTES;
 
     for (dir_run_id, dir_path) in &run_dirs {
         let entries = match std::fs::read_dir(dir_path) {
@@ -3186,45 +3030,14 @@ fn collect_feed_data(
 
         // Step 5: Apply collection filter
         match feed.collection {
-            FeedCollection::LastIteration => {
-                // Compute max iteration per filename stem so that each source
-                // block contributes its own latest iteration.  A single global
-                // max would drop sources that completed fewer iterations.
-                let stem_matches = |name: &str, stem: &str| -> bool {
-                    name.starts_with(stem) && name[stem.len()..].starts_with("_iter")
-                };
-                let mut max_per_stem: HashMap<&str, u32> = HashMap::new();
-                for (name, _) in &matched_files {
-                    if let Some(iter) = post_run::parse_pipeline_iteration_filename(name) {
-                        for stem in &filename_stems {
-                            if stem_matches(name, stem) {
-                                let entry = max_per_stem.entry(*stem).or_insert(0);
-                                if iter > *entry {
-                                    *entry = iter;
-                                }
-                                break;
-                            }
-                        }
-                    }
-                }
-                matched_files.retain(|(name, _)| {
-                    if let Some(iter) = post_run::parse_pipeline_iteration_filename(name) {
-                        filename_stems.iter().any(|stem| {
-                            stem_matches(name, stem)
-                                && max_per_stem.get(stem).copied() == Some(iter)
-                        })
-                    } else {
-                        false
-                    }
-                });
+            FeedCollection::LastPass => {
+                // Keep only the highest loop pass per filename stem
+                matched_files = post_run::keep_highest_loop_pass(matched_files);
             }
-            FeedCollection::AllIterations => {
-                // Keep all iterations
+            FeedCollection::AllPasses => {
+                // Keep all loop pass files — no deduplication
             }
         }
-
-        // Step 6: Apply loop pass deduplication
-        matched_files = post_run::keep_highest_loop_pass(matched_files);
 
         // Step 7: Sort for determinism
         matched_files.sort_by(|a, b| post_run::natural_cmp(&a.0, &b.0));
@@ -3279,7 +3092,7 @@ fn build_finalization_message(
             message.push_str("\n\n");
         }
         message.push_str("--- Upstream Finalization Outputs ---\n");
-        let budget = MAX_TERMINAL_OUTPUTS_BYTES;
+        let budget = MAX_FEED_ASSEMBLY_BYTES;
         let mut upstream_bytes = 0usize;
         for (label, content) in upstream_outputs {
             upstream_bytes += label.len() + content.len();
@@ -4069,7 +3882,7 @@ mod tests {
     ) -> PipelineDefinition {
         PipelineDefinition {
             initial_prompt: "test".into(),
-            iterations: 1,
+
             blocks,
             connections,
             session_configs: Vec::new(),
@@ -4388,7 +4201,6 @@ mod tests {
         let loaded = load_pipeline(&path).unwrap();
         assert_eq!(loaded.blocks.len(), 2);
         assert_eq!(loaded.connections.len(), 1);
-        assert_eq!(loaded.iterations, 1);
     }
 
     // -- load_pipeline validation --
@@ -4399,7 +4211,6 @@ mod tests {
         let path = dir.path().join("dup.toml");
         let content = r#"
 initial_prompt = "test"
-iterations = 1
 
 [[blocks]]
 id = 1
@@ -4424,7 +4235,6 @@ position = [1, 0]
         let path = dir.path().join("dangle.toml");
         let content = r#"
 initial_prompt = "test"
-iterations = 1
 
 [[blocks]]
 id = 1
@@ -4447,7 +4257,6 @@ to = 99
         let path = dir.path().join("cycle.toml");
         let content = r#"
 initial_prompt = "test"
-iterations = 1
 
 [[blocks]]
 id = 1
@@ -4480,7 +4289,6 @@ to = 1
         let path = dir.path().join("self.toml");
         let content = r#"
 initial_prompt = "test"
-iterations = 1
 
 [[blocks]]
 id = 1
@@ -4500,7 +4308,6 @@ to = 1
     #[test]
     fn default_pipeline_definition() {
         let d = PipelineDefinition::default();
-        assert_eq!(d.iterations, 1);
         assert!(d.blocks.is_empty());
         assert!(d.connections.is_empty());
         assert!(d.initial_prompt.is_empty());
@@ -4512,7 +4319,7 @@ to = 1
         let output = OutputManager::new(dir.path(), Some("pipeline-msg")).unwrap();
         let def = PipelineDefinition {
             initial_prompt: "base prompt".into(),
-            iterations: 1,
+
             blocks: vec![PipelineBlock {
                 id: 1,
                 name: "Root".into(),
@@ -4540,7 +4347,6 @@ to = 1
             def: &def,
             iteration: 1,
             block_outputs: &block_outputs,
-            previous_terminal_outputs: "",
             output: &output,
             prompt_context: &context,
             runtime_table: &rt,
@@ -4561,7 +4367,7 @@ to = 1
         let output = OutputManager::new(dir.path(), Some("pipeline-panic")).unwrap();
         let def = PipelineDefinition {
             initial_prompt: "base prompt".into(),
-            iterations: 1,
+
             blocks: vec![PipelineBlock {
                 id: 1,
                 name: "Root".into(),
@@ -4643,7 +4449,7 @@ to = 1
         let output = OutputManager::new(dir.path(), Some("pipeline-provider-error")).unwrap();
         let def = PipelineDefinition {
             initial_prompt: "base prompt".into(),
-            iterations: 1,
+
             blocks: vec![PipelineBlock {
                 id: 1,
                 name: "Root".into(),
@@ -4990,32 +4796,6 @@ to = 1
         );
     }
 
-    // -- keep_session_across_iterations --
-
-    #[test]
-    fn keep_session_defaults_to_true() {
-        let def = def_with(vec![block(1, 0, 0)], vec![]);
-        assert!(def.keep_session_across_iterations("Claude", "__block_1"));
-    }
-
-    #[test]
-    fn set_keep_false_adds_explicit_entry() {
-        let mut def = def_with(vec![block(1, 0, 0)], vec![]);
-        def.set_keep_session_across_iterations("Claude", "__block_1", false);
-        assert!(!def.keep_session_across_iterations("Claude", "__block_1"));
-        assert_eq!(def.session_configs.len(), 1);
-    }
-
-    #[test]
-    fn toggle_back_to_true_removes_explicit_entry() {
-        let mut def = def_with(vec![block(1, 0, 0)], vec![]);
-        def.set_keep_session_across_iterations("Claude", "__block_1", false);
-        assert_eq!(def.session_configs.len(), 1);
-        def.set_keep_session_across_iterations("Claude", "__block_1", true);
-        assert!(def.session_configs.is_empty());
-        assert!(def.keep_session_across_iterations("Claude", "__block_1"));
-    }
-
     // -- normalize_session_configs --
 
     #[test]
@@ -5024,8 +4804,7 @@ to = 1
         def.session_configs.push(SessionConfig {
             agent: "Claude".into(),
             session_key: "nonexistent".into(),
-            keep_across_iterations: false,
-            keep_across_loop_passes: true,
+            keep_across_loop_passes: false,
         });
         def.normalize_session_configs();
         assert!(def.session_configs.is_empty());
@@ -5037,7 +4816,6 @@ to = 1
         def.session_configs.push(SessionConfig {
             agent: "Claude".into(),
             session_key: "__block_1".into(),
-            keep_across_iterations: true,
             keep_across_loop_passes: true,
         });
         def.normalize_session_configs();
@@ -5050,8 +4828,7 @@ to = 1
         def.session_configs.push(SessionConfig {
             agent: "Claude".into(),
             session_key: "__block_1".into(),
-            keep_across_iterations: false,
-            keep_across_loop_passes: true,
+            keep_across_loop_passes: false,
         });
         def.normalize_session_configs();
         assert_eq!(def.session_configs.len(), 1);
@@ -5080,7 +4857,6 @@ position = [0, 0]
     fn session_config_missing_keep_defaults_to_true() {
         let toml_str = r#"
 initial_prompt = "test"
-iterations = 1
 
 [[blocks]]
 id = 1
@@ -5095,27 +4871,20 @@ session_key = "__block_1"
 "#;
         let def: PipelineDefinition = toml::from_str(toml_str).unwrap();
         assert_eq!(def.session_configs.len(), 1);
-        assert!(def.session_configs[0].keep_across_iterations);
+        assert!(def.session_configs[0].keep_across_loop_passes);
     }
 
     #[test]
-    fn save_load_roundtrip_preserves_false_session_config() {
+    fn old_toml_keep_across_iterations_ignored_gracefully() {
+        // Backward compat: old TOML files may contain keep_across_iterations.
+        // Serde ignores unknown fields, so load_pipeline should succeed.
+        // Use keep_across_loop_passes = false so normalize doesn't prune the row.
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test_session.toml");
-        let mut def = def_with(vec![block(1, 0, 0)], vec![]);
-        def.set_keep_session_across_iterations("Claude", "__block_1", false);
-        save_pipeline(&def, &path).unwrap();
-        let loaded = load_pipeline(&path).unwrap();
-        assert!(!loaded.keep_session_across_iterations("Claude", "__block_1"));
-    }
-
-    #[test]
-    fn load_deduplicates_session_configs() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("dup.toml");
-        let toml_str = r#"
+        let path = dir.path().join("compat.toml");
+        std::fs::write(
+            &path,
+            r#"
 initial_prompt = "test"
-iterations = 1
 
 [[blocks]]
 id = 1
@@ -5128,17 +4897,57 @@ position = [0, 0]
 agent = "Claude"
 session_key = "__block_1"
 keep_across_iterations = false
+keep_across_loop_passes = false
+"#,
+        )
+        .unwrap();
+        let def = load_pipeline(&path).unwrap();
+        assert_eq!(def.session_configs.len(), 1);
+        // keep_across_iterations is unknown and silently ignored;
+        // keep_across_loop_passes = false survives normalization
+        assert!(!def.session_configs[0].keep_across_loop_passes);
+    }
+
+    #[test]
+    fn save_load_roundtrip_preserves_false_session_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_session.toml");
+        let mut def = def_with(vec![block(1, 0, 0)], vec![]);
+        def.set_keep_session_across_loop_passes("Claude", "__block_1", false);
+        save_pipeline(&def, &path).unwrap();
+        let loaded = load_pipeline(&path).unwrap();
+        assert!(!loaded.keep_session_across_loop_passes("Claude", "__block_1"));
+    }
+
+    #[test]
+    fn load_deduplicates_session_configs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dup.toml");
+        let toml_str = r#"
+initial_prompt = "test"
+
+[[blocks]]
+id = 1
+name = "B"
+agent = "Claude"
+prompt = ""
+position = [0, 0]
 
 [[session_configs]]
 agent = "Claude"
 session_key = "__block_1"
-keep_across_iterations = false
+keep_across_loop_passes = false
+
+[[session_configs]]
+agent = "Claude"
+session_key = "__block_1"
+keep_across_loop_passes = false
 "#;
         std::fs::write(&path, toml_str).unwrap();
         // Normalization deduplicates before validation
         let loaded = load_pipeline(&path).unwrap();
         assert_eq!(loaded.session_configs.len(), 1);
-        assert!(!loaded.keep_session_across_iterations("Claude", "__block_1"));
+        assert!(!loaded.keep_session_across_loop_passes("Claude", "__block_1"));
     }
 
     // -- execution: clear_history --
@@ -5174,240 +4983,6 @@ keep_across_iterations = false
                     })
             })
         }
-    }
-
-    #[tokio::test]
-    async fn iteration_clears_non_keep_sessions() {
-        let dir = tempfile::tempdir().unwrap();
-        let output = OutputManager::new(dir.path(), Some("clear-test")).unwrap();
-        let mut def = def_with(vec![block(1, 0, 0)], vec![]);
-        def.iterations = 2;
-        def.set_keep_session_across_iterations("Claude", "__block_1", false);
-
-        let agent_configs = HashMap::from([(
-            "Claude".to_string(),
-            (
-                ProviderKind::Anthropic,
-                ProviderConfig {
-                    api_key: String::new(),
-                    model: "test".to_string(),
-                    reasoning_effort: None,
-                    thinking_effort: None,
-                    use_cli: false,
-                    cli_print_mode: true,
-                    extra_cli_args: String::new(),
-                },
-                false,
-            ),
-        )]);
-        let context = PromptRuntimeContext::new(def.initial_prompt.clone(), false);
-        let (tx, _rx) = mpsc::unbounded_channel();
-        let cancel = Arc::new(AtomicBool::new(false));
-        let clear_count = Arc::new(AtomicUsize::new(0));
-        let cc = clear_count.clone();
-
-        run_pipeline_with_provider_factory(
-            &def,
-            0,
-            agent_configs,
-            &context,
-            &output,
-            tx,
-            cancel,
-            move |_kind, _cfg| {
-                Box::new(ClearCountProvider {
-                    kind: ProviderKind::Anthropic,
-                    responses: std::sync::Mutex::new(VecDeque::new()),
-                    clear_count: cc.clone(),
-                })
-            },
-        )
-        .await
-        .unwrap();
-
-        // Should have cleared once before iteration 2
-        assert_eq!(clear_count.load(std::sync::atomic::Ordering::Relaxed), 1);
-    }
-
-    #[tokio::test]
-    async fn single_iteration_never_clears() {
-        let dir = tempfile::tempdir().unwrap();
-        let output = OutputManager::new(dir.path(), Some("no-clear")).unwrap();
-        let mut def = def_with(vec![block(1, 0, 0)], vec![]);
-        def.iterations = 1;
-        def.set_keep_session_across_iterations("Claude", "__block_1", false);
-
-        let agent_configs = HashMap::from([(
-            "Claude".to_string(),
-            (
-                ProviderKind::Anthropic,
-                ProviderConfig {
-                    api_key: String::new(),
-                    model: "test".to_string(),
-                    reasoning_effort: None,
-                    thinking_effort: None,
-                    use_cli: false,
-                    cli_print_mode: true,
-                    extra_cli_args: String::new(),
-                },
-                false,
-            ),
-        )]);
-        let context = PromptRuntimeContext::new(def.initial_prompt.clone(), false);
-        let (tx, _rx) = mpsc::unbounded_channel();
-        let cancel = Arc::new(AtomicBool::new(false));
-        let clear_count = Arc::new(AtomicUsize::new(0));
-        let cc = clear_count.clone();
-
-        run_pipeline_with_provider_factory(
-            &def,
-            0,
-            agent_configs,
-            &context,
-            &output,
-            tx,
-            cancel,
-            move |_kind, _cfg| {
-                Box::new(ClearCountProvider {
-                    kind: ProviderKind::Anthropic,
-                    responses: std::sync::Mutex::new(VecDeque::new()),
-                    clear_count: cc.clone(),
-                })
-            },
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(clear_count.load(std::sync::atomic::Ordering::Relaxed), 0);
-    }
-
-    #[tokio::test]
-    async fn all_keep_sessions_never_clear() {
-        let dir = tempfile::tempdir().unwrap();
-        let output = OutputManager::new(dir.path(), Some("keep-all")).unwrap();
-        let mut def = def_with(vec![block(1, 0, 0)], vec![]);
-        def.iterations = 2;
-        // Default is keep=true, so no explicit config needed
-
-        let agent_configs = HashMap::from([(
-            "Claude".to_string(),
-            (
-                ProviderKind::Anthropic,
-                ProviderConfig {
-                    api_key: String::new(),
-                    model: "test".to_string(),
-                    reasoning_effort: None,
-                    thinking_effort: None,
-                    use_cli: false,
-                    cli_print_mode: true,
-                    extra_cli_args: String::new(),
-                },
-                false,
-            ),
-        )]);
-        let context = PromptRuntimeContext::new(def.initial_prompt.clone(), false);
-        let (tx, _rx) = mpsc::unbounded_channel();
-        let cancel = Arc::new(AtomicBool::new(false));
-        let clear_count = Arc::new(AtomicUsize::new(0));
-        let cc = clear_count.clone();
-
-        run_pipeline_with_provider_factory(
-            &def,
-            0,
-            agent_configs,
-            &context,
-            &output,
-            tx,
-            cancel,
-            move |_kind, _cfg| {
-                Box::new(ClearCountProvider {
-                    kind: ProviderKind::Anthropic,
-                    responses: std::sync::Mutex::new(VecDeque::new()),
-                    clear_count: cc.clone(),
-                })
-            },
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(clear_count.load(std::sync::atomic::Ordering::Relaxed), 0);
-    }
-
-    #[tokio::test]
-    async fn shared_session_clears_once_per_provider() {
-        let dir = tempfile::tempdir().unwrap();
-        let output = OutputManager::new(dir.path(), Some("shared-clear")).unwrap();
-        let mut def = def_with(
-            vec![
-                PipelineBlock {
-                    id: 1,
-                    name: "A".into(),
-                    agents: vec!["Claude".into()],
-                    prompt: String::new(),
-                    profiles: vec![],
-                    session_id: Some("shared".into()),
-                    position: (0, 0),
-                    replicas: 1,
-                },
-                PipelineBlock {
-                    id: 2,
-                    name: "B".into(),
-                    agents: vec!["Claude".into()],
-                    prompt: String::new(),
-                    profiles: vec![],
-                    session_id: Some("shared".into()),
-                    position: (1, 0),
-                    replicas: 1,
-                },
-            ],
-            vec![conn(1, 2)],
-        );
-        def.iterations = 2;
-        def.set_keep_session_across_iterations("Claude", "shared", false);
-
-        let agent_configs = HashMap::from([(
-            "Claude".to_string(),
-            (
-                ProviderKind::Anthropic,
-                ProviderConfig {
-                    api_key: String::new(),
-                    model: "test".to_string(),
-                    reasoning_effort: None,
-                    thinking_effort: None,
-                    use_cli: false,
-                    cli_print_mode: true,
-                    extra_cli_args: String::new(),
-                },
-                false,
-            ),
-        )]);
-        let context = PromptRuntimeContext::new(def.initial_prompt.clone(), false);
-        let (tx, _rx) = mpsc::unbounded_channel();
-        let cancel = Arc::new(AtomicBool::new(false));
-        let clear_count = Arc::new(AtomicUsize::new(0));
-        let cc = clear_count.clone();
-
-        run_pipeline_with_provider_factory(
-            &def,
-            0,
-            agent_configs,
-            &context,
-            &output,
-            tx,
-            cancel,
-            move |_kind, _cfg| {
-                Box::new(ClearCountProvider {
-                    kind: ProviderKind::Anthropic,
-                    responses: std::sync::Mutex::new(VecDeque::new()),
-                    clear_count: cc.clone(),
-                })
-            },
-        )
-        .await
-        .unwrap();
-
-        // Two blocks share one provider, cleared once before iteration 2
-        assert_eq!(clear_count.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 
     #[tokio::test]
@@ -5542,7 +5117,7 @@ keep_across_iterations = false
     ) -> PipelineDefinition {
         PipelineDefinition {
             initial_prompt: "test".into(),
-            iterations: 1,
+
             blocks,
             connections,
             session_configs: Vec::new(),
@@ -7068,7 +6643,7 @@ keep_across_iterations = false
     fn truncate_at_char_boundary_does_not_panic() {
         // Simulate the pipeline truncation logic with multibyte content
         let mut buf = "á".repeat(300_000); // 2 bytes each = 600KB > 512KB cap
-        let max = super::MAX_TERMINAL_OUTPUTS_BYTES;
+        let max = super::MAX_FEED_ASSEMBLY_BYTES;
         if buf.len() > max {
             let mut end = max;
             while end > 0 && !buf.is_char_boundary(end) {
@@ -7100,7 +6675,7 @@ keep_across_iterations = false
         DataFeed {
             from,
             to,
-            collection: FeedCollection::LastIteration,
+            collection: FeedCollection::LastPass,
             granularity: FeedGranularity::PerRun,
         }
     }
@@ -7109,7 +6684,7 @@ keep_across_iterations = false
         DataFeed {
             from,
             to,
-            collection: FeedCollection::LastIteration,
+            collection: FeedCollection::LastPass,
             granularity: FeedGranularity::AllRuns,
         }
     }
@@ -7322,5 +6897,78 @@ position = [0, 0]
         assert_eq!(def.finalization_block_ids(), [10].into_iter().collect());
         assert!(def.is_finalization_block(10));
         assert!(!def.is_finalization_block(1));
+    }
+
+    #[test]
+    fn all_passes_skips_loop_dedup() {
+        // Create a run directory with initial + loop pass files
+        let dir = tempfile::tempdir().unwrap();
+        let run_dir = dir.path().join("run1");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        // Build runtime table to discover the filename stem
+        let mut def = def_with(vec![block(1, 0, 0)], vec![]);
+        def.finalization_blocks = vec![fin_block(10, 0, 0)];
+        let rt = build_runtime_table(&def);
+        let stem = &rt.entries[0].filename_stem;
+        // Initial pass (pass 0)
+        std::fs::write(run_dir.join(format!("{stem}_iter1.md")), "initial output").unwrap();
+        // Loop passes
+        std::fs::write(
+            run_dir.join(format!("{stem}_iter1_loop1.md")),
+            "loop pass 1",
+        )
+        .unwrap();
+        std::fs::write(
+            run_dir.join(format!("{stem}_iter1_loop2.md")),
+            "loop pass 2",
+        )
+        .unwrap();
+
+        let scope = FinalizationRunScope::SingleRun {
+            run_id: 1,
+            run_dir: run_dir.clone(),
+        };
+
+        // AllPasses: all 3 files should be included
+        let feed_all = DataFeed {
+            from: 1,
+            to: 10,
+            collection: FeedCollection::AllPasses,
+            granularity: FeedGranularity::PerRun,
+        };
+        let result = collect_feed_data(&feed_all, &def, &rt, &scope, Some(1)).unwrap();
+        assert!(
+            result.contains("initial output"),
+            "AllPasses should include pass-0 output"
+        );
+        assert!(
+            result.contains("loop pass 1"),
+            "AllPasses should include loop pass 1"
+        );
+        assert!(
+            result.contains("loop pass 2"),
+            "AllPasses should include loop pass 2"
+        );
+
+        // LastPass: only the highest loop pass (loop2) should remain
+        let feed_last = DataFeed {
+            from: 1,
+            to: 10,
+            collection: FeedCollection::LastPass,
+            granularity: FeedGranularity::PerRun,
+        };
+        let result_last = collect_feed_data(&feed_last, &def, &rt, &scope, Some(1)).unwrap();
+        assert!(
+            result_last.contains("loop pass 2"),
+            "LastPass should include highest loop pass"
+        );
+        assert!(
+            !result_last.contains("loop pass 1"),
+            "LastPass should exclude lower loop passes"
+        );
+        assert!(
+            !result_last.contains("initial output"),
+            "LastPass should exclude pass-0 when loop variants exist"
+        );
     }
 }

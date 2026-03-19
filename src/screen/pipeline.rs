@@ -148,7 +148,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),  // title
-            Constraint::Length(12), // prompt + session/iterations/runs/concurrency
+            Constraint::Length(12), // prompt + session/runs/concurrency
             Constraint::Min(0),     // builder canvas
             Constraint::Length(2),  // help + status
         ])
@@ -274,11 +274,10 @@ fn draw_prompt_area(f: &mut Frame, app: &App, area: Rect) {
         f.set_cursor_position((x, y));
     }
 
-    // Right column: session name + iterations + runs + concurrency
+    // Right column: session name + runs + concurrency
     let right_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
             Constraint::Length(3),
             Constraint::Length(3),
             Constraint::Min(0),
@@ -316,26 +315,6 @@ fn draw_prompt_area(f: &mut Frame, app: &App, area: Rect) {
     );
     f.render_widget(session_name, right_chunks[0]);
 
-    // Iterations field
-    let iter_focus = app.pipeline.pipeline_focus == PipelineFocus::Iterations;
-    let iter_border = if iter_focus {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    let iter_display = if iter_focus {
-        format!("{}_", app.pipeline.pipeline_iterations_buf)
-    } else {
-        app.pipeline.pipeline_iterations_buf.clone()
-    };
-    let iter_widget = Paragraph::new(iter_display).block(
-        Block::default()
-            .title(" Iterations ")
-            .borders(Borders::ALL)
-            .border_style(iter_border),
-    );
-    f.render_widget(iter_widget, right_chunks[1]);
-
     let runs_focus = app.pipeline.pipeline_focus == PipelineFocus::Runs;
     let runs_border = if runs_focus {
         Style::default().fg(Color::Cyan)
@@ -353,7 +332,7 @@ fn draw_prompt_area(f: &mut Frame, app: &App, area: Rect) {
             .borders(Borders::ALL)
             .border_style(runs_border),
     );
-    f.render_widget(runs_widget, right_chunks[2]);
+    f.render_widget(runs_widget, right_chunks[1]);
 
     let concurrency_focus = app.pipeline.pipeline_focus == PipelineFocus::Concurrency;
     let concurrency_border = if concurrency_focus {
@@ -374,7 +353,7 @@ fn draw_prompt_area(f: &mut Frame, app: &App, area: Rect) {
             .borders(Borders::ALL)
             .border_style(concurrency_border),
     );
-    f.render_widget(concurrency_widget, right_chunks[3]);
+    f.render_widget(concurrency_widget, right_chunks[2]);
 }
 
 fn draw_canvas(f: &mut Frame, app: &App, area: Rect) {
@@ -2316,7 +2295,7 @@ fn draw_file_dialog(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_session_config_popup(f: &mut Frame, app: &App, area: Rect) {
-    let popup = centered_rect(60, 50, area);
+    let popup = centered_rect(55, 50, area);
     f.render_widget(Clear, popup);
 
     let block = Block::default()
@@ -2356,21 +2335,6 @@ fn draw_session_config_popup(f: &mut Frame, app: &App, area: Rect) {
     }
 
     // Header
-    let col = app.pipeline.pipeline_session_config_col;
-    let iter_header_style = if col == 0 {
-        Style::default()
-            .add_modifier(Modifier::BOLD)
-            .add_modifier(Modifier::UNDERLINED)
-    } else {
-        Style::default().add_modifier(Modifier::BOLD)
-    };
-    let loop_header_style = if col == 1 {
-        Style::default()
-            .add_modifier(Modifier::BOLD)
-            .add_modifier(Modifier::UNDERLINED)
-    } else {
-        Style::default().add_modifier(Modifier::BOLD)
-    };
     let header = Line::from(vec![
         Span::styled(
             format!("{:<15}", "Agent"),
@@ -2380,8 +2344,10 @@ fn draw_session_config_popup(f: &mut Frame, app: &App, area: Rect) {
             format!("{:<15}", "Session"),
             Style::default().add_modifier(Modifier::BOLD),
         ),
-        Span::styled(format!("{:<6}", "Iter"), iter_header_style),
-        Span::styled(format!("{:<6}", "Loop"), loop_header_style),
+        Span::styled(
+            format!("{:<6}", "Loop"),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
         Span::styled("\u{00d7}N", Style::default().add_modifier(Modifier::BOLD)),
     ]);
     f.render_widget(
@@ -2390,7 +2356,7 @@ fn draw_session_config_popup(f: &mut Frame, app: &App, area: Rect) {
     );
 
     // Footer
-    let footer = Paragraph::new("j/k: navigate | h/l: column | Space/Enter: toggle | Esc: close")
+    let footer = Paragraph::new("j/k: navigate | Space/Enter: toggle | Esc: close")
         .style(Style::default().fg(Color::DarkGray))
         .alignment(ratatui::layout::Alignment::Center);
     let footer_y = inner.y + inner.height.saturating_sub(1);
@@ -2417,11 +2383,6 @@ fn draw_session_config_popup(f: &mut Frame, app: &App, area: Rect) {
 
         let agent_col = fit_display_width(&session.agent, 15);
         let label_col = fit_display_width(&session.display_label, 15);
-        let iter_col = if session.keep_across_iterations {
-            "[x]"
-        } else {
-            "[ ]"
-        };
         let loop_col = if session.keep_across_loop_passes {
             "[x]"
         } else {
@@ -2439,52 +2400,23 @@ fn draw_session_config_popup(f: &mut Frame, app: &App, area: Rect) {
             Style::default()
         };
 
-        let iter_style = {
-            let base = if is_selected && col == 0 {
-                style.bg(Color::White)
+        let loop_style = if session.keep_across_loop_passes {
+            style.fg(if is_selected {
+                Color::Black
             } else {
-                style
-            };
-            if session.keep_across_iterations {
-                base.fg(if is_selected {
-                    Color::Black
-                } else {
-                    Color::Green
-                })
+                Color::Green
+            })
+        } else {
+            style.fg(if is_selected {
+                Color::Black
             } else {
-                base.fg(if is_selected {
-                    Color::Black
-                } else {
-                    Color::Red
-                })
-            }
-        };
-
-        let loop_style = {
-            let base = if is_selected && col == 1 {
-                style.bg(Color::White)
-            } else {
-                style
-            };
-            if session.keep_across_loop_passes {
-                base.fg(if is_selected {
-                    Color::Black
-                } else {
-                    Color::Green
-                })
-            } else {
-                base.fg(if is_selected {
-                    Color::Black
-                } else {
-                    Color::Red
-                })
-            }
+                Color::Red
+            })
         };
 
         let row = Line::from(vec![
             Span::styled(agent_col, style),
             Span::styled(label_col, style),
-            Span::styled(format!("{iter_col:<6}"), iter_style),
             Span::styled(format!("{loop_col:<6}"), loop_style),
             Span::styled(replicas_col, style),
         ]);
@@ -2709,7 +2641,7 @@ fn draw_feed_edit_popup(f: &mut Frame, app: &App, area: Rect) {
                 .map(|f| (f.collection, f.granularity))
         })
         .unwrap_or((
-            crate::execution::pipeline::FeedCollection::LastIteration,
+            crate::execution::pipeline::FeedCollection::LastPass,
             crate::execution::pipeline::FeedGranularity::PerRun,
         ));
 

@@ -1,8 +1,6 @@
 use super::consolidation::should_offer_consolidation;
 use super::diagnostics::maybe_start_diagnostics;
-use super::input::{
-    sync_pipeline_concurrency_buf, sync_pipeline_iterations_buf, sync_pipeline_runs_buf,
-};
+use super::input::{sync_pipeline_concurrency_buf, sync_pipeline_runs_buf};
 use super::resume::{
     find_last_complete_iteration_for_agents, find_latest_compatible_run, session_matches_resume,
 };
@@ -59,7 +57,6 @@ fn commit_memory_recall(app: &App, recalled_ids: &[i64]) {
 }
 
 pub(super) fn start_pipeline_execution(app: &mut App) {
-    sync_pipeline_iterations_buf(app);
     sync_pipeline_runs_buf(app);
     sync_pipeline_concurrency_buf(app);
 
@@ -72,12 +69,7 @@ pub(super) fn start_pipeline_execution(app: &mut App) {
         app.error_modal = Some("Enter an initial prompt".into());
         return;
     }
-    let iterations: u32 = app.pipeline.pipeline_iterations_buf.parse().unwrap_or(0);
-    if iterations < 1 {
-        app.error_modal = Some("Iterations must be at least 1".into());
-        return;
-    }
-    app.pipeline.pipeline_def.iterations = iterations;
+    let iterations: u32 = 1;
 
     if let Err(e) = pipeline_mod::validate_pipeline(&app.pipeline.pipeline_def) {
         app.error_modal = Some(e.to_string());
@@ -124,9 +116,9 @@ pub(super) fn start_pipeline_execution(app: &mut App) {
     // Copy prompt/session for running screen display
     app.prompt.prompt_text = app.pipeline.pipeline_def.initial_prompt.clone();
     app.prompt.session_name = app.pipeline.pipeline_session_name.clone();
-    app.prompt.iterations = iterations;
+    app.prompt.iterations = 1;
     app.running.current_iteration = 1;
-    app.running.final_iteration = iterations;
+    app.running.final_iteration = 1;
 
     // Build agent configs keyed by agent name
     let mut agent_configs: std::collections::HashMap<String, (ProviderKind, ProviderConfig, bool)> =
@@ -212,8 +204,7 @@ pub(super) fn start_pipeline_execution(app: &mut App) {
     app.running.block_rows = block_rows;
 
     let loop_extra = crate::execution::pipeline::loop_extra_tasks(&app.pipeline.pipeline_def);
-    app.running.expected_total_steps =
-        (rt.entries.len() + loop_extra) * iterations as usize + fin_tasks;
+    app.running.expected_total_steps = (rt.entries.len() + loop_extra) + fin_tasks;
 
     // HTTP client
     let timeout_secs = app.effective_http_timeout_seconds().max(1);

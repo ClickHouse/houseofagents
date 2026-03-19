@@ -242,7 +242,7 @@ pub(super) fn build_setup_analysis_prompt(app: &App) -> String {
         "You are analyzing a multi-agent execution setup. Describe clearly and \
          concisely what will happen when this run starts. Be specific about data \
          flow and ordering.\n\n\
-         Describe one complete iteration in detail first, then state totals for \
+         Describe one complete execution in detail first, then state totals for \
          iterations and runs. Paraphrase prompts — do not quote them verbatim.\n\
          Keep it concise and scannable. Use short paragraphs.\n\
          Do not write files. Do not ask for filesystem permissions.\n\n",
@@ -411,7 +411,6 @@ fn build_pipeline_prompt(app: &App, prompt: &mut String) {
     }
     prompt.push('\n');
 
-    prompt.push_str(&format!("Iterations: {}\n", def.iterations));
     prompt.push_str(&format!(
         "Runs: {} (concurrency: {})\n",
         app.pipeline.pipeline_runs,
@@ -584,7 +583,7 @@ fn build_pipeline_prompt(app: &App, prompt: &mut String) {
             })
             .collect();
         prompt.push_str(&format!(
-            "Terminal blocks (feed next iteration): {}\n",
+            "Terminal blocks (loop feedback target): {}\n",
             term_labels.join(", ")
         ));
     }
@@ -596,11 +595,11 @@ fn build_pipeline_prompt(app: &App, prompt: &mut String) {
         for s in &sessions {
             let block_ids_str: Vec<String> = s.block_ids.iter().map(|id| id.to_string()).collect();
             prompt.push_str(&format!(
-                "  \"{}\" — {}: Blocks {} — keep across iterations: {}\n",
+                "  \"{}\" — {}: Blocks {} — keep across loop passes: {}\n",
                 s.display_label,
                 s.agent,
                 block_ids_str.join(", "),
-                if s.keep_across_iterations {
+                if s.keep_across_loop_passes {
                     "yes"
                 } else {
                     "no"
@@ -638,8 +637,8 @@ fn build_pipeline_prompt(app: &App, prompt: &mut String) {
     if def.has_finalization() {
         prompt.push_str("\n--- Finalization Phase ---\n");
         prompt.push_str(
-            "Finalization blocks run after all execution iterations complete. \
-             They receive data from execution blocks via data feeds.\n",
+            "Finalization blocks run after all execution blocks (including loop reruns) \
+             complete. They receive data from execution blocks via data feeds.\n",
         );
 
         // Finalization blocks
@@ -722,8 +721,8 @@ fn build_pipeline_prompt(app: &App, prompt: &mut String) {
                     .map(|b| format!("{} \"{}\"", b.id, pipeline_block_label(b)))
                     .unwrap_or_else(|| format!("Block {}", feed.to));
                 let collection = match feed.collection {
-                    pipeline_mod::FeedCollection::LastIteration => "last iteration",
-                    pipeline_mod::FeedCollection::AllIterations => "all iterations",
+                    pipeline_mod::FeedCollection::LastPass => "last pass",
+                    pipeline_mod::FeedCollection::AllPasses => "all passes",
                 };
                 let granularity = match feed.granularity {
                     pipeline_mod::FeedGranularity::PerRun => "per-run",

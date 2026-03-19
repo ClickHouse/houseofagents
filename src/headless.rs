@@ -955,8 +955,19 @@ pub(crate) async fn run(args: HeadlessArgs, config: AppConfig) -> i32 {
         if let Some(ref prompt) = args.prompt {
             def.initial_prompt = prompt.clone();
         }
-        if let Some(iters) = args.iterations {
-            def.iterations = iters;
+        if args.iterations.is_some() && !args.quiet {
+            let msg =
+                "--iterations is ignored for pipeline mode; use loop connections to repeat work.";
+            match args.output_format {
+                OutputFormat::Json => {
+                    let obj = serde_json::json!({
+                        "event": "warning",
+                        "message": msg,
+                    });
+                    eprintln!("{}", serde_json::to_string(&obj).unwrap_or_default());
+                }
+                OutputFormat::Text => eprintln!("Warning: {msg}"),
+            }
         }
         def.normalize_session_configs();
         if let Err(e) = pipeline_mod::validate_pipeline(&def) {
@@ -976,10 +987,11 @@ pub(crate) async fn run(args: HeadlessArgs, config: AppConfig) -> i32 {
         None
     };
 
-    let effective_iterations = pipeline_def
-        .as_ref()
-        .map(|d| d.iterations)
-        .unwrap_or_else(|| args.iterations.unwrap_or(1));
+    let effective_iterations = if pipeline_def.is_some() {
+        1
+    } else {
+        args.iterations.unwrap_or(1)
+    };
     print_run_info(&args, effective_iterations);
 
     // Memory store init (best-effort)
@@ -1442,7 +1454,7 @@ async fn run_single_pipeline(
             pipeline_def.blocks.len(),
             pipeline_def.connections.len(),
             pipeline_def.loop_connections.len(),
-            pipeline_def.iterations,
+            1,
             rt.entries.len() + loop_extra,
             args.pipeline_path
                 .as_deref()
@@ -1475,8 +1487,7 @@ async fn run_single_pipeline(
     commit_memory_recall_headless(memory_store, &recalled_ids);
 
     let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
-    let mut logger =
-        ProgressLogger::new(args.output_format, args.quiet, pipeline_def.iterations, 1);
+    let mut logger = ProgressLogger::new(args.output_format, args.quiet, 1, 1);
     let task_cancel = cancel.clone();
 
     let handle = tokio::spawn({
@@ -1941,17 +1952,12 @@ async fn run_batch_pipeline(
             concurrency,
             &ExecutionMode::Pipeline,
             &step_labels,
-            pipeline_def.iterations,
+            1,
         )
         .map_err(|e| format!("Failed to write batch metadata: {e}"))?;
 
     let (batch_tx, mut batch_rx) = mpsc::unbounded_channel();
-    let mut logger = ProgressLogger::new(
-        args.output_format,
-        args.quiet,
-        pipeline_def.iterations,
-        args.runs,
-    );
+    let mut logger = ProgressLogger::new(args.output_format, args.quiet, 1, args.runs);
 
     let batch_dir = batch_root.run_dir().display().to_string();
     emit_run_dir_early(args, &batch_dir);
@@ -2056,7 +2062,7 @@ async fn run_batch_pipeline(
                     pipeline_def.blocks.len(),
                     pipeline_def.connections.len(),
                     pipeline_def.loop_connections.len(),
-                    pipeline_def.iterations,
+                    1,
                     total_tasks,
                     pipeline_path
                         .as_deref()

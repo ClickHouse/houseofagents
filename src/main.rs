@@ -64,7 +64,7 @@ struct Cli {
     #[arg(long, value_delimiter = ',')]
     order: Vec<String>,
 
-    /// Number of iterations
+    /// Number of iterations (relay/swarm only; ignored for pipeline)
     #[arg(long)]
     iterations: Option<u32>,
 
