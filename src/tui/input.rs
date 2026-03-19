@@ -501,12 +501,7 @@ pub(super) fn handle_pipeline_paste(app: &mut App, text: &str) {
                 );
             }
             PipelineLoopEditField::BreakAgent => {
-                let clean = text.replace(['\n', '\r'], "");
-                insert_text(
-                    &mut app.pipeline.pipeline_loop_edit_break_agent_buf,
-                    &mut app.pipeline.pipeline_loop_edit_break_agent_cursor,
-                    &clean,
-                );
+                // Selection list — ignore paste
             }
             PipelineLoopEditField::BreakCondition => {
                 insert_text(
@@ -1185,8 +1180,33 @@ pub(super) fn handle_pipeline_builder_key(app: &mut App, key: KeyEvent) {
                         lc.break_condition.clone();
                     app.pipeline.pipeline_loop_edit_break_condition_cursor =
                         lc.break_condition.len();
-                    app.pipeline.pipeline_loop_edit_break_agent_buf = lc.break_agent.clone();
-                    app.pipeline.pipeline_loop_edit_break_agent_cursor = lc.break_agent.len();
+                    if lc.break_agent.is_empty() {
+                        app.pipeline.pipeline_loop_edit_break_agent_idx = 0;
+                        app.pipeline.pipeline_loop_edit_break_agent_orphan = String::new();
+                    } else if let Some(pos) = app
+                        .config
+                        .agents
+                        .iter()
+                        .position(|a| a.name == lc.break_agent)
+                    {
+                        app.pipeline.pipeline_loop_edit_break_agent_idx = pos + 1;
+                        app.pipeline.pipeline_loop_edit_break_agent_orphan = String::new();
+                    } else {
+                        // Agent no longer in config — show as orphan at end of list
+                        app.pipeline.pipeline_loop_edit_break_agent_orphan =
+                            lc.break_agent.clone();
+                        app.pipeline.pipeline_loop_edit_break_agent_idx =
+                            app.config.agents.len() + 1;
+                    }
+                    // Scroll so the selected item is visible
+                    let visible = app
+                        .pipeline
+                        .pipeline_loop_edit_break_agent_visible
+                        .get()
+                        .max(1);
+                    let idx = app.pipeline.pipeline_loop_edit_break_agent_idx;
+                    app.pipeline.pipeline_loop_edit_break_agent_scroll =
+                        idx.saturating_sub(visible.saturating_sub(1));
                 } else {
                     // Enter loop connect mode
                     app.pipeline.pipeline_loop_connecting_from = Some(sel);
@@ -2401,8 +2421,20 @@ fn handle_pipeline_loop_edit_key(app: &mut App, key: KeyEvent) {
                             lc.prompt = app.pipeline.pipeline_loop_edit_prompt_buf.clone();
                             lc.break_condition =
                                 app.pipeline.pipeline_loop_edit_break_condition_buf.clone();
-                            lc.break_agent =
-                                app.pipeline.pipeline_loop_edit_break_agent_buf.clone();
+                            let ba_idx = app.pipeline.pipeline_loop_edit_break_agent_idx;
+                            lc.break_agent = if ba_idx == 0 {
+                                String::new()
+                            } else if let Some(a) = app.config.agents.get(ba_idx - 1) {
+                                a.name.clone()
+                            } else if !app.pipeline.pipeline_loop_edit_break_agent_orphan.is_empty()
+                            {
+                                // Orphan slot selected — preserve the original name
+                                app.pipeline
+                                    .pipeline_loop_edit_break_agent_orphan
+                                    .clone()
+                            } else {
+                                String::new()
+                            };
                         }
                     }
                     app.pipeline.pipeline_show_loop_edit = false;
@@ -2416,7 +2448,7 @@ fn handle_pipeline_loop_edit_key(app: &mut App, key: KeyEvent) {
                     );
                 }
                 PipelineLoopEditField::BreakAgent => {
-                    // No-op for single-line field
+                    // Selection list — no-op on Enter
                 }
                 PipelineLoopEditField::BreakCondition => {
                     // Insert newline in break condition field
@@ -2474,11 +2506,43 @@ fn handle_pipeline_loop_edit_key(app: &mut App, key: KeyEvent) {
                 );
             }
             PipelineLoopEditField::BreakAgent => {
-                handle_text_key(
-                    &mut app.pipeline.pipeline_loop_edit_break_agent_buf,
-                    &mut app.pipeline.pipeline_loop_edit_break_agent_cursor,
-                    key,
-                );
+                let has_orphan =
+                    !app.pipeline.pipeline_loop_edit_break_agent_orphan.is_empty();
+                let total = app.config.agents.len() + 1 + usize::from(has_orphan);
+                match key.code {
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        if total > 0 {
+                            app.pipeline.pipeline_loop_edit_break_agent_idx =
+                                app.pipeline.pipeline_loop_edit_break_agent_idx.saturating_sub(1);
+                            if app.pipeline.pipeline_loop_edit_break_agent_idx
+                                < app.pipeline.pipeline_loop_edit_break_agent_scroll
+                            {
+                                app.pipeline.pipeline_loop_edit_break_agent_scroll =
+                                    app.pipeline.pipeline_loop_edit_break_agent_idx;
+                            }
+                        }
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        if total > 0
+                            && app.pipeline.pipeline_loop_edit_break_agent_idx
+                                < total.saturating_sub(1)
+                        {
+                            app.pipeline.pipeline_loop_edit_break_agent_idx += 1;
+                            let visible = app
+                                .pipeline
+                                .pipeline_loop_edit_break_agent_visible
+                                .get()
+                                .max(1);
+                            if app.pipeline.pipeline_loop_edit_break_agent_idx
+                                >= app.pipeline.pipeline_loop_edit_break_agent_scroll + visible
+                            {
+                                app.pipeline.pipeline_loop_edit_break_agent_scroll =
+                                    app.pipeline.pipeline_loop_edit_break_agent_idx + 1 - visible;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
             }
             PipelineLoopEditField::BreakCondition => {
                 handle_text_key(
