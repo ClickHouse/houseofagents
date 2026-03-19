@@ -11,7 +11,7 @@ use crate::screen::prompt::{char_wrap_text, prompt_cursor_layout};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 pub(crate) const BLOCK_W: u16 = 18;
@@ -192,9 +192,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     if app.setup_analysis.active {
         help::draw_setup_analysis_popup(f, &app.setup_analysis);
     }
-    if let Some(ref msg) = app.error_modal {
-        draw_error_modal(f, msg);
-    }
+    // Error/info modals are rendered globally by screen::draw()
 }
 
 fn draw_title(f: &mut Frame, area: Rect) {
@@ -266,6 +264,7 @@ fn draw_prompt_area(f: &mut Frame, app: &App, area: Rect) {
         || app.pipeline.pipeline_show_feed_edit
         || app.pipeline.pipeline_show_feed_list
         || app.error_modal.is_some()
+        || app.info_modal.is_some()
         || app.help_popup.active
         || app.setup_analysis.active;
     if prompt_focus && !has_overlay && inner.width > 0 && inner.height > 0 {
@@ -2109,7 +2108,12 @@ fn draw_edit_popup(f: &mut Frame, app: &App, area: Rect) {
     let prompt_p = Paragraph::new(edit_wrapped.as_str()).scroll((prompt_scroll, 0));
     f.render_widget(prompt_p, prompt_inner);
 
-    if prompt_focus && prompt_inner.width > 0 && prompt_inner.height > 0 {
+    if prompt_focus
+        && prompt_inner.width > 0
+        && prompt_inner.height > 0
+        && app.error_modal.is_none()
+        && app.info_modal.is_none()
+    {
         let visible_row = prompt_cursor_row.saturating_sub(prompt_scroll as usize);
         let cx = prompt_inner.x
             + (prompt_cursor_col.min(prompt_inner.width.saturating_sub(1) as usize) as u16);
@@ -2312,7 +2316,7 @@ fn draw_file_dialog(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_session_config_popup(f: &mut Frame, app: &App, area: Rect) {
-    let popup = centered_rect(55, 50, area);
+    let popup = centered_rect(60, 50, area);
     f.render_widget(Clear, popup);
 
     let block = Block::default()
@@ -2352,19 +2356,32 @@ fn draw_session_config_popup(f: &mut Frame, app: &App, area: Rect) {
     }
 
     // Header
+    let col = app.pipeline.pipeline_session_config_col;
+    let iter_header_style = if col == 0 {
+        Style::default()
+            .add_modifier(Modifier::BOLD)
+            .add_modifier(Modifier::UNDERLINED)
+    } else {
+        Style::default().add_modifier(Modifier::BOLD)
+    };
+    let loop_header_style = if col == 1 {
+        Style::default()
+            .add_modifier(Modifier::BOLD)
+            .add_modifier(Modifier::UNDERLINED)
+    } else {
+        Style::default().add_modifier(Modifier::BOLD)
+    };
     let header = Line::from(vec![
         Span::styled(
             format!("{:<15}", "Agent"),
             Style::default().add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!("{:<17}", "Session"),
+            format!("{:<15}", "Session"),
             Style::default().add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            format!("{:<6}", "Keep"),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(format!("{:<6}", "Iter"), iter_header_style),
+        Span::styled(format!("{:<6}", "Loop"), loop_header_style),
         Span::styled("\u{00d7}N", Style::default().add_modifier(Modifier::BOLD)),
     ]);
     f.render_widget(
@@ -2373,7 +2390,7 @@ fn draw_session_config_popup(f: &mut Frame, app: &App, area: Rect) {
     );
 
     // Footer
-    let footer = Paragraph::new("j/k: navigate | Space/Enter: toggle | Esc: close")
+    let footer = Paragraph::new("j/k: navigate | h/l: column | Space/Enter: toggle | Esc: close")
         .style(Style::default().fg(Color::DarkGray))
         .alignment(ratatui::layout::Alignment::Center);
     let footer_y = inner.y + inner.height.saturating_sub(1);
@@ -2399,8 +2416,13 @@ fn draw_session_config_popup(f: &mut Frame, app: &App, area: Rect) {
         let is_selected = si == cursor;
 
         let agent_col = fit_display_width(&session.agent, 15);
-        let label_col = fit_display_width(&session.display_label, 17);
-        let keep_col = if session.keep_across_iterations {
+        let label_col = fit_display_width(&session.display_label, 15);
+        let iter_col = if session.keep_across_iterations {
+            "[x]"
+        } else {
+            "[ ]"
+        };
+        let loop_col = if session.keep_across_loop_passes {
             "[x]"
         } else {
             "[ ]"
@@ -2417,25 +2439,53 @@ fn draw_session_config_popup(f: &mut Frame, app: &App, area: Rect) {
             Style::default()
         };
 
+        let iter_style = {
+            let base = if is_selected && col == 0 {
+                style.bg(Color::White)
+            } else {
+                style
+            };
+            if session.keep_across_iterations {
+                base.fg(if is_selected {
+                    Color::Black
+                } else {
+                    Color::Green
+                })
+            } else {
+                base.fg(if is_selected {
+                    Color::Black
+                } else {
+                    Color::Red
+                })
+            }
+        };
+
+        let loop_style = {
+            let base = if is_selected && col == 1 {
+                style.bg(Color::White)
+            } else {
+                style
+            };
+            if session.keep_across_loop_passes {
+                base.fg(if is_selected {
+                    Color::Black
+                } else {
+                    Color::Green
+                })
+            } else {
+                base.fg(if is_selected {
+                    Color::Black
+                } else {
+                    Color::Red
+                })
+            }
+        };
+
         let row = Line::from(vec![
             Span::styled(agent_col, style),
             Span::styled(label_col, style),
-            Span::styled(
-                format!("{keep_col:<6}"),
-                if session.keep_across_iterations {
-                    style.fg(if is_selected {
-                        Color::Black
-                    } else {
-                        Color::Green
-                    })
-                } else {
-                    style.fg(if is_selected {
-                        Color::Black
-                    } else {
-                        Color::Red
-                    })
-                },
-            ),
+            Span::styled(format!("{iter_col:<6}"), iter_style),
+            Span::styled(format!("{loop_col:<6}"), loop_style),
             Span::styled(replicas_col, style),
         ]);
 
@@ -2559,7 +2609,12 @@ fn draw_loop_edit_popup(f: &mut Frame, app: &App, area: Rect) {
     let prompt_p = Paragraph::new(edit_wrapped.as_str()).scroll((prompt_scroll, 0));
     f.render_widget(prompt_p, prompt_inner);
 
-    if prompt_focus && prompt_inner.width > 0 && prompt_inner.height > 0 {
+    if prompt_focus
+        && prompt_inner.width > 0
+        && prompt_inner.height > 0
+        && app.error_modal.is_none()
+        && app.info_modal.is_none()
+    {
         let visible_row = prompt_cursor_row.saturating_sub(prompt_scroll as usize);
         let cx = prompt_inner.x
             + (prompt_cursor_col.min(prompt_inner.width.saturating_sub(1) as usize) as u16);
@@ -2805,21 +2860,6 @@ fn draw_feed_list_popup(f: &mut Frame, app: &App, area: Rect) {
     let hint = Paragraph::new("  Up/Down: navigate | Enter: edit | F: delete | Esc: close")
         .style(Style::default().fg(Color::DarkGray));
     f.render_widget(hint, chunks[1]);
-}
-
-fn draw_error_modal(f: &mut Frame, message: &str) {
-    let area = centered_rect(60, 20, f.area());
-    f.render_widget(Clear, area);
-    let block = Block::default()
-        .title(" Error ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Red));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-    let msg = Paragraph::new(message)
-        .style(Style::default().fg(Color::Red))
-        .wrap(Wrap { trim: false });
-    f.render_widget(msg, inner);
 }
 
 #[cfg(test)]

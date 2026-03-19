@@ -1,5 +1,6 @@
 pub mod help;
 pub mod home;
+pub mod memory;
 pub mod order;
 pub mod pipeline;
 pub mod prompt;
@@ -8,6 +9,8 @@ pub mod running;
 
 use crate::app::{App, Screen};
 use ratatui::layout::Rect;
+use ratatui::style::{Color, Style};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 pub fn draw(f: &mut Frame, app: &App) {
@@ -18,7 +21,30 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::Running => running::draw(f, app),
         Screen::Results => results::draw(f, app),
         Screen::Pipeline => pipeline::draw(f, app),
+        Screen::Memory => memory::draw(f, app),
     }
+
+    // Global modal overlay — rendered on every screen, always topmost
+    if let Some(ref msg) = app.error_modal {
+        draw_modal(f, msg, " Error ", Color::Red);
+    } else if let Some(ref msg) = app.info_modal {
+        draw_modal(f, msg, " Info ", Color::Green);
+    }
+}
+
+fn draw_modal(f: &mut Frame, message: &str, title: &str, color: Color) {
+    let area = centered_rect(60, 20, f.area());
+    f.render_widget(Clear, area);
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(color));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let msg = Paragraph::new(message)
+        .style(Style::default().fg(color))
+        .wrap(Wrap { trim: false });
+    f.render_widget(msg, inner);
 }
 
 pub fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {

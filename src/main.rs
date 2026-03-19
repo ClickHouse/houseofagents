@@ -4,6 +4,7 @@ mod error;
 mod event;
 mod execution;
 mod headless;
+mod memory;
 mod output;
 mod post_run;
 mod provider;
@@ -106,6 +107,10 @@ struct Cli {
     /// Suppress stderr progress output
     #[arg(long)]
     quiet: bool,
+
+    /// Disable cross-run memory
+    #[arg(long)]
+    no_memory: bool,
 }
 
 impl Cli {
@@ -245,7 +250,7 @@ async fn main() -> anyhow::Result<()> {
         Some(path) => config::AppConfig::load_with_override(Some(path)),
         None => config::AppConfig::load(),
     };
-    let config = match config {
+    let mut config = match config {
         Ok(c) => c,
         Err(e) => {
             if cli.is_headless() && matches!(cli.output_format, CliOutputFormat::Json) {
@@ -256,6 +261,10 @@ async fn main() -> anyhow::Result<()> {
             return Err(e.into());
         }
     };
+
+    if cli.no_memory {
+        config.memory.enabled = false;
+    }
 
     if cli.is_headless() {
         let args = match cli_to_headless_args(&cli) {

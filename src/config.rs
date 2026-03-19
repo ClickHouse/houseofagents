@@ -5,6 +5,67 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub db_path: String,
+    #[serde(default)]
+    pub project_id: String,
+    #[serde(default = "default_max_recall")]
+    pub max_recall: usize,
+    #[serde(default = "default_max_recall_bytes")]
+    pub max_recall_bytes: usize,
+    #[serde(default)]
+    pub extraction_agent: String,
+    #[serde(default)]
+    pub disable_extraction: bool,
+    #[serde(default = "default_observation_ttl_days")]
+    pub observation_ttl_days: u32,
+    #[serde(default = "default_summary_ttl_days")]
+    pub summary_ttl_days: u32,
+    #[serde(default = "default_stale_permanent_days")]
+    pub stale_permanent_days: u32,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            db_path: String::new(),
+            project_id: String::new(),
+            max_recall: default_max_recall(),
+            max_recall_bytes: default_max_recall_bytes(),
+            extraction_agent: String::new(),
+            disable_extraction: false,
+            observation_ttl_days: default_observation_ttl_days(),
+            summary_ttl_days: default_summary_ttl_days(),
+            stale_permanent_days: default_stale_permanent_days(),
+        }
+    }
+}
+
+fn default_max_recall() -> usize {
+    20
+}
+
+fn default_max_recall_bytes() -> usize {
+    16384
+}
+
+fn default_observation_ttl_days() -> u32 {
+    120
+}
+
+fn default_summary_ttl_days() -> u32 {
+    180
+}
+
+fn default_stale_permanent_days() -> u32 {
+    365
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub output_dir: String,
     #[serde(default = "default_max_tokens")]
@@ -24,6 +85,8 @@ pub struct AppConfig {
     pub pipeline_block_concurrency: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diagnostic_provider: Option<String>,
+    #[serde(default)]
+    pub memory: MemoryConfig,
     #[serde(default)]
     pub agents: Vec<AgentConfig>,
     /// Legacy field — kept only for deserialization/migration. Not serialized.
@@ -307,6 +370,20 @@ max_history_bytes = 102400
 # Optional: set the diagnostic agent (agent name, e.g. "Claude")
 # diagnostic_provider = "Claude"
 
+# Cross-run memory system (SQLite+FTS5)
+# [memory]
+# enabled = true
+# db_path = ""                  # empty = {output_dir}/memory.db
+# project_id = ""               # empty = auto-detect from git remote / cwd
+# max_recall = 20               # max memories injected per run
+# max_recall_bytes = 16384      # max total bytes of recalled memory context
+# extraction_agent = ""         # empty = first participating agent, then first configured
+                                # Tip: stronger models produce higher-quality memories
+# disable_extraction = false    # set true to skip post-run extraction
+# observation_ttl_days = 120
+# summary_ttl_days = 180
+# stale_permanent_days = 365   # archive permanent memories after N days (0=disabled)
+
 # Named agents — you can have multiple agents per provider
 [[agents]]
 name = "OpenAI"
@@ -371,6 +448,7 @@ mod tests {
             max_history_bytes: 102400,
             pipeline_block_concurrency: 0,
             diagnostic_provider: None,
+            memory: MemoryConfig::default(),
             agents: Vec::new(),
             providers: HashMap::new(),
         }

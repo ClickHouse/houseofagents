@@ -53,6 +53,49 @@ const EXIT_VALIDATION: i32 = 1;
 const EXIT_EXECUTION: i32 = 2;
 const EXIT_CANCELLED: i32 = 130;
 
+/// Inject recalled memories into the prompt context. Returns the IDs so the
+/// caller can commit recall tracking after setup succeeds.
+fn inject_memory_recall_headless(
+    config: &AppConfig,
+    store: &Option<crate::memory::store::MemoryStore>,
+    project_id: &str,
+    prompt_context: &mut PromptRuntimeContext,
+) -> Vec<i64> {
+    if !config.memory.enabled {
+        return vec![];
+    }
+    let Some(ref store) = store else {
+        return vec![];
+    };
+    if let Ok(recalled) = crate::memory::recall::recall_for_prompt(
+        store,
+        project_id,
+        prompt_context.raw_prompt(),
+        config.memory.max_recall,
+        config.memory.max_recall_bytes,
+    ) {
+        let ids: Vec<i64> = recalled.memories.iter().map(|m| m.id).collect();
+        prompt_context.set_memory_context(crate::memory::recall::format_memory_context(&recalled));
+        ids
+    } else {
+        vec![]
+    }
+}
+
+fn commit_memory_recall_headless(
+    store: &Option<crate::memory::store::MemoryStore>,
+    recalled_ids: &[i64],
+) {
+    if recalled_ids.is_empty() {
+        return;
+    }
+    if let Some(ref store) = store {
+        // Best-effort: recall tracking is non-critical metadata.
+        // Silently ignore errors to avoid breaking --quiet / JSON output contracts.
+        let _ = store.mark_recalled(recalled_ids);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Typed headless error — distinguishes input-validation failures (exit 1)
 // from runtime/execution failures (exit 2).
@@ -939,6 +982,46 @@ pub(crate) async fn run(args: HeadlessArgs, config: AppConfig) -> i32 {
         .unwrap_or_else(|| args.iterations.unwrap_or(1));
     print_run_info(&args, effective_iterations);
 
+    // Memory store init (best-effort)
+    let (memory_store, memory_project_id) = if config.memory.enabled {
+        let db_path = if config.memory.db_path.is_empty() {
+            config.resolved_output_dir().join("memory.db")
+        } else {
+            PathBuf::from(&config.memory.db_path)
+        };
+        match crate::memory::store::MemoryStore::open(&db_path) {
+            Ok(s) => {
+                if config.memory.stale_permanent_days > 0 {
+                    let _ = s.archive_stale_permanent(config.memory.stale_permanent_days);
+                }
+                (
+                    Some(s),
+                    crate::memory::project::detect_project_id(&config.memory.project_id),
+                )
+            }
+            Err(e) => {
+                if !args.quiet {
+                    match args.output_format {
+                        OutputFormat::Json => {
+                            let obj = serde_json::json!({
+                                "event": "warning",
+                                "component": "memory_store",
+                                "message": format!("memory store failed to open ({db_path:?}): {e}"),
+                            });
+                            eprintln!("{}", serde_json::to_string(&obj).unwrap_or_default());
+                        }
+                        OutputFormat::Text => {
+                            eprintln!("Warning: memory store failed to open ({db_path:?}): {e}");
+                        }
+                    }
+                }
+                (None, String::new())
+            }
+        }
+    } else {
+        (None, String::new())
+    };
+
     let cancel = Arc::new(AtomicBool::new(false));
     install_signal_handler(cancel.clone(), args.quiet);
 
@@ -946,14 +1029,44 @@ pub(crate) async fn run(args: HeadlessArgs, config: AppConfig) -> i32 {
 
     let result = if let Some(pdef) = pipeline_def {
         if is_batch {
-            run_batch_pipeline(&args, &config, pdef, cancel.clone()).await
+            run_batch_pipeline(
+                &args,
+                &config,
+                pdef,
+                cancel.clone(),
+                &memory_store,
+                &memory_project_id,
+            )
+            .await
         } else {
-            run_single_pipeline(&args, &config, pdef, cancel.clone()).await
+            run_single_pipeline(
+                &args,
+                &config,
+                pdef,
+                cancel.clone(),
+                &memory_store,
+                &memory_project_id,
+            )
+            .await
         }
     } else if is_batch {
-        run_batch_standard(&args, &config, cancel.clone()).await
+        run_batch_standard(
+            &args,
+            &config,
+            cancel.clone(),
+            &memory_store,
+            &memory_project_id,
+        )
+        .await
     } else {
-        run_single_standard(&args, &config, cancel.clone()).await
+        run_single_standard(
+            &args,
+            &config,
+            cancel.clone(),
+            &memory_store,
+            &memory_project_id,
+        )
+        .await
     };
 
     match result {
@@ -965,8 +1078,15 @@ pub(crate) async fn run(args: HeadlessArgs, config: AppConfig) -> i32 {
             } else {
                 // Run post-run steps even on partial failure — successful
                 // runs in a batch still benefit from consolidation/diagnostics.
-                let (post_run_partial, post_run_err_msg) =
-                    run_post_steps(&args, &config, &summary, cancel.clone()).await;
+                let (post_run_partial, post_run_err_msg) = run_post_steps(
+                    &args,
+                    &config,
+                    &summary,
+                    cancel.clone(),
+                    &memory_store,
+                    &memory_project_id,
+                )
+                .await;
 
                 if let Some(ref e) = post_run_err_msg {
                     if !args.quiet {
@@ -1069,6 +1189,8 @@ async fn run_single_standard(
     args: &HeadlessArgs,
     config: &AppConfig,
     cancel: Arc<AtomicBool>,
+    memory_store: &Option<crate::memory::store::MemoryStore>,
+    memory_project_id: &str,
 ) -> Result<RunSummary, HeadlessError> {
     let cli_available = rs::detect_cli_availability();
     let session_overrides = rs::compute_session_overrides(&config.agents, &cli_available);
@@ -1118,8 +1240,10 @@ async fn run_single_standard(
         })
         .collect();
 
-    let prompt_context =
+    let mut prompt_context =
         PromptRuntimeContext::new(prompt.clone(), config.diagnostic_provider.is_some());
+    let recalled_ids =
+        inject_memory_recall_headless(config, memory_store, memory_project_id, &mut prompt_context);
     let output = OutputManager::new(&output_dir, args.session_name.as_deref())
         .map_err(|e| format!("Failed to create output directory: {e}"))?;
     let run_dir = output.run_dir().display().to_string();
@@ -1128,6 +1252,9 @@ async fn run_single_standard(
     output
         .write_prompt(prompt_context.raw_prompt())
         .map_err(|e| format!("Failed to write prompt: {e}"))?;
+    if let Some(ctx) = prompt_context.memory_context() {
+        output.write_recalled_context_logged(ctx);
+    }
     let agent_info: Vec<(String, String)> = resolved
         .iter()
         .map(|a| (a.name.clone(), a.provider.config_key().to_string()))
@@ -1155,6 +1282,9 @@ async fn run_single_standard(
             args.keep_session,
         )
         .map_err(|e| format!("Failed to write session metadata: {e}"))?;
+
+    // All setup complete — commit recall tracking.
+    commit_memory_recall_headless(memory_store, &recalled_ids);
 
     let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
     let mut logger = ProgressLogger::new(args.output_format, args.quiet, iterations, 1);
@@ -1250,6 +1380,8 @@ async fn run_single_pipeline(
     config: &AppConfig,
     pipeline_def: pipeline_mod::PipelineDefinition,
     cancel: Arc<AtomicBool>,
+    memory_store: &Option<crate::memory::store::MemoryStore>,
+    memory_project_id: &str,
 ) -> Result<RunSummary, HeadlessError> {
     let cli_available = rs::detect_cli_availability();
     let session_overrides = rs::compute_session_overrides(&config.agents, &cli_available);
@@ -1283,10 +1415,12 @@ async fn run_single_pipeline(
         .build()
         .map_err(|e| HeadlessError::Execution(format!("Failed to create HTTP client: {e}")))?;
 
-    let prompt_context = PromptRuntimeContext::new(
+    let mut prompt_context = PromptRuntimeContext::new(
         pipeline_def.initial_prompt.clone(),
         config.diagnostic_provider.is_some(),
     );
+    let recalled_ids =
+        inject_memory_recall_headless(config, memory_store, memory_project_id, &mut prompt_context);
 
     let rt = pipeline_mod::build_runtime_table(&pipeline_def);
     let loop_extra = pipeline_mod::loop_extra_tasks(&pipeline_def);
@@ -1300,6 +1434,9 @@ async fn run_single_pipeline(
     output
         .write_prompt(prompt_context.raw_prompt())
         .map_err(|e| HeadlessError::Execution(format!("Failed to write prompt: {e}")))?;
+    if let Some(ctx) = prompt_context.memory_context() {
+        output.write_recalled_context_logged(ctx);
+    }
     output
         .write_pipeline_session_info(
             pipeline_def.blocks.len(),
@@ -1335,6 +1472,8 @@ async fn run_single_pipeline(
     }
 
     let has_finalization = pipeline_def.has_finalization();
+    commit_memory_recall_headless(memory_store, &recalled_ids);
+
     let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
     let mut logger =
         ProgressLogger::new(args.output_format, args.quiet, pipeline_def.iterations, 1);
@@ -1462,7 +1601,7 @@ async fn run_single_pipeline(
     Ok(RunSummary {
         run_dir: Some(run_dir),
         mode: ExecutionMode::Pipeline,
-        agents: vec![],
+        agents: pipeline_def.all_agent_names(),
         runs: 1,
         failed,
         error,
@@ -1481,6 +1620,8 @@ async fn run_batch_standard(
     args: &HeadlessArgs,
     config: &AppConfig,
     cancel: Arc<AtomicBool>,
+    memory_store: &Option<crate::memory::store::MemoryStore>,
+    memory_project_id: &str,
 ) -> Result<RunSummary, HeadlessError> {
     let cli_available = rs::detect_cli_availability();
     let session_overrides = rs::compute_session_overrides(&config.agents, &cli_available);
@@ -1501,8 +1642,10 @@ async fn run_batch_standard(
 
     let concurrency = rs::effective_concurrency(args.runs, args.concurrency);
 
-    let prompt_context =
+    let mut prompt_context =
         PromptRuntimeContext::new(prompt.clone(), config.diagnostic_provider.is_some());
+    let recalled_ids =
+        inject_memory_recall_headless(config, memory_store, memory_project_id, &mut prompt_context);
     let output_dir = config.resolved_output_dir();
     let batch_root = OutputManager::new_batch_parent(&output_dir, args.session_name.as_deref())
         .map_err(|e| format!("Failed to create batch directory: {e}"))?;
@@ -1535,6 +1678,9 @@ async fn run_batch_standard(
         .timeout(std::time::Duration::from_secs(http_timeout_secs))
         .build()
         .map_err(|e| format!("HTTP client error: {e}"))?;
+
+    // Commit recall after all fallible setup (HTTP client, output dirs) has succeeded.
+    commit_memory_recall_headless(memory_store, &recalled_ids);
 
     let handle = tokio::spawn(async move {
         run_multi(
@@ -1571,6 +1717,9 @@ async fn run_batch_standard(
                             RunOutcome::Failed,
                             Some(format!("Failed to write prompt: {e}")),
                         );
+                    }
+                    if let Some(ctx) = prompt_context.memory_context() {
+                        output.write_recalled_context_logged(ctx);
                     }
                     let agent_info: Vec<(String, String)> = resolved
                         .iter()
@@ -1755,6 +1904,8 @@ async fn run_batch_pipeline(
     config: &AppConfig,
     pipeline_def: pipeline_mod::PipelineDefinition,
     cancel: Arc<AtomicBool>,
+    memory_store: &Option<crate::memory::store::MemoryStore>,
+    memory_project_id: &str,
 ) -> Result<RunSummary, HeadlessError> {
     let cli_available = rs::detect_cli_availability();
     let session_overrides = rs::compute_session_overrides(&config.agents, &cli_available);
@@ -1833,6 +1984,19 @@ async fn run_batch_pipeline(
         .build()
         .map_err(|e| format!("HTTP client error: {e}"))?;
 
+    // Recall memory once for the shared prompt — all batch runs use the same
+    // prompt, so recalling N times would return identical results.
+    let shared_memory_context: Option<String> = {
+        let mut tmp_ctx = PromptRuntimeContext::new(
+            pipeline_def.initial_prompt.clone(),
+            config.diagnostic_provider.is_some(),
+        );
+        let recalled_ids =
+            inject_memory_recall_headless(config, memory_store, memory_project_id, &mut tmp_ctx);
+        commit_memory_recall_headless(memory_store, &recalled_ids);
+        tmp_ctx.memory_context().map(|s| s.to_string())
+    };
+
     // Shared closure for each run — identical regardless of finalization.
     let make_run_closure = {
         let client = client.clone();
@@ -1842,6 +2006,7 @@ async fn run_batch_pipeline(
         let batch_root_dir = batch_root_dir.clone();
         let pipeline_path_clone = pipeline_path_clone.clone();
         let pipeline_toml_str = pipeline_toml_str.clone();
+        let shared_memory_context = shared_memory_context.clone();
         move |run_id: u32,
               progress_tx: mpsc::UnboundedSender<ProgressEvent>,
               run_cancel: Arc<AtomicBool>| {
@@ -1852,6 +2017,7 @@ async fn run_batch_pipeline(
             let batch_root_dir = batch_root_dir.clone();
             let pipeline_path = pipeline_path_clone.clone();
             let pipeline_toml_str = pipeline_toml_str.clone();
+            let shared_memory_context = shared_memory_context.clone();
             async move {
                 let parent_output = match OutputManager::from_existing(batch_root_dir.clone()) {
                     Ok(o) => o,
@@ -1868,10 +2034,13 @@ async fn run_batch_pipeline(
                     }
                 };
 
-                let prompt_context = PromptRuntimeContext::new(
+                let mut prompt_context = PromptRuntimeContext::new(
                     pipeline_def.initial_prompt.clone(),
                     config.diagnostic_provider.is_some(),
                 );
+                if let Some(ref ctx) = shared_memory_context {
+                    prompt_context.set_memory_context(ctx.clone());
+                }
 
                 if let Err(e) = output.write_prompt(prompt_context.raw_prompt()) {
                     let _ = progress_tx.send(ProgressEvent::AllDone);
@@ -1879,6 +2048,9 @@ async fn run_batch_pipeline(
                         RunOutcome::Failed,
                         Some(format!("Failed to write prompt: {e}")),
                     );
+                }
+                if let Some(ctx) = prompt_context.memory_context() {
+                    output.write_recalled_context_logged(ctx);
                 }
                 if let Err(e) = output.write_pipeline_session_info(
                     pipeline_def.blocks.len(),
@@ -2104,7 +2276,7 @@ async fn run_batch_pipeline(
     Ok(RunSummary {
         run_dir: Some(batch_dir),
         mode: ExecutionMode::Pipeline,
-        agents: vec![],
+        agents: pipeline_def.all_agent_names(),
         runs: args.runs,
         failed,
         error: if let (false, Some(fin_err)) = (failed_runs.is_empty(), &finalization_error) {
@@ -2143,6 +2315,8 @@ async fn run_post_steps(
     config: &AppConfig,
     summary: &RunSummary,
     cancel: Arc<AtomicBool>,
+    memory_store: &Option<crate::memory::store::MemoryStore>,
+    memory_project_id: &str,
 ) -> (PostRunResult, Option<String>) {
     let mut result = PostRunResult {
         consolidation: None,
@@ -2156,6 +2330,59 @@ async fn run_post_steps(
 
     if cancel.load(Ordering::Relaxed) {
         return (result, None);
+    }
+
+    // Memory extraction — best-effort, before consolidation.
+    // The extraction function discovers output files and bails if none exist,
+    // matching TUI behavior where extraction runs for any partial success.
+    if config.memory.enabled && !config.memory.disable_extraction {
+        if let Some(ref store) = memory_store {
+            match run_memory_extraction(
+                &run_dir,
+                config,
+                summary,
+                store,
+                memory_project_id,
+                &cancel,
+            )
+            .await
+            {
+                Ok(count) => {
+                    if !args.quiet && count > 0 {
+                        match args.output_format {
+                            OutputFormat::Json => {
+                                let obj = serde_json::json!({
+                                    "event": "info",
+                                    "component": "memory_extraction",
+                                    "message": format!("Extracted {count} memories"),
+                                });
+                                eprintln!("{}", serde_json::to_string(&obj).unwrap_or_default());
+                            }
+                            OutputFormat::Text => {
+                                eprintln!("Memory extraction: {count} memories extracted");
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    if !args.quiet {
+                        match args.output_format {
+                            OutputFormat::Json => {
+                                let obj = serde_json::json!({
+                                    "event": "warning",
+                                    "component": "memory_extraction",
+                                    "message": format!("Memory extraction failed (non-blocking): {e}"),
+                                });
+                                eprintln!("{}", serde_json::to_string(&obj).unwrap_or_default());
+                            }
+                            OutputFormat::Text => {
+                                eprintln!("Memory extraction failed (non-blocking): {e}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // Consolidation — for single runs, `run_consolidation_steps` discovers
@@ -2195,7 +2422,19 @@ async fn run_post_steps(
         .await
         {
             if !args.quiet {
-                eprintln!("Diagnostics failed (non-blocking): {e}");
+                match args.output_format {
+                    OutputFormat::Json => {
+                        let obj = serde_json::json!({
+                            "event": "warning",
+                            "component": "diagnostics",
+                            "message": format!("Diagnostics failed (non-blocking): {e}"),
+                        });
+                        eprintln!("{}", serde_json::to_string(&obj).unwrap_or_default());
+                    }
+                    OutputFormat::Text => {
+                        eprintln!("Diagnostics failed (non-blocking): {e}");
+                    }
+                }
             }
         }
     }
@@ -2458,4 +2697,135 @@ fn emit_final_result(
             println!("{}", serde_json::to_string_pretty(&obj).unwrap_or_default());
         }
     }
+}
+
+async fn run_memory_extraction(
+    run_dir: &std::path::Path,
+    config: &AppConfig,
+    summary: &RunSummary,
+    store: &crate::memory::store::MemoryStore,
+    project_id: &str,
+    cancel: &Arc<AtomicBool>,
+) -> Result<usize, String> {
+    let mode = summary.mode;
+    let agents = &summary.agents;
+
+    let is_batch = summary.runs > 1;
+    let mut files: Vec<(String, PathBuf)> = if is_batch {
+        let mut all = Vec::new();
+        for id in &summary.successful_runs {
+            let sub = run_dir.join(format!("run_{id}"));
+            all.extend(post_run::discover_final_outputs(&sub, mode, agents));
+            all.extend(post_run::discover_finalization_outputs(&sub));
+        }
+        // Also check batch-level finalization
+        all.extend(post_run::discover_finalization_outputs(run_dir));
+        all
+    } else {
+        let mut all = post_run::discover_final_outputs(run_dir, mode, agents);
+        all.extend(post_run::discover_finalization_outputs(run_dir));
+        all
+    };
+    // Deduplicate while preserving run-order (not lexicographic path order)
+    {
+        let mut seen = std::collections::HashSet::new();
+        files.retain(|f| seen.insert(f.1.clone()));
+    }
+
+    if files.is_empty() {
+        return Ok(0);
+    }
+
+    let (prompt, skipped) = crate::memory::extraction::build_extraction_prompt(
+        &files,
+        config.memory.observation_ttl_days,
+        config.memory.summary_ttl_days,
+    )?;
+    if skipped > 0 {
+        if let Ok(output) = OutputManager::from_existing(run_dir.to_path_buf()) {
+            let _ = output.append_error(&format!(
+                "Memory extraction: {skipped} file(s) skipped (budget exceeded)"
+            ));
+        }
+    }
+
+    let Some(agent_name) = crate::app::resolve_extraction_agent(
+        &config.memory.extraction_agent,
+        agents,
+        &config.agents,
+    ) else {
+        return Ok(0);
+    };
+    let cli_available = rs::detect_cli_availability();
+    let session_overrides = rs::compute_session_overrides(&config.agents, &cli_available);
+    let agent_config = rs::resolve_agent_config(&agent_name, &session_overrides, &config.agents)
+        .cloned()
+        .ok_or_else(|| format!("Extraction agent '{agent_name}' not found"))?;
+    rs::validate_agent_runtime(&cli_available, &agent_name, &agent_config)?;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(
+            config.http_timeout_seconds.max(1),
+        ))
+        .build()
+        .map_err(|e| format!("HTTP client: {e}"))?;
+
+    let add_dirs = vec![run_dir.display().to_string()];
+    let mut provider = provider::create_provider(
+        agent_config.provider,
+        &agent_config.to_provider_config(),
+        client,
+        config.default_max_tokens,
+        config.max_history_messages,
+        config.max_history_bytes,
+        config.cli_timeout_seconds.max(1),
+        add_dirs,
+    );
+
+    // Check cancel before the potentially long API call
+    if cancel.load(Ordering::Relaxed) {
+        return Ok(0);
+    }
+    let response = tokio::select! {
+        res = provider.send(&prompt) => res.map_err(|e| e.to_string())?,
+        _ = async {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                if cancel.load(Ordering::Relaxed) { break; }
+            }
+        } => {
+            return Ok(0);
+        }
+    };
+    let memories = crate::memory::extraction::parse_extraction_response(&response.content);
+    if memories.is_empty() && !response.content.trim().is_empty() {
+        if let Ok(output) = OutputManager::from_existing(run_dir.to_path_buf()) {
+            let _ =
+                output.append_error("Memory extraction: provider returned unparseable response");
+        }
+    }
+    let source_run = run_dir.display().to_string();
+
+    let mut insert_failures = 0u32;
+    for mem in &memories {
+        if store
+            .insert(project_id, mem, &source_run, &agent_name, &config.memory)
+            .is_err()
+        {
+            insert_failures += 1;
+        }
+    }
+
+    // Write _memories.json to run dir
+    if let Ok(output) = OutputManager::from_existing(run_dir.to_path_buf()) {
+        output.write_memories_logged(&memories);
+        if insert_failures > 0 {
+            let _ = output.append_error(&format!(
+                "Memory persistence: {insert_failures}/{} memories failed to insert",
+                memories.len()
+            ));
+        }
+    }
+
+    Ok(memories.len())
 }

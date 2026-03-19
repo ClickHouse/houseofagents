@@ -87,6 +87,8 @@ pub fn draw(f: &mut Frame, app: &App) {
     if app.prompt.prompt_focus == PromptFocus::Text
         && prompt_inner.width > 0
         && prompt_inner.height > 0
+        && app.error_modal.is_none()
+        && app.info_modal.is_none()
     {
         let visible_row = cursor_row.saturating_sub(scroll_y as usize);
         let x =
@@ -287,7 +289,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
 
     // Help bar
-    let help_spans: Vec<Span> = match app.prompt.prompt_focus {
+    let mut help_spans: Vec<Span> = match app.prompt.prompt_focus {
         PromptFocus::Iterations => {
             vec![
                 Span::styled("Type", Style::default().fg(Color::Yellow)),
@@ -371,6 +373,12 @@ pub fn draw(f: &mut Frame, app: &App) {
             ]
         }
     };
+    if app.effective_memory_enabled() && app.memory.store.is_some() {
+        help_spans.push(Span::styled(
+            "  Memory: on",
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
     let help_bar =
         Paragraph::new(Line::from(help_spans)).block(Block::default().borders(Borders::TOP));
     f.render_widget(help_bar, chunks[6]);

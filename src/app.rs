@@ -178,6 +178,7 @@ pub enum Screen {
     Running,
     Results,
     Pipeline,
+    Memory,
 }
 
 pub struct App {
@@ -188,6 +189,20 @@ pub struct App {
     pub(crate) session_http_timeout_seconds: Option<u64>,
     pub(crate) session_model_fetch_timeout_seconds: Option<u64>,
     pub(crate) session_cli_timeout_seconds: Option<u64>,
+    // Session-level memory config overrides (TUI only).
+    // headless.rs reads config.memory.* directly because it has no session
+    // override mechanism — that's intentional, not an oversight.
+    // Note: db_path and project_id are intentionally excluded — they are
+    // structural path fields resolved once at startup and not meaningful to
+    // change mid-session via the config popup.
+    pub(crate) session_memory_enabled: Option<bool>,
+    pub(crate) session_memory_max_recall: Option<usize>,
+    pub(crate) session_memory_max_recall_bytes: Option<usize>,
+    pub(crate) session_memory_observation_ttl_days: Option<u32>,
+    pub(crate) session_memory_summary_ttl_days: Option<u32>,
+    pub(crate) session_memory_extraction_agent: Option<String>,
+    pub(crate) session_memory_disable_extraction: Option<bool>,
+    pub(crate) session_memory_stale_permanent_days: Option<u32>,
     pub(crate) screen: Screen,
     pub(crate) should_quit: bool,
 
@@ -215,8 +230,39 @@ pub struct App {
     // Setup analysis popup
     pub(crate) setup_analysis: SetupAnalysisState,
 
+    // Memory
+    pub(crate) memory: MemoryState,
+
     // Error modal
     pub(crate) error_modal: Option<String>,
+
+    // Info modal (success messages)
+    pub(crate) info_modal: Option<String>,
+}
+
+#[derive(Default)]
+pub(crate) struct MemoryState {
+    pub store: Option<crate::memory::store::MemoryStore>,
+    pub project_id: String,
+    pub last_recalled_count: usize,
+    pub extraction_rx:
+        Vec<mpsc::UnboundedReceiver<Result<Vec<crate::memory::types::ExtractedMemory>, String>>>,
+    pub last_extraction_count: Option<usize>,
+    pub last_extraction_error: Option<String>,
+    /// When true, the management screen shows archived memories instead of active.
+    pub management_show_archived: bool,
+    // Management screen state
+    pub management_memories: Vec<crate::memory::types::Memory>,
+    pub management_cursor: usize,
+    pub management_kind_filter: Option<crate::memory::types::MemoryKind>,
+    /// When true, the list only shows memories with recall_count == 0.
+    pub management_never_recalled_filter: bool,
+    /// Total matching memories (ignoring LIMIT 500), for the header display.
+    pub management_total_count: u64,
+    /// Cached DB size in bytes, updated on memory screen entry / refresh.
+    pub cached_db_size: Option<u64>,
+    /// Two-step bulk delete: first D sets this, second D executes.
+    pub pending_bulk_delete: bool,
 }
 
 pub(crate) struct PromptState {
@@ -308,6 +354,7 @@ pub(crate) struct EditPopupState {
     pub(crate) section: EditPopupSection,
     pub(crate) cursor: usize,
     pub(crate) timeout_cursor: usize,
+    pub(crate) memory_cursor: usize,
     pub(crate) field: EditField,
     pub(crate) editing: bool,
     pub(crate) edit_buffer: String,
@@ -318,7 +365,7 @@ pub(crate) struct EditPopupState {
     pub(crate) model_picker_cursor: usize,
     pub(crate) model_picker_rx: Option<mpsc::UnboundedReceiver<Result<Vec<String>, String>>>,
     pub(crate) config_save_in_progress: bool,
-    pub(crate) config_save_rx: Option<mpsc::UnboundedReceiver<Result<(), String>>>,
+    pub(crate) config_save_rx: Option<mpsc::UnboundedReceiver<Result<AppConfig, String>>>,
 }
 
 pub(crate) struct PipelineState {
@@ -371,6 +418,8 @@ pub(crate) struct PipelineState {
     pub(crate) pipeline_save_path: Option<PathBuf>,
     pub(crate) pipeline_show_session_config: bool,
     pub(crate) pipeline_session_config_cursor: usize,
+    /// 0 = Iter column, 1 = Loop column
+    pub(crate) pipeline_session_config_col: usize,
     pub(crate) pipeline_loop_connecting_from: Option<BlockId>,
     pub(crate) pipeline_show_loop_edit: bool,
     pub(crate) pipeline_loop_edit_field: PipelineLoopEditField,
@@ -399,6 +448,9 @@ pub(crate) struct PendingSingleExecution {
     pub(crate) keep_session: bool,
     pub(crate) iterations: u32,
     pub(crate) cli_timeout_secs: u64,
+    /// IDs of memories injected during recall, to be marked as recalled
+    /// once execution is confirmed to be running.
+    pub(crate) recalled_ids: Vec<i64>,
 }
 
 pub(crate) struct ResumePreparation {
@@ -447,12 +499,14 @@ pub enum EditField {
     OutputDir,
     TimeoutSeconds,
     AgentName,
+    MemoryValue,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditPopupSection {
     Providers,
     Timeouts,
+    Memory,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -554,6 +608,34 @@ impl App {
         let session_overrides =
             crate::runtime_support::compute_session_overrides(&config.agents, &cli_available);
 
+        let memory = if config.memory.enabled {
+            let db_path = if config.memory.db_path.is_empty() {
+                config.resolved_output_dir().join("memory.db")
+            } else {
+                std::path::PathBuf::from(&config.memory.db_path)
+            };
+            match crate::memory::store::MemoryStore::open(&db_path) {
+                Ok(store) => {
+                    if config.memory.stale_permanent_days > 0 {
+                        let _ = store.archive_stale_permanent(config.memory.stale_permanent_days);
+                    }
+                    MemoryState {
+                        store: Some(store),
+                        project_id: crate::memory::project::detect_project_id(
+                            &config.memory.project_id,
+                        ),
+                        ..Default::default()
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Warning: memory store failed to open ({db_path:?}): {e}");
+                    MemoryState::default()
+                }
+            }
+        } else {
+            MemoryState::default()
+        };
+
         Self {
             config,
             config_path_override: None,
@@ -561,6 +643,14 @@ impl App {
             session_http_timeout_seconds: None,
             session_model_fetch_timeout_seconds: None,
             session_cli_timeout_seconds: None,
+            session_memory_enabled: None,
+            session_memory_max_recall: None,
+            session_memory_max_recall_bytes: None,
+            session_memory_observation_ttl_days: None,
+            session_memory_summary_ttl_days: None,
+            session_memory_extraction_agent: None,
+            session_memory_disable_extraction: None,
+            session_memory_stale_permanent_days: None,
             screen: Screen::Home,
             should_quit: false,
             selected_agents: Vec::new(),
@@ -577,7 +667,9 @@ impl App {
             cli_available,
             help_popup: HelpPopupState::new(),
             setup_analysis: SetupAnalysisState::new(),
+            memory,
             error_modal: None,
+            info_modal: None,
         }
     }
 
@@ -621,6 +713,81 @@ impl App {
     pub fn effective_cli_timeout_seconds(&self) -> u64 {
         self.session_cli_timeout_seconds
             .unwrap_or(self.config.cli_timeout_seconds)
+    }
+
+    pub fn effective_memory_enabled(&self) -> bool {
+        self.session_memory_enabled
+            .unwrap_or(self.config.memory.enabled)
+    }
+
+    pub fn effective_memory_max_recall(&self) -> usize {
+        self.session_memory_max_recall
+            .unwrap_or(self.config.memory.max_recall)
+    }
+
+    pub fn effective_memory_max_recall_bytes(&self) -> usize {
+        self.session_memory_max_recall_bytes
+            .unwrap_or(self.config.memory.max_recall_bytes)
+    }
+
+    pub fn effective_memory_observation_ttl_days(&self) -> u32 {
+        self.session_memory_observation_ttl_days
+            .unwrap_or(self.config.memory.observation_ttl_days)
+    }
+
+    pub fn effective_memory_summary_ttl_days(&self) -> u32 {
+        self.session_memory_summary_ttl_days
+            .unwrap_or(self.config.memory.summary_ttl_days)
+    }
+
+    pub fn effective_memory_stale_permanent_days(&self) -> u32 {
+        self.session_memory_stale_permanent_days
+            .unwrap_or(self.config.memory.stale_permanent_days)
+    }
+
+    pub fn effective_memory_extraction_agent(&self) -> &str {
+        match &self.session_memory_extraction_agent {
+            Some(s) => s.as_str(),
+            None => &self.config.memory.extraction_agent,
+        }
+    }
+
+    /// Resolve the extraction agent through the full fallback chain:
+    /// explicit config/session override → first participant → first configured agent.
+    /// Mode-aware: for Pipeline mode, participants come from the DAG definition.
+    pub fn resolved_extraction_agent(&self) -> Option<String> {
+        let participants = if self.selected_mode == ExecutionMode::Pipeline {
+            self.pipeline.pipeline_def.all_agent_names()
+        } else {
+            self.selected_agents.clone()
+        };
+        resolve_extraction_agent(
+            self.effective_memory_extraction_agent(),
+            &participants,
+            &self.config.agents,
+        )
+    }
+
+    pub fn effective_memory_disable_extraction(&self) -> bool {
+        self.session_memory_disable_extraction
+            .unwrap_or(self.config.memory.disable_extraction)
+    }
+
+    /// Return a MemoryConfig with all session overrides applied.
+    /// Used by extraction and other runtime paths that need the full config.
+    pub fn effective_memory_config(&self) -> crate::config::MemoryConfig {
+        crate::config::MemoryConfig {
+            enabled: self.effective_memory_enabled(),
+            db_path: self.config.memory.db_path.clone(),
+            project_id: self.config.memory.project_id.clone(),
+            max_recall: self.effective_memory_max_recall(),
+            max_recall_bytes: self.effective_memory_max_recall_bytes(),
+            extraction_agent: self.effective_memory_extraction_agent().to_string(),
+            disable_extraction: self.effective_memory_disable_extraction(),
+            observation_ttl_days: self.effective_memory_observation_ttl_days(),
+            summary_ttl_days: self.effective_memory_summary_ttl_days(),
+            stale_permanent_days: self.effective_memory_stale_permanent_days(),
+        }
     }
 
     pub fn toggle_agent(&mut self, name: &str) {
@@ -1193,6 +1360,7 @@ impl EditPopupState {
             section: EditPopupSection::Providers,
             cursor: 0,
             timeout_cursor: 0,
+            memory_cursor: 0,
             field: EditField::ApiKey,
             editing: false,
             edit_buffer: String::new(),
@@ -1258,6 +1426,7 @@ impl PipelineState {
             pipeline_save_path: None,
             pipeline_show_session_config: false,
             pipeline_session_config_cursor: 0,
+            pipeline_session_config_col: 0,
             pipeline_loop_connecting_from: None,
             pipeline_show_loop_edit: false,
             pipeline_loop_edit_field: PipelineLoopEditField::Count,
@@ -1311,6 +1480,23 @@ impl RunState {
     }
 }
 
+/// Shared extraction-agent resolution: explicit config → first participant → first configured.
+/// Used by TUI execution, headless, and the Home screen display.
+pub(crate) fn resolve_extraction_agent(
+    extraction_agent_config: &str,
+    participants: &[String],
+    configured_agents: &[crate::config::AgentConfig],
+) -> Option<String> {
+    let trimmed = extraction_agent_config.trim();
+    if !trimmed.is_empty() {
+        return Some(trimmed.to_string());
+    }
+    if let Some(first) = participants.first() {
+        return Some(first.clone());
+    }
+    configured_agents.first().map(|a| a.name.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1347,6 +1533,7 @@ mod tests {
             max_history_bytes: 102400,
             pipeline_block_concurrency: 0,
             diagnostic_provider: None,
+            memory: crate::config::MemoryConfig::default(),
             agents,
             providers: HashMap::new(),
         }
@@ -1461,6 +1648,7 @@ mod tests {
         app.pipeline.pipeline_save_path = Some(PathBuf::from("pipeline.toml"));
         app.pipeline.pipeline_show_session_config = true;
         app.pipeline.pipeline_session_config_cursor = 2;
+        app.pipeline.pipeline_session_config_col = 1;
         app.help_popup.open(crate::screen::help::PIPELINE_TAB_COUNT);
         app.help_popup.tab = 3;
         app.help_popup.scroll = 15;
@@ -1561,6 +1749,7 @@ mod tests {
         assert!(app.pipeline.pipeline_save_path.is_none());
         assert!(!app.pipeline.pipeline_show_session_config);
         assert_eq!(app.pipeline.pipeline_session_config_cursor, 0);
+        assert_eq!(app.pipeline.pipeline_session_config_col, 0);
         assert!(!app.help_popup.active);
         assert_eq!(app.help_popup.tab, 0);
         assert_eq!(app.help_popup.scroll, 0);
@@ -1680,6 +1869,50 @@ mod tests {
         assert_eq!(app.effective_http_timeout_seconds(), 9);
         assert_eq!(app.effective_model_fetch_timeout_seconds(), 8);
         assert_eq!(app.effective_cli_timeout_seconds(), 7);
+    }
+
+    #[test]
+    fn effective_memory_values_use_global_defaults() {
+        let app = app_with_known_cli();
+        assert!(app.effective_memory_enabled());
+        assert_eq!(app.effective_memory_max_recall(), 20);
+        assert_eq!(app.effective_memory_max_recall_bytes(), 16384);
+        assert_eq!(app.effective_memory_observation_ttl_days(), 120);
+        assert_eq!(app.effective_memory_summary_ttl_days(), 180);
+        assert_eq!(app.effective_memory_extraction_agent(), "");
+        assert!(!app.effective_memory_disable_extraction());
+    }
+
+    #[test]
+    fn effective_memory_values_use_session_overrides() {
+        let mut app = app_with_known_cli();
+        app.session_memory_enabled = Some(false);
+        app.session_memory_max_recall = Some(5);
+        app.session_memory_max_recall_bytes = Some(2048);
+        app.session_memory_observation_ttl_days = Some(30);
+        app.session_memory_summary_ttl_days = Some(60);
+        app.session_memory_extraction_agent = Some("Claude".into());
+        app.session_memory_disable_extraction = Some(true);
+        assert!(!app.effective_memory_enabled());
+        assert_eq!(app.effective_memory_max_recall(), 5);
+        assert_eq!(app.effective_memory_max_recall_bytes(), 2048);
+        assert_eq!(app.effective_memory_observation_ttl_days(), 30);
+        assert_eq!(app.effective_memory_summary_ttl_days(), 60);
+        assert_eq!(app.effective_memory_extraction_agent(), "Claude");
+        assert!(app.effective_memory_disable_extraction());
+    }
+
+    #[test]
+    fn effective_memory_config_applies_all_overrides() {
+        let mut app = app_with_known_cli();
+        app.session_memory_max_recall = Some(3);
+        app.session_memory_observation_ttl_days = Some(10);
+        let cfg = app.effective_memory_config();
+        assert_eq!(cfg.max_recall, 3);
+        assert_eq!(cfg.observation_ttl_days, 10);
+        // Non-overridden fields should come from config defaults
+        assert_eq!(cfg.max_recall_bytes, 16384);
+        assert_eq!(cfg.summary_ttl_days, 180);
     }
 
     #[test]

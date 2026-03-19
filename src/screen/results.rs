@@ -567,6 +567,7 @@ mod tests {
             max_history_bytes: 102400,
             pipeline_block_concurrency: 0,
             diagnostic_provider: None,
+            memory: crate::config::MemoryConfig::default(),
             agents: Vec::new(),
             providers: HashMap::new(),
         };
