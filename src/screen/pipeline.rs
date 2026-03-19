@@ -2481,17 +2481,30 @@ fn draw_loop_edit_popup(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
+    let ba_focus = app.pipeline.pipeline_loop_edit_field == PipelineLoopEditField::BreakAgent;
+    let has_orphan = !app.pipeline.pipeline_loop_edit_break_agent_orphan.is_empty();
+    let ba_list_h = if ba_focus {
+        // label + items; cap so Prompt (Min 4) + Condition (Min 3) still fit
+        let total_items =
+            1 + app.config.agents.len() as u16 + u16::from(has_orphan); // (none) + agents + orphan?
+        // Fixed rows needed besides break-agent: Count(2) + spacers(4) + hint(1) = 7
+        // Prompt Min(4) + Condition Min(3) = 7 minimum.  So cap = inner.height - 7 - 7
+        let cap = (inner.height.saturating_sub(14)).max(2);
+        1 + total_items.min(cap) // +1 for label
+    } else {
+        1
+    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2), // Count
-            Constraint::Length(1), // spacer
-            Constraint::Min(4),    // Prompt
-            Constraint::Length(1), // spacer
-            Constraint::Length(2), // Break Agent
-            Constraint::Length(1), // spacer
-            Constraint::Min(3),    // Break Condition
-            Constraint::Length(1), // hint
+            Constraint::Length(2),         // Count
+            Constraint::Length(1),         // spacer
+            Constraint::Min(4),            // Prompt
+            Constraint::Length(1),         // spacer
+            Constraint::Length(ba_list_h), // Break Agent
+            Constraint::Length(1),         // spacer
+            Constraint::Min(3),            // Break Condition
+            Constraint::Length(1),         // hint
         ])
         .split(inner);
 
@@ -2560,45 +2573,90 @@ fn draw_loop_edit_popup(f: &mut Frame, app: &App, area: Rect) {
         f.set_cursor_position((cx, cy));
     }
 
-    // Break Agent field (single-line)
-    let ba_focus = app.pipeline.pipeline_loop_edit_field == PipelineLoopEditField::BreakAgent;
-    let ba_style = if ba_focus {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    let ba_line = Line::from(vec![
-        Span::styled("Break Agent: ", Style::default().fg(Color::White)),
-        Span::styled("[", ba_style),
-        Span::raw(&app.pipeline.pipeline_loop_edit_break_agent_buf),
-        Span::styled("]", ba_style),
-        Span::styled(
-            " (agent name, optional)",
-            Style::default().fg(Color::DarkGray),
-        ),
-    ]);
-    f.render_widget(Paragraph::new(ba_line), chunks[4]);
+    // Break Agent field (single-select list)
+    let ba_idx = app.pipeline.pipeline_loop_edit_break_agent_idx;
+    let orphan = &app.pipeline.pipeline_loop_edit_break_agent_orphan;
+    if ba_focus {
+        let avail_agents: std::collections::HashMap<&str, bool> = app
+            .available_agents()
+            .into_iter()
+            .map(|(a, avail)| (a.name.as_str(), avail))
+            .collect();
+        let mut ba_lines: Vec<Line> = Vec::with_capacity(2 + app.config.agents.len());
 
-    if ba_focus
-        && chunks[4].width > 0
-        && chunks[4].height > 0
-        && app.error_modal.is_none()
-        && app.info_modal.is_none()
-    {
-        // "Break Agent: [" = 14 chars prefix
-        let prefix_len = 14u16;
-        let cursor_pos = app
-            .pipeline
-            .pipeline_loop_edit_break_agent_cursor
-            .min(app.pipeline.pipeline_loop_edit_break_agent_buf.len());
-        let cursor_in_buf = app.pipeline.pipeline_loop_edit_break_agent_buf[..cursor_pos]
-            .chars()
-            .count() as u16;
-        let cx = chunks[4].x + prefix_len + cursor_in_buf;
-        let cy = chunks[4].y;
-        if cx < chunks[4].x + chunks[4].width {
-            f.set_cursor_position((cx, cy));
+        // "(none)" option at index 0
+        {
+            let is_cursor = ba_idx == 0;
+            let style = if is_cursor {
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            ba_lines.push(Line::from(Span::styled("  (none)", style)));
         }
+
+        // Agent options at index 1..
+        for (i, a) in app.config.agents.iter().enumerate() {
+            let is_cursor = ba_idx == i + 1;
+            let is_avail = avail_agents.get(a.name.as_str()).copied().unwrap_or(false);
+            let agent_color = if is_avail { Color::Green } else { Color::Red };
+            let style = if is_cursor {
+                Style::default()
+                    .fg(agent_color)
+                    .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+            } else {
+                Style::default().fg(agent_color)
+            };
+            ba_lines.push(Line::from(Span::styled(format!("  {}", a.name), style)));
+        }
+
+        // Orphan entry (agent no longer in config) at the end
+        if !orphan.is_empty() {
+            let orphan_idx = app.config.agents.len() + 1;
+            let is_cursor = ba_idx == orphan_idx;
+            let style = if is_cursor {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+            } else {
+                Style::default().fg(Color::Yellow)
+            };
+            ba_lines.push(Line::from(Span::styled(
+                format!("  {} (missing)", orphan),
+                style,
+            )));
+        }
+
+        let ba_label = Line::from(Span::styled(
+            "Break Agent:",
+            Style::default().fg(Color::Cyan),
+        ));
+        let mut all_ba_lines = vec![ba_label];
+        all_ba_lines.extend(ba_lines);
+        let ba_visible_rows = (chunks[4].height as usize).saturating_sub(1); // -1 for label
+        app.pipeline
+            .pipeline_loop_edit_break_agent_visible
+            .set(ba_visible_rows);
+        let scroll_offset = app.pipeline.pipeline_loop_edit_break_agent_scroll as u16;
+        let ba_p = Paragraph::new(all_ba_lines).scroll((scroll_offset, 0));
+        f.render_widget(ba_p, chunks[4]);
+    } else {
+        let ba_name: &str = if ba_idx == 0 {
+            "(none)"
+        } else if let Some(a) = app.config.agents.get(ba_idx - 1) {
+            a.name.as_str()
+        } else if !orphan.is_empty() {
+            orphan.as_str()
+        } else {
+            "(none)"
+        };
+        let line = Line::from(vec![
+            Span::styled("Break Agent: ", Style::default().fg(Color::White)),
+            Span::styled(ba_name, Style::default().fg(Color::DarkGray)),
+        ]);
+        f.render_widget(Paragraph::new(line), chunks[4]);
     }
 
     // Break Condition textarea
