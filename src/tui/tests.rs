@@ -34,6 +34,7 @@ fn test_config() -> AppConfig {
         max_history_bytes: 102400,
         pipeline_block_concurrency: 0,
         diagnostic_provider: None,
+        memory: crate::config::MemoryConfig::default(),
         agents: Vec::new(),
         providers: HashMap::new(),
     }
@@ -1781,6 +1782,165 @@ fn error_dismisses_before_help() {
     handle_key(&mut app, key(KeyCode::Char('a')));
     assert!(app.error_modal.is_none());
     assert!(app.help_popup.active);
+}
+
+#[test]
+fn info_modal_dismisses_with_any_key() {
+    let mut app = test_app();
+    app.info_modal = Some("Config saved to disk".into());
+    handle_key(&mut app, key(KeyCode::Char('a')));
+    assert!(app.info_modal.is_none());
+}
+
+#[test]
+fn info_modal_dismisses_before_help() {
+    let mut app = test_app();
+    app.info_modal = Some("Config saved to disk".into());
+    app.help_popup.open(1);
+    handle_key(&mut app, key(KeyCode::Char('a')));
+    assert!(app.info_modal.is_none());
+    assert!(app.help_popup.active);
+}
+
+#[test]
+fn config_save_success_sets_info_modal() {
+    let mut app = test_app();
+    app.session_http_timeout_seconds = Some(99);
+    app.error_modal = Some("stale error".into());
+    // Simulate: the async task merged overrides into a config clone and saved it
+    let mut saved = app.config.clone();
+    saved.http_timeout_seconds = 99;
+    handle_config_save_result(&mut app, Ok(saved));
+    assert_eq!(app.info_modal.as_deref(), Some("Config saved to disk"));
+    assert!(app.error_modal.is_none());
+    assert!(app.session_http_timeout_seconds.is_none());
+    assert_eq!(app.config.http_timeout_seconds, 99);
+    assert!(!app.edit_popup.config_save_in_progress);
+}
+
+#[test]
+fn config_save_failure_sets_error_modal() {
+    let mut app = test_app();
+    app.info_modal = Some("stale info".into());
+    handle_config_save_result(&mut app, Err("disk full".into()));
+    assert_eq!(
+        app.error_modal.as_deref(),
+        Some("Failed to save config: disk full")
+    );
+    assert!(app.info_modal.is_none());
+}
+
+#[test]
+fn config_save_success_merges_memory_overrides() {
+    let mut app = test_app();
+    app.session_memory_max_recall = Some(42);
+    app.session_memory_disable_extraction = Some(true);
+    // Simulate: the async task merged overrides into a config clone and saved it
+    let mut saved = app.config.clone();
+    saved.memory.max_recall = 42;
+    saved.memory.disable_extraction = true;
+    handle_config_save_result(&mut app, Ok(saved));
+    // Config replaced with the saved version
+    assert_eq!(app.config.memory.max_recall, 42);
+    assert!(app.config.memory.disable_extraction);
+    // Session overrides cleared
+    assert!(app.session_memory_max_recall.is_none());
+    assert!(app.session_memory_disable_extraction.is_none());
+}
+
+#[test]
+fn config_save_failure_preserves_config() {
+    let mut app = test_app();
+    let original_max_recall = app.config.memory.max_recall;
+    let original_ttl = app.config.memory.observation_ttl_days;
+    app.session_memory_max_recall = Some(99);
+    app.session_memory_observation_ttl_days = Some(7);
+    handle_config_save_result(&mut app, Err("write error".into()));
+    // Config unchanged
+    assert_eq!(app.config.memory.max_recall, original_max_recall);
+    assert_eq!(app.config.memory.observation_ttl_days, original_ttl);
+    // Session overrides still intact
+    assert_eq!(app.session_memory_max_recall, Some(99));
+    assert_eq!(app.session_memory_observation_ttl_days, Some(7));
+}
+
+#[test]
+fn popup_locked_during_in_flight_save() {
+    let mut app = test_app();
+    app.config.agents.push(test_agent(
+        "Claude",
+        ProviderKind::Anthropic,
+        "m",
+        false,
+        None,
+    ));
+    app.edit_popup.visible = true;
+    app.edit_popup.config_save_in_progress = true;
+    app.edit_popup.section = EditPopupSection::Memory;
+    app.edit_popup.memory_cursor = 0;
+    // Space should be blocked (no toggle)
+    handle_edit_popup_key(&mut app, key(KeyCode::Char(' ')));
+    assert!(app.session_memory_enabled.is_none());
+    // 's' should be blocked (no double-save)
+    handle_edit_popup_key(&mut app, key(KeyCode::Char('s')));
+    // Esc still works to close
+    handle_edit_popup_key(&mut app, key(KeyCode::Esc));
+    assert!(!app.edit_popup.visible);
+}
+
+#[test]
+fn remove_agent_clears_extraction_agent() {
+    let mut app = test_app();
+    app.config.agents.push(test_agent(
+        "Claude",
+        ProviderKind::Anthropic,
+        "m",
+        false,
+        None,
+    ));
+    app.config
+        .agents
+        .push(test_agent("GPT", ProviderKind::OpenAI, "m", false, None));
+    app.config.memory.extraction_agent = "Claude".to_string();
+    app.session_memory_extraction_agent = Some("Claude".to_string());
+    app.edit_popup.cursor = 0; // points at "Claude"
+    remove_agent(&mut app);
+    assert!(app.config.memory.extraction_agent.is_empty());
+    assert!(app.session_memory_extraction_agent.is_none());
+}
+
+#[test]
+fn rename_agent_updates_extraction_agent() {
+    let mut app = test_app();
+    app.config.agents.push(test_agent(
+        "Claude",
+        ProviderKind::Anthropic,
+        "m",
+        false,
+        None,
+    ));
+    app.config.memory.extraction_agent = "Claude".to_string();
+    app.session_memory_extraction_agent = Some("Claude".to_string());
+    app.edit_popup.cursor = 0;
+    app.edit_popup.edit_buffer = "Claude-v2".to_string();
+    app.edit_popup.editing = true;
+    app.edit_popup.field = EditField::AgentName;
+    commit_agent_rename(&mut app);
+    assert_eq!(app.config.memory.extraction_agent, "Claude-v2");
+    assert_eq!(
+        app.session_memory_extraction_agent.as_deref(),
+        Some("Claude-v2")
+    );
+}
+
+#[test]
+fn dismiss_clears_both_modals() {
+    let mut app = test_app();
+    app.error_modal = Some("error".into());
+    app.info_modal = Some("info".into());
+    handle_key(&mut app, key(KeyCode::Char('x')));
+    assert!(app.error_modal.is_none());
+    assert!(app.info_modal.is_none());
 }
 
 #[test]

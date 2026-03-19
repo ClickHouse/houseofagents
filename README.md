@@ -45,6 +45,7 @@ Each agent can run in API mode or CLI mode (`use_cli = true`). Mix and match fre
 - **Config editor** — add/remove/rename agents, edit settings, timeouts, and models live with a popup (`e`)
 - **Model picker** — browse available models from the API directly inside the config editor (`l`)
 - **CLI print mode** — Anthropic agents in CLI mode can toggle between print (`-p`) and agent mode
+- **Cross-run memory** — SQLite-backed memory system that recalls relevant context from previous runs and extracts new memories post-run (decision, observation, summary, principle)
 
 ## Requirements
 
@@ -121,6 +122,7 @@ Headless mode (noninteractive):
       --consolidation-prompt <S>  Extra consolidation instructions
       --output-format <FMT>       Output format: text, json [default: text]
       --quiet                     Suppress stderr progress output
+      --no-memory                 Disable cross-run memory
 ```
 
 ## Noninteractive (Headless) Mode
@@ -246,6 +248,21 @@ extra_cli_args = ""
 | `pipeline_block_concurrency` | Max concurrent pipeline blocks. `0` = unlimited (default). |
 | `diagnostic_provider` | Agent name for the automatic diagnostics pass (disabled when unset) |
 
+**Memory settings** (`[memory]`):
+
+| Field | Description |
+|-------|-------------|
+| `enabled` | Enable cross-run memory (`true` by default) |
+| `db_path` | Custom SQLite database path (default: `{output_dir}/memory.db`) |
+| `project_id` | Override automatic project detection (default: derived from git remote or cwd) |
+| `max_recall` | Max memories to recall per run (default: 20) |
+| `max_recall_bytes` | Byte budget for recalled memory context (default: 16384) |
+| `extraction_agent` | Agent to use for post-run memory extraction (default: first participating agent, then first configured). Stronger models produce higher-quality memories. |
+| `disable_extraction` | Disable post-run memory extraction (default: false) |
+| `observation_ttl_days` | Days before observations expire (default: 120) |
+| `summary_ttl_days` | Days before summaries expire (default: 180) |
+| `stale_permanent_days` | Archive permanent memories (decisions, principles) after N days without recall (default: 365, 0 to disable) |
+
 **Agent settings** (`[[agents]]`):
 
 | Field | Description |
@@ -272,16 +289,30 @@ Anthropic `thinking_effort = "max"` is rejected in API mode. In CLI mode, House 
 | `Space` | Toggle agent / mode selection |
 | `Tab` | Switch panels |
 | `e` | Open config editor |
+| `M` | Open memory management (when memory enabled) |
 | `?` | Open help popup |
 | `Enter` | Continue to prompt |
 | `q` | Quit |
+
+### Memory Management
+
+| Key | Action |
+|-----|--------|
+| `j` / `k` / `Up` / `Down` | Navigate memories |
+| `d` | Delete selected memory |
+| `D` | Bulk delete all visible memories (press twice to confirm) |
+| `f` | Cycle kind filter (all → decision → observation → summary → principle) |
+| `r` | Toggle "never recalled" filter |
+| `a` | Toggle archived view |
+| `u` | Unarchive selected memory (in archived view) |
+| `q` / `Esc` | Back to home |
 
 ### Config Editor
 
 | Key | Action |
 |-----|--------|
-| `j` / `k` | Navigate agents or timeouts |
-| `Tab` | Switch section (Agents / Timeouts) |
+| `j` / `k` | Navigate agents, timeouts, or memory settings |
+| `Tab` / `Shift+Tab` | Switch section (Agents / Timeouts / Memory) |
 | `n` | Add new agent |
 | `Del` / `Backspace` | Remove agent |
 | `r` | Rename agent |
@@ -295,7 +326,8 @@ Anthropic `thinking_effort = "max"` is rejected in API mode. In CLI mode, House 
 | `x` | Edit extra CLI args |
 | `d` | Toggle diagnostic agent |
 | `o` | Edit output directory |
-| `e` | Edit selected timeout (Timeouts section) |
+| `e` / `Enter` | Edit selected value (Timeouts / Memory sections) |
+| `Space` | Toggle boolean setting (Memory section) |
 | `s` | Save config to disk |
 | `Esc` | Close (keep changes for session) |
 
@@ -390,6 +422,7 @@ output_dir/
       OpenAI_iter2.md
       consolidated_Claude.md       # Optional: merged output
       errors.md                    # Optional: diagnostics report
+      _memories.json               # Optional: extracted memories from this run
       _errors.log                  # Application-level error log
     swift-falcon/                  # auto-generated name (no session provided)
       ...
@@ -589,7 +622,7 @@ Legacy directories (`YYYYMMDD_HHMMSS_NNN[_session]` and `YYYY-MM-DD/HH-MM-SS[_se
   - Batch roots are excluded from resume lookup; resume is currently single-run only
   - Note: resuming a `keep_session = true` run across app restarts does not restore provider conversation history — providers are recreated fresh, though inter-agent handoff context is preserved
 - **Forward Prompt** (toggle with `Space` on Prompt screen) — relay mode only; when enabled, downstream agents receive the original prompt alongside the previous agent's output, preventing context loss in the handoff chain
-- **Keep Session** (toggle with `Space` on Prompt screen) — on by default; controls whether providers retain their conversation history across iterations. When turned off, each provider's history is cleared before every iteration after the first, so agents treat each round as a fresh conversation. Inter-agent handoff context (relay's previous output, swarm's round outputs) is always preserved regardless of this setting. Pipeline mode has its own per-session session configuration popup accessible via `s` in the Builder screen — each effective session (shared or isolated) can independently toggle whether provider history persists across iterations. Non-default settings are stored in `pipeline.toml` as `[[session_configs]]` entries
+- **Keep Session** (toggle with `Space` on Prompt screen) — on by default; controls whether providers retain their conversation history across iterations. When turned off, each provider's history is cleared before every iteration after the first, so agents treat each round as a fresh conversation. Inter-agent handoff context (relay's previous output, swarm's round outputs) is always preserved regardless of this setting. Pipeline mode has its own per-session session configuration popup accessible via `s` in the Builder screen — each effective session (shared or isolated) can independently toggle two settings: **Iter** (keep across iterations, default on) and **Loop** (keep across loop passes, default on). When Loop is off, provider history is cleared between loop pass advances within a single iteration. Use `h`/`l` to switch columns and `Space` to toggle. Non-default settings are stored in `pipeline.toml` as `[[session_configs]]` entries
 - **Consolidation**
   - Single-run: offered after non-cancelled swarm/pipeline runs with 2+ final outputs
   - Batch: first offers per-run consolidation, then optional cross-run consolidation across successful runs

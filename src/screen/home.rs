@@ -39,7 +39,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     draw_mode_panel(f, app, main_chunks[1]);
 
     // Help bar
-    let help = Paragraph::new(Line::from(vec![
+    let mut help_spans = vec![
         Span::styled("Space", Style::default().fg(Color::Yellow)),
         Span::raw(": toggle  "),
         Span::styled("Tab", Style::default().fg(Color::Yellow)),
@@ -48,12 +48,18 @@ pub fn draw(f: &mut Frame, app: &App) {
         Span::raw(": proceed  "),
         Span::styled("e", Style::default().fg(Color::Yellow)),
         Span::raw(": edit config  "),
+    ];
+    if app.memory.store.is_some() {
+        help_spans.push(Span::styled("M", Style::default().fg(Color::Yellow)));
+        help_spans.push(Span::raw(": memory  "));
+    }
+    help_spans.extend([
         Span::styled("?", Style::default().fg(Color::Yellow)),
         Span::raw(": help  "),
         Span::styled("q", Style::default().fg(Color::Yellow)),
         Span::raw(": quit"),
-    ]))
-    .block(Block::default().borders(Borders::TOP));
+    ]);
+    let help = Paragraph::new(Line::from(help_spans)).block(Block::default().borders(Borders::TOP));
     f.render_widget(help, chunks[2]);
 
     // Edit popup overlay
@@ -71,10 +77,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         );
     }
 
-    // Error modal overlay (always topmost)
-    if let Some(ref err) = app.error_modal {
-        draw_error_modal(f, err);
-    }
+    // Error/info modals are rendered globally by screen::draw()
 }
 
 fn draw_agents_panel(f: &mut Frame, app: &App, area: Rect) {
@@ -167,19 +170,6 @@ fn draw_mode_panel(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(list, area);
 }
 
-fn draw_error_modal(f: &mut Frame, message: &str) {
-    let area = centered_rect(60, 20, f.area());
-    let block = Block::default()
-        .title(" Error ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Red));
-    let text = Paragraph::new(message)
-        .style(Style::default().fg(Color::Red))
-        .block(block);
-    f.render_widget(ratatui::widgets::Clear, area);
-    f.render_widget(text, area);
-}
-
 fn draw_edit_popup(f: &mut Frame, app: &App) {
     let area = centered_rect(70, 60, f.area());
     let mut selected_line_start = 0usize;
@@ -187,6 +177,7 @@ fn draw_edit_popup(f: &mut Frame, app: &App) {
     let selected_cursor = match app.edit_popup.section {
         EditPopupSection::Providers => app.edit_popup.cursor,
         EditPopupSection::Timeouts => app.edit_popup.timeout_cursor,
+        EditPopupSection::Memory => app.edit_popup.memory_cursor,
     };
 
     let mut header_lines = vec![
@@ -201,6 +192,7 @@ fn draw_edit_popup(f: &mut Frame, app: &App) {
                 match app.edit_popup.section {
                     EditPopupSection::Providers => "Agents",
                     EditPopupSection::Timeouts => "Timeouts",
+                    EditPopupSection::Memory => "Memory",
                 },
                 Style::default()
                     .fg(Color::Cyan)
@@ -423,6 +415,7 @@ fn draw_edit_popup(f: &mut Frame, app: &App) {
                         crate::app::EditField::OutputDir => "output dir",
                         crate::app::EditField::TimeoutSeconds => "timeout",
                         crate::app::EditField::AgentName => "name",
+                        crate::app::EditField::MemoryValue => "value",
                     };
                     selected_line_start = body_lines.len();
                     body_lines.push(Line::from(Span::styled(
@@ -510,6 +503,173 @@ fn draw_edit_popup(f: &mut Frame, app: &App) {
                         format!(
                             "   New timeout: {}_ (seconds, Enter: save, Esc: cancel)",
                             app.edit_popup.edit_buffer
+                        ),
+                        Style::default().fg(Color::Yellow),
+                    )));
+                }
+
+                body_lines.push(Line::from(""));
+            }
+        }
+        EditPopupSection::Memory => {
+            body_lines.push(Line::from(Span::styled(
+                "Space: toggle  Enter/[e]: edit  [s]: save to disk",
+                Style::default().fg(Color::DarkGray),
+            )));
+            body_lines.push(Line::from(""));
+
+            // Row order must match MEM_* constants in tui/input.rs
+            let memory_rows: Vec<MemoryRow> = vec![
+                MemoryRow::Toggle {
+                    label: "Enabled",
+                    description: "Enable cross-run memory system (SQLite+FTS5).",
+                    value: app.effective_memory_enabled(),
+                    has_override: app.session_memory_enabled.is_some(),
+                },
+                MemoryRow::Value {
+                    label: "Max Recall",
+                    description: "Maximum number of memories injected per run.",
+                    value: app.effective_memory_max_recall().to_string(),
+                    has_override: app.session_memory_max_recall.is_some(),
+                },
+                MemoryRow::Value {
+                    label: "Max Recall Bytes",
+                    description: "Maximum total bytes of recalled memory context.",
+                    value: app.effective_memory_max_recall_bytes().to_string(),
+                    has_override: app.session_memory_max_recall_bytes.is_some(),
+                },
+                MemoryRow::Value {
+                    label: "Observation TTL",
+                    description: "Days before observation memories expire.",
+                    value: format!("{} days", app.effective_memory_observation_ttl_days()),
+                    has_override: app.session_memory_observation_ttl_days.is_some(),
+                },
+                MemoryRow::Value {
+                    label: "Summary TTL",
+                    description: "Days before summary memories expire.",
+                    value: format!("{} days", app.effective_memory_summary_ttl_days()),
+                    has_override: app.session_memory_summary_ttl_days.is_some(),
+                },
+                MemoryRow::Value {
+                    label: "Stale Permanent Days",
+                    description:
+                        "Archive permanent memories after N days without recall (0 = disabled).",
+                    value: format!("{} days", app.effective_memory_stale_permanent_days()),
+                    has_override: app.session_memory_stale_permanent_days.is_some(),
+                },
+                MemoryRow::Value {
+                    label: "Extraction Agent",
+                    description: "Agent used for post-run memory extraction (empty = auto).",
+                    value: {
+                        let explicit = app.effective_memory_extraction_agent();
+                        if explicit.is_empty() {
+                            match app.resolved_extraction_agent() {
+                                Some(name) => format!("(auto: {name})"),
+                                None => "(auto: none)".to_string(),
+                            }
+                        } else {
+                            explicit.to_string()
+                        }
+                    },
+                    has_override: app.session_memory_extraction_agent.is_some(),
+                },
+                MemoryRow::Toggle {
+                    label: "Disable Extraction",
+                    description: "Skip post-run memory extraction entirely.",
+                    value: app.effective_memory_disable_extraction(),
+                    has_override: app.session_memory_disable_extraction.is_some(),
+                },
+            ];
+
+            for (i, row) in memory_rows.iter().enumerate() {
+                let is_selected = i == selected_cursor;
+                let style = if is_selected {
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                if is_selected {
+                    selected_line_start = body_lines.len();
+                }
+
+                match row {
+                    MemoryRow::Toggle {
+                        label,
+                        description: _,
+                        value,
+                        has_override,
+                    } => {
+                        let (val_text, val_style) = if *value {
+                            ("on", Style::default().fg(Color::Green))
+                        } else {
+                            ("off", Style::default().fg(Color::Red))
+                        };
+                        body_lines.push(Line::from(vec![
+                            Span::styled(if is_selected { "▸ " } else { "  " }, style),
+                            Span::styled(format!("{label}: "), style),
+                            Span::styled(val_text, val_style),
+                            Span::styled(
+                                if *has_override {
+                                    "  (session override)"
+                                } else {
+                                    "  (global default)"
+                                },
+                                if *has_override {
+                                    Style::default().fg(Color::Yellow)
+                                } else {
+                                    Style::default().fg(Color::DarkGray)
+                                },
+                            ),
+                        ]));
+                    }
+                    MemoryRow::Value {
+                        label,
+                        description: _,
+                        value,
+                        has_override,
+                    } => {
+                        body_lines.push(Line::from(vec![
+                            Span::styled(if is_selected { "▸ " } else { "  " }, style),
+                            Span::styled(format!("{label}: {value}"), style),
+                            Span::styled(
+                                if *has_override {
+                                    "  (session override)"
+                                } else {
+                                    "  (global default)"
+                                },
+                                if *has_override {
+                                    Style::default().fg(Color::Yellow)
+                                } else {
+                                    Style::default().fg(Color::DarkGray)
+                                },
+                            ),
+                        ]));
+                    }
+                }
+
+                body_lines.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(row.description(), Style::default().fg(Color::DarkGray)),
+                ]));
+
+                if is_selected
+                    && app.edit_popup.editing
+                    && matches!(app.edit_popup.field, crate::app::EditField::MemoryValue)
+                {
+                    // Indices match MEM_* constants in tui/input.rs
+                    let unit_hint = match app.edit_popup.memory_cursor {
+                        1 => " (count)",    // MEM_MAX_RECALL
+                        2 => " (bytes)",    // MEM_MAX_RECALL_BYTES
+                        3..=5 => " (days)", // MEM_OBSERVATION_TTL | MEM_SUMMARY_TTL | MEM_STALE_PERMANENT_DAYS
+                        _ => "",
+                    };
+                    selected_line_start = body_lines.len();
+                    body_lines.push(Line::from(Span::styled(
+                        format!(
+                            "   New value{}: {}_ (Enter: save, Esc: cancel)",
+                            unit_hint, app.edit_popup.edit_buffer
                         ),
                         Style::default().fg(Color::Yellow),
                     )));
@@ -686,6 +846,31 @@ fn draw_model_picker(f: &mut Frame, app: &App) {
     let list = List::new(all_lines).block(block);
     f.render_widget(ratatui::widgets::Clear, area);
     f.render_widget(list, area);
+}
+
+enum MemoryRow {
+    Toggle {
+        label: &'static str,
+        description: &'static str,
+        value: bool,
+        has_override: bool,
+    },
+    Value {
+        label: &'static str,
+        description: &'static str,
+        value: String,
+        has_override: bool,
+    },
+}
+
+impl MemoryRow {
+    fn description(&self) -> &'static str {
+        match self {
+            MemoryRow::Toggle { description, .. } | MemoryRow::Value { description, .. } => {
+                description
+            }
+        }
+    }
 }
 
 fn cli_dependent_style(use_cli: bool) -> Style {

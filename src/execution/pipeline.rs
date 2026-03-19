@@ -71,12 +71,14 @@ pub(crate) struct RuntimeReplicaTable {
     pub entries: Vec<RuntimeReplicaInfo>,
     pub logical_to_runtime: HashMap<BlockId, Vec<u32>>,
     pub keep_policy: HashMap<(String, String), bool>,
+    pub keep_loop_policy: HashMap<(String, String), bool>,
 }
 
 pub(crate) fn build_runtime_table(def: &PipelineDefinition) -> RuntimeReplicaTable {
     let mut entries = Vec::new();
     let mut logical_to_runtime: HashMap<BlockId, Vec<u32>> = HashMap::new();
     let mut keep_policy: HashMap<(String, String), bool> = HashMap::new();
+    let mut keep_loop_policy: HashMap<(String, String), bool> = HashMap::new();
     let mut next_id: u32 = 0;
 
     for block in &def.blocks {
@@ -101,6 +103,7 @@ pub(crate) fn build_runtime_table(def: &PipelineDefinition) -> RuntimeReplicaTab
         for agent in &block.agents {
             let agent_file_key = OutputManager::sanitize_session_name(agent);
             let base_keep = def.keep_session_across_iterations(agent, &base_session_key);
+            let base_keep_loops = def.keep_session_across_loop_passes(agent, &base_session_key);
 
             for ri in 0..num_replicas {
                 let runtime_id = next_id;
@@ -131,6 +134,7 @@ pub(crate) fn build_runtime_table(def: &PipelineDefinition) -> RuntimeReplicaTab
                 };
 
                 keep_policy.insert((agent.clone(), session_key.clone()), base_keep);
+                keep_loop_policy.insert((agent.clone(), session_key.clone()), base_keep_loops);
 
                 entries.push(RuntimeReplicaInfo {
                     runtime_id,
@@ -154,6 +158,7 @@ pub(crate) fn build_runtime_table(def: &PipelineDefinition) -> RuntimeReplicaTab
         entries,
         logical_to_runtime,
         keep_policy,
+        keep_loop_policy,
     }
 }
 
@@ -434,6 +439,8 @@ pub struct SessionConfig {
     pub session_key: String,
     #[serde(default = "default_keep_across_iterations")]
     pub keep_across_iterations: bool,
+    #[serde(default = "default_keep_across_loop_passes")]
+    pub keep_across_loop_passes: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -443,6 +450,7 @@ pub struct EffectiveSession {
     pub display_label: String,
     pub block_ids: Vec<BlockId>,
     pub keep_across_iterations: bool,
+    pub keep_across_loop_passes: bool,
     pub total_replicas: u32,
 }
 
@@ -476,6 +484,10 @@ fn default_keep_across_iterations() -> bool {
     true
 }
 
+fn default_keep_across_loop_passes() -> bool {
+    true
+}
+
 impl Default for PipelineDefinition {
     fn default() -> Self {
         Self {
@@ -493,6 +505,20 @@ impl Default for PipelineDefinition {
 }
 
 impl PipelineDefinition {
+    /// Collect unique agent names from all blocks (including finalization).
+    pub fn all_agent_names(&self) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
+        let mut agents = Vec::new();
+        for block in self.blocks.iter().chain(self.finalization_blocks.iter()) {
+            for agent in &block.agents {
+                if seen.insert(agent.clone()) {
+                    agents.push(agent.clone());
+                }
+            }
+        }
+        agents
+    }
+
     pub fn effective_sessions(&self) -> Vec<EffectiveSession> {
         let mut map: HashMap<(String, String), (String, Vec<BlockId>, u32)> = HashMap::new();
         for block in &self.blocks {
@@ -517,12 +543,14 @@ impl PipelineDefinition {
             .map(
                 |((agent, session_key), (display_label, block_ids, total_replicas))| {
                     let keep = self.keep_session_across_iterations(&agent, &session_key);
+                    let keep_loops = self.keep_session_across_loop_passes(&agent, &session_key);
                     EffectiveSession {
                         agent,
                         session_key,
                         display_label,
                         block_ids,
                         keep_across_iterations: keep,
+                        keep_across_loop_passes: keep_loops,
                         total_replicas,
                     }
                 },
@@ -567,21 +595,58 @@ impl PipelineDefinition {
         session_key: &str,
         keep: bool,
     ) {
-        if keep {
-            // Remove explicit override (true is the default)
-            self.session_configs
-                .retain(|c| !(c.agent == agent && c.session_key == session_key));
-        } else if let Some(existing) = self
+        if let Some(existing) = self
             .session_configs
             .iter_mut()
             .find(|c| c.agent == agent && c.session_key == session_key)
         {
-            existing.keep_across_iterations = false;
-        } else {
+            existing.keep_across_iterations = keep;
+            // Remove entry entirely if both fields are back to default
+            if keep && existing.keep_across_loop_passes {
+                self.session_configs
+                    .retain(|c| !(c.agent == agent && c.session_key == session_key));
+            }
+        } else if !keep {
             self.session_configs.push(SessionConfig {
                 agent: agent.to_string(),
                 session_key: session_key.to_string(),
                 keep_across_iterations: false,
+                keep_across_loop_passes: true,
+            });
+        }
+    }
+
+    pub fn keep_session_across_loop_passes(&self, agent: &str, session_key: &str) -> bool {
+        self.session_configs
+            .iter()
+            .find(|c| c.agent == agent && c.session_key == session_key)
+            .map(|c| c.keep_across_loop_passes)
+            .unwrap_or(true)
+    }
+
+    pub fn set_keep_session_across_loop_passes(
+        &mut self,
+        agent: &str,
+        session_key: &str,
+        keep: bool,
+    ) {
+        if let Some(existing) = self
+            .session_configs
+            .iter_mut()
+            .find(|c| c.agent == agent && c.session_key == session_key)
+        {
+            existing.keep_across_loop_passes = keep;
+            // Remove entry entirely if both fields are back to default
+            if keep && existing.keep_across_iterations {
+                self.session_configs
+                    .retain(|c| !(c.agent == agent && c.session_key == session_key));
+            }
+        } else if !keep {
+            self.session_configs.push(SessionConfig {
+                agent: agent.to_string(),
+                session_key: session_key.to_string(),
+                keep_across_iterations: true,
+                keep_across_loop_passes: false,
             });
         }
     }
@@ -643,9 +708,10 @@ impl PipelineDefinition {
             })
             .collect();
 
-        // Drop stale rows and rows with keep=true (default)
+        // Drop stale rows and rows where both fields are at default (true)
         self.session_configs.retain(|c| {
-            !c.keep_across_iterations && valid.contains(&(c.agent.clone(), c.session_key.clone()))
+            (!c.keep_across_iterations || !c.keep_across_loop_passes)
+                && valid.contains(&(c.agent.clone(), c.session_key.clone()))
         });
 
         // Sort for stability
@@ -2336,6 +2402,43 @@ where
                                                     failed_replicas.remove(&rid);
                                                     if bid != loop_from {
                                                         replica_outputs.remove(&rid);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        // Clear provider history for sub-DAG sessions with keep_across_loop_passes=false
+                                        {
+                                            let mut cleared: HashSet<(String, String)> =
+                                                HashSet::new();
+                                            for &bid in &ls.sub_dag.blocks {
+                                                if let Some(rids) =
+                                                    rt.logical_to_runtime.get(&bid)
+                                                {
+                                                    for &rid in rids {
+                                                        let info =
+                                                            &rt.entries[rid as usize];
+                                                        let pool_key = (
+                                                            info.agent.clone(),
+                                                            info.session_key.clone(),
+                                                        );
+                                                        if cleared.contains(&pool_key) {
+                                                            continue;
+                                                        }
+                                                        let keep = rt
+                                                            .keep_loop_policy
+                                                            .get(&pool_key)
+                                                            .copied()
+                                                            .unwrap_or(true);
+                                                        if !keep {
+                                                            if let Some(p) =
+                                                                provider_pool.get(&pool_key)
+                                                            {
+                                                                let mut guard =
+                                                                    p.lock().await;
+                                                                guard.clear_history();
+                                                            }
+                                                            cleared.insert(pool_key);
+                                                        }
                                                     }
                                                 }
                                             }
@@ -4922,6 +5025,7 @@ to = 1
             agent: "Claude".into(),
             session_key: "nonexistent".into(),
             keep_across_iterations: false,
+            keep_across_loop_passes: true,
         });
         def.normalize_session_configs();
         assert!(def.session_configs.is_empty());
@@ -4934,6 +5038,7 @@ to = 1
             agent: "Claude".into(),
             session_key: "__block_1".into(),
             keep_across_iterations: true,
+            keep_across_loop_passes: true,
         });
         def.normalize_session_configs();
         assert!(def.session_configs.is_empty());
@@ -4946,6 +5051,7 @@ to = 1
             agent: "Claude".into(),
             session_key: "__block_1".into(),
             keep_across_iterations: false,
+            keep_across_loop_passes: true,
         });
         def.normalize_session_configs();
         assert_eq!(def.session_configs.len(), 1);
@@ -5302,6 +5408,120 @@ keep_across_iterations = false
 
         // Two blocks share one provider, cleared once before iteration 2
         assert_eq!(clear_count.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn loop_pass_clears_non_keep_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = OutputManager::new(dir.path(), Some("loop-clear")).unwrap();
+        // A(1) → B(2) with loop from B back to A, 2 extra passes
+        let mut def = def_with_loops(
+            vec![block(1, 0, 0), block(2, 1, 0)],
+            vec![conn(1, 2)],
+            vec![lconn(2, 1, 2)],
+        );
+        def.set_keep_session_across_loop_passes("Claude", "__block_1", false);
+        def.set_keep_session_across_loop_passes("Claude", "__block_2", false);
+
+        let agent_configs = HashMap::from([(
+            "Claude".to_string(),
+            (
+                ProviderKind::Anthropic,
+                ProviderConfig {
+                    api_key: String::new(),
+                    model: "test".to_string(),
+                    reasoning_effort: None,
+                    thinking_effort: None,
+                    use_cli: false,
+                    cli_print_mode: true,
+                    extra_cli_args: String::new(),
+                },
+                false,
+            ),
+        )]);
+        let context = PromptRuntimeContext::new(def.initial_prompt.clone(), false);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let clear_count = Arc::new(AtomicUsize::new(0));
+        let cc = clear_count.clone();
+
+        run_pipeline_with_provider_factory(
+            &def,
+            0,
+            agent_configs,
+            &context,
+            &output,
+            tx,
+            cancel,
+            move |_kind, _cfg| {
+                Box::new(ClearCountProvider {
+                    kind: ProviderKind::Anthropic,
+                    responses: std::sync::Mutex::new(VecDeque::new()),
+                    clear_count: cc.clone(),
+                })
+            },
+        )
+        .await
+        .unwrap();
+
+        // 2 pass-advances × 2 sessions = 4 clears
+        assert_eq!(clear_count.load(std::sync::atomic::Ordering::Relaxed), 4);
+    }
+
+    #[tokio::test]
+    async fn loop_pass_keeps_sessions_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = OutputManager::new(dir.path(), Some("loop-keep")).unwrap();
+        // Same topology, default keep_across_loop_passes=true
+        let def = def_with_loops(
+            vec![block(1, 0, 0), block(2, 1, 0)],
+            vec![conn(1, 2)],
+            vec![lconn(2, 1, 2)],
+        );
+
+        let agent_configs = HashMap::from([(
+            "Claude".to_string(),
+            (
+                ProviderKind::Anthropic,
+                ProviderConfig {
+                    api_key: String::new(),
+                    model: "test".to_string(),
+                    reasoning_effort: None,
+                    thinking_effort: None,
+                    use_cli: false,
+                    cli_print_mode: true,
+                    extra_cli_args: String::new(),
+                },
+                false,
+            ),
+        )]);
+        let context = PromptRuntimeContext::new(def.initial_prompt.clone(), false);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let clear_count = Arc::new(AtomicUsize::new(0));
+        let cc = clear_count.clone();
+
+        run_pipeline_with_provider_factory(
+            &def,
+            0,
+            agent_configs,
+            &context,
+            &output,
+            tx,
+            cancel,
+            move |_kind, _cfg| {
+                Box::new(ClearCountProvider {
+                    kind: ProviderKind::Anthropic,
+                    responses: std::sync::Mutex::new(VecDeque::new()),
+                    clear_count: cc.clone(),
+                })
+            },
+        )
+        .await
+        .unwrap();
+
+        // keep_session=true by default, no clears
+        assert_eq!(clear_count.load(std::sync::atomic::Ordering::Relaxed), 0);
     }
 
     // -- loop connection helpers --

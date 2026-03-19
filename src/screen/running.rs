@@ -148,6 +148,27 @@ fn draw_title_bar(f: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(Color::DarkGray),
             ),
             Span::styled(iter_display, Style::default().fg(Color::Magenta)),
+            if app.memory.last_recalled_count > 0 {
+                Span::styled(
+                    format!("  {} memories", app.memory.last_recalled_count),
+                    Style::default().fg(Color::DarkGray),
+                )
+            } else {
+                Span::raw("")
+            },
+            match (
+                &app.memory.last_extraction_error,
+                app.memory.last_extraction_count,
+            ) {
+                (Some(_), _) => {
+                    Span::styled("  | extraction failed", Style::default().fg(Color::Red))
+                }
+                (None, Some(n)) if n > 0 => Span::styled(
+                    format!("  | +{n} extracted"),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                _ => Span::raw(""),
+            },
             Span::raw("  "),
             Span::styled(status_text, Style::default().fg(Color::Yellow)),
         ]),
@@ -1270,6 +1291,7 @@ mod tests {
             max_history_bytes: 102400,
             pipeline_block_concurrency: 0,
             diagnostic_provider: None,
+            memory: crate::config::MemoryConfig::default(),
             agents: Vec::new(),
             providers: std::collections::HashMap::new(),
         })
@@ -1588,7 +1610,7 @@ mod tests {
             ],
         );
         let items = build_event_items(&a);
-        let texts: Vec<String> = items.iter().map(|i| format!("{:?}", i)).collect();
+        let texts: Vec<String> = items.iter().map(|i| format!("{i:?}")).collect();
         let joined = texts.join("\n");
         // Thinking agent should be cancelled, finished agent stays finished
         assert!(
@@ -1618,7 +1640,7 @@ mod tests {
             }],
         );
         let items = build_event_items(&a);
-        let joined: String = items.iter().map(|i| format!("{:?}", i)).collect();
+        let joined: String = items.iter().map(|i| format!("{i:?}")).collect();
         assert!(
             joined.contains("thinking"),
             "expected thinking in: {joined}"
@@ -1643,7 +1665,7 @@ mod tests {
             }],
         );
         let items = build_event_items(&a);
-        let joined: String = items.iter().map(|i| format!("{:?}", i)).collect();
+        let joined: String = items.iter().map(|i| format!("{i:?}")).collect();
         assert!(
             joined.contains("cancelled"),
             "expected cancelled in: {joined}"

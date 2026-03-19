@@ -11,6 +11,53 @@ use crate::runtime_support::effective_concurrency;
 
 type BuiltExecutionOutput = (u32, Option<String>, HashMap<String, String>, OutputManager);
 
+/// Inject recalled memories into the prompt context. Returns the IDs of
+/// recalled memories so the caller can call `mark_recalled()` once execution
+/// is confirmed to be running (avoiding false positives if setup fails).
+fn inject_memory_recall(app: &mut App, prompt_context: &mut PromptRuntimeContext) -> Vec<i64> {
+    app.memory.last_recalled_count = 0;
+    app.memory.last_extraction_count = None;
+    app.memory.last_extraction_error = None;
+    if !app.effective_memory_enabled() {
+        return vec![];
+    }
+    // Drain any completed extraction results so their memories are in SQLite
+    // before we query. This closes the timing gap where a user starts a new
+    // run before the prior extraction has inserted its memories.
+    drain_completed_extractions(app);
+    let Some(ref store) = app.memory.store else {
+        return vec![];
+    };
+    if let Ok(recalled) = crate::memory::recall::recall_for_prompt(
+        store,
+        &app.memory.project_id,
+        prompt_context.raw_prompt(),
+        app.effective_memory_max_recall(),
+        app.effective_memory_max_recall_bytes(),
+    ) {
+        app.memory.last_recalled_count = recalled.memories.len();
+        let ids: Vec<i64> = recalled.memories.iter().map(|m| m.id).collect();
+        prompt_context.set_memory_context(crate::memory::recall::format_memory_context(&recalled));
+        ids
+    } else {
+        vec![]
+    }
+}
+
+/// Commit the recall tracking for memories that were successfully injected
+/// into a prompt that reached execution. Call this after setup is complete
+/// and execution is about to start, not during injection.
+fn commit_memory_recall(app: &App, recalled_ids: &[i64]) {
+    if recalled_ids.is_empty() {
+        return;
+    }
+    if let Some(ref store) = app.memory.store {
+        // Best-effort: recall tracking is non-critical metadata. No OutputManager
+        // is available here (pre-spawn), and TUI has no stderr visibility.
+        let _ = store.mark_recalled(recalled_ids);
+    }
+}
+
 pub(super) fn start_pipeline_execution(app: &mut App) {
     sync_pipeline_iterations_buf(app);
     sync_pipeline_runs_buf(app);
@@ -251,10 +298,16 @@ pub(super) fn start_pipeline_execution(app: &mut App) {
     let pipeline_def = app.pipeline.pipeline_def.clone();
     let config = app.config.clone();
     let cli_timeout = app.effective_cli_timeout_seconds();
-    let prompt_context = PromptRuntimeContext::new(
+    let mut prompt_context = PromptRuntimeContext::new(
         pipeline_def.initial_prompt.clone(),
         app.config.diagnostic_provider.is_some(),
     );
+    let recalled_ids = inject_memory_recall(app, &mut prompt_context);
+    if let Some(ctx) = prompt_context.memory_context() {
+        output.write_recalled_context_logged(ctx);
+    }
+    // Commit recall tracking now — pipeline setup is complete, execution will start.
+    commit_memory_recall(app, &recalled_ids);
 
     let has_finalization = pipeline_def.has_finalization();
     let run_dir = output.run_dir().to_path_buf();
@@ -390,6 +443,7 @@ pub(super) struct MultiExecutionParams {
     cli_timeout_secs: u64,
     runs: u32,
     concurrency: u32,
+    recalled_ids: Vec<i64>,
 }
 
 pub(super) fn start_multi_execution(app: &mut App, params: MultiExecutionParams) {
@@ -406,6 +460,7 @@ pub(super) fn start_multi_execution(app: &mut App, params: MultiExecutionParams)
         cli_timeout_secs,
         runs,
         concurrency,
+        recalled_ids,
     } = params;
 
     let resolved_agents = match resolve_selected_agent_configs(app, &agent_names) {
@@ -441,6 +496,9 @@ pub(super) fn start_multi_execution(app: &mut App, params: MultiExecutionParams)
         app.running.is_running = false;
         return;
     }
+    if let Some(ctx) = prompt_context.memory_context() {
+        batch_root.write_recalled_context_logged(ctx);
+    }
 
     app.running.run_dir = Some(batch_root.run_dir().clone());
     app.prompt.iterations = iterations;
@@ -457,6 +515,8 @@ pub(super) fn start_multi_execution(app: &mut App, params: MultiExecutionParams)
     let default_max_tokens = config.default_max_tokens;
     let max_history_messages = config.max_history_messages;
     let max_history_bytes = config.max_history_bytes;
+
+    commit_memory_recall(app, &recalled_ids);
 
     tokio::spawn(async move {
         run_multi(
@@ -497,6 +557,9 @@ pub(super) fn start_multi_execution(app: &mut App, params: MultiExecutionParams)
                             RunOutcome::Failed,
                             Some(format!("Failed to write prompt: {e}")),
                         );
+                    }
+                    if let Some(ctx) = prompt_context.memory_context() {
+                        output.write_recalled_context_logged(ctx);
                     }
 
                     let run_models = resolved_agents
@@ -654,10 +717,15 @@ pub(super) fn start_multi_pipeline_execution(
     let cli_timeout = app.effective_cli_timeout_seconds();
     app.pipeline.pipeline_def.normalize_session_configs();
     let pipeline_def = app.pipeline.pipeline_def.clone();
-    let prompt_context = PromptRuntimeContext::new(
+    let mut prompt_context = PromptRuntimeContext::new(
         pipeline_def.initial_prompt.clone(),
         app.config.diagnostic_provider.is_some(),
     );
+    let recalled_ids = inject_memory_recall(app, &mut prompt_context);
+    if let Some(ctx) = prompt_context.memory_context() {
+        batch_root.write_recalled_context_logged(ctx);
+    }
+    commit_memory_recall(app, &recalled_ids);
     let pipeline_source = app
         .pipeline
         .pipeline_save_path
@@ -747,6 +815,9 @@ pub(super) fn start_multi_pipeline_execution(
                                 RunOutcome::Failed,
                                 Some(format!("Failed to write prompt: {e}")),
                             );
+                        }
+                        if let Some(ctx) = prompt_context.memory_context() {
+                            output.write_recalled_context_logged(ctx);
                         }
                         let run_rt = crate::execution::pipeline::build_runtime_table(&pipeline_def);
                         let run_loop_extra =
@@ -941,6 +1012,9 @@ pub(super) fn start_multi_pipeline_execution(
                                 Some(format!("Failed to write prompt: {e}")),
                             );
                         }
+                        if let Some(ctx) = prompt_context.memory_context() {
+                            output.write_recalled_context_logged(ctx);
+                        }
                         let run_rt = crate::execution::pipeline::build_runtime_table(&pipeline_def);
                         let run_loop_extra =
                             crate::execution::pipeline::loop_extra_tasks(&pipeline_def);
@@ -1042,8 +1116,18 @@ pub(super) fn start_execution(app: &mut App) {
     } else {
         Some(app.prompt.session_name.trim().to_string())
     };
-    let prompt_context =
+    let mut prompt_context =
         PromptRuntimeContext::new(raw_prompt.clone(), app.config.diagnostic_provider.is_some());
+    // Skip memory injection on resume — the original run already has its recalled context.
+    // The reload happens later in build_execution_output from _recalled_memories.md.
+    let recalled_ids = if !app.prompt.resume_previous {
+        inject_memory_recall(app, &mut prompt_context)
+    } else {
+        app.memory.last_recalled_count = 0;
+        app.memory.last_extraction_count = None;
+        app.memory.last_extraction_error = None;
+        vec![]
+    };
     let agent_names = app.selected_agents.clone();
     let mode = app.selected_mode;
     let iterations = app.prompt.iterations;
@@ -1083,6 +1167,7 @@ pub(super) fn start_execution(app: &mut App) {
                 cli_timeout_secs,
                 runs,
                 concurrency,
+                recalled_ids,
             },
         );
         return;
@@ -1100,6 +1185,7 @@ pub(super) fn start_execution(app: &mut App) {
         keep_session: app.prompt.keep_session,
         iterations,
         cli_timeout_secs,
+        recalled_ids,
     };
 
     if app.prompt.resume_previous && matches!(mode, ExecutionMode::Relay | ExecutionMode::Swarm) {
@@ -1157,7 +1243,7 @@ pub(super) fn handle_resume_preparation_result(
 
 fn continue_single_execution(
     app: &mut App,
-    pending: crate::app::PendingSingleExecution,
+    mut pending: crate::app::PendingSingleExecution,
     resume: Option<crate::app::ResumePreparation>,
 ) {
     let mut agents: Vec<(String, Box<dyn provider::Provider>)> = Vec::new();
@@ -1216,7 +1302,7 @@ fn continue_single_execution(
 
     let resumed_run = resume.is_some();
     let (start_iteration, relay_initial_last_output, swarm_initial_outputs, output) =
-        match build_execution_output(app, &pending, resume, &agent_info, &run_models) {
+        match build_execution_output(app, &mut pending, resume, &agent_info, &run_models) {
             Ok(data) => data,
             Err(message) => {
                 fail_execution_setup(app, message);
@@ -1253,6 +1339,9 @@ fn continue_single_execution(
             ),
         });
     }
+
+    // All setup complete — commit recall tracking now that execution will proceed.
+    commit_memory_recall(app, &pending.recalled_ids);
 
     tokio::spawn(async move {
         let result = match mode {
@@ -1299,8 +1388,8 @@ fn continue_single_execution(
 }
 
 fn build_execution_output(
-    _app: &mut App,
-    pending: &crate::app::PendingSingleExecution,
+    app: &mut App,
+    pending: &mut crate::app::PendingSingleExecution,
     resume: Option<crate::app::ResumePreparation>,
     agent_info: &[(String, String)],
     run_models: &[(String, String)],
@@ -1308,6 +1397,13 @@ fn build_execution_output(
     if let Some(resume) = resume {
         let output = OutputManager::from_existing(resume.run_dir.clone())
             .map_err(|e| format!("Failed to open existing run dir: {e}"))?;
+        // Reload the original recalled memory context so resumed iterations
+        // see the same memory that was injected during the initial run.
+        let recalled_path = output.run_dir().join("_recalled_memories.md");
+        if let Ok(ctx) = std::fs::read_to_string(&recalled_path) {
+            app.memory.last_recalled_count = crate::memory::recall::count_entries_in_context(&ctx);
+            pending.prompt_context.set_memory_context(ctx);
+        }
         output
             .append_error(&format!(
                 "Resumed {} mode for {} additional iteration(s), starting at iter {}",
@@ -1328,6 +1424,9 @@ fn build_execution_output(
     output
         .write_prompt(&pending.raw_prompt)
         .map_err(|e| format!("Failed to write prompt file: {e}"))?;
+    if let Some(ctx) = pending.prompt_context.memory_context() {
+        output.write_recalled_context_logged(ctx);
+    }
     output
         .write_session_info(
             &pending.mode,
@@ -1458,6 +1557,7 @@ pub(super) fn handle_progress(app: &mut App, event: ProgressEvent) {
     if is_done {
         app.running.is_running = false;
         app.running.progress_rx = None;
+        maybe_start_memory_extraction(app);
         if should_offer_consolidation(app) {
             app.running.consolidation_active = true;
             app.running.consolidation_phase = ConsolidationPhase::Confirm;
@@ -1551,6 +1651,7 @@ pub(super) fn handle_batch_progress(app: &mut App, event: BatchProgressEvent) {
         BatchProgressEvent::AllRunsDone => {
             app.running.is_running = false;
             app.running.batch_progress_rx = None;
+            maybe_start_memory_extraction(app);
             if should_offer_consolidation(app) {
                 app.running.consolidation_active = true;
                 app.running.consolidation_phase = ConsolidationPhase::Confirm;
@@ -1705,4 +1806,242 @@ fn resolve_block_step(
     } else {
         format_block_step_label(block_id, label, agent_name)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Memory extraction (post-run)
+// ---------------------------------------------------------------------------
+
+pub(super) fn maybe_start_memory_extraction(app: &mut App) {
+    use super::consolidation::successful_run_ids;
+    use crate::post_run;
+    use std::path::PathBuf;
+
+    if !app.effective_memory_enabled() || app.effective_memory_disable_extraction() {
+        return;
+    }
+    // Skip extraction if user cancelled — partial outputs aren't reliable for learning
+    if app
+        .running
+        .cancel_flag
+        .load(std::sync::atomic::Ordering::Relaxed)
+    {
+        return;
+    }
+    let Some(ref store) = app.memory.store else {
+        return;
+    };
+    let Some(ref run_dir) = app.running.run_dir else {
+        return;
+    };
+
+    let mode = app.selected_mode;
+    // For pipeline mode, collect actual DAG participants instead of home-screen selection
+    let agents: Vec<String> = if mode == ExecutionMode::Pipeline {
+        app.pipeline.pipeline_def.all_agent_names()
+    } else {
+        app.selected_agents.clone()
+    };
+    let is_batch = app.running.multi_run_total > 1;
+
+    let mut files: Vec<(String, PathBuf)> = if is_batch {
+        let successful = successful_run_ids(app);
+        let mut all = Vec::new();
+        for id in successful {
+            let sub = run_dir.join(format!("run_{id}"));
+            all.extend(post_run::discover_final_outputs(&sub, mode, &agents));
+            all.extend(post_run::discover_finalization_outputs(&sub));
+        }
+        // Also check batch-level finalization
+        all.extend(post_run::discover_finalization_outputs(run_dir));
+        all
+    } else {
+        let mut all = post_run::discover_final_outputs(run_dir, mode, &agents);
+        all.extend(post_run::discover_finalization_outputs(run_dir));
+        all
+    };
+    // Deduplicate while preserving run-order (not lexicographic path order)
+    {
+        let mut seen = std::collections::HashSet::new();
+        files.retain(|f| seen.insert(f.1.clone()));
+    }
+    if files.is_empty() {
+        return;
+    }
+
+    let Some(agent_name) = crate::app::resolve_extraction_agent(
+        app.effective_memory_extraction_agent(),
+        &agents,
+        &app.config.agents,
+    ) else {
+        return;
+    };
+    let Some(agent_config) = app.effective_agent_config(&agent_name).cloned() else {
+        if let Ok(output) = OutputManager::from_existing(run_dir.clone()) {
+            let _ = output.append_error(&format!(
+                "Memory extraction skipped: agent '{agent_name}' not found in config"
+            ));
+        }
+        return;
+    };
+    if let Err(e) = validate_agent_runtime(app, &agent_name, &agent_config) {
+        if let Ok(output) = OutputManager::from_existing(run_dir.clone()) {
+            let _ = output.append_error(&format!("Memory extraction skipped: {e}"));
+        }
+        return;
+    }
+
+    let mem_cfg = app.effective_memory_config();
+    let (prompt, skipped) = match crate::memory::extraction::build_extraction_prompt(
+        &files,
+        mem_cfg.observation_ttl_days,
+        mem_cfg.summary_ttl_days,
+    ) {
+        Ok(result) => result,
+        Err(e) => {
+            if let Ok(output) = OutputManager::from_existing(run_dir.clone()) {
+                let _ = output.append_error(&format!(
+                    "Memory extraction skipped: failed to build prompt: {e}"
+                ));
+            }
+            return;
+        }
+    };
+    if skipped > 0 {
+        if let Ok(output) = OutputManager::from_existing(run_dir.clone()) {
+            let _ = output.append_error(&format!(
+                "Memory extraction: {skipped} file(s) skipped (budget exceeded)"
+            ));
+        }
+    }
+
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(
+            app.effective_http_timeout_seconds().max(1),
+        ))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            if let Ok(output) = OutputManager::from_existing(run_dir.clone()) {
+                let _ = output.append_error(&format!(
+                    "Memory extraction skipped: HTTP client error: {e}"
+                ));
+            }
+            return;
+        }
+    };
+    let add_dirs = vec![run_dir.display().to_string()];
+    let mut provider = provider::create_provider(
+        agent_config.provider,
+        &agent_config.to_provider_config(),
+        client,
+        app.config.default_max_tokens,
+        app.config.max_history_messages,
+        app.config.max_history_bytes,
+        app.effective_cli_timeout_seconds().max(1),
+        add_dirs,
+    );
+
+    let source_run = run_dir.display().to_string();
+    let run_dir_owned = run_dir.clone();
+    let store = store.clone();
+    let project_id = app.memory.project_id.clone();
+    let memory_config = app.effective_memory_config();
+
+    let (tx, rx) = mpsc::unbounded_channel();
+    app.memory.extraction_rx.push(rx);
+
+    tokio::spawn(async move {
+        let result = match provider.send(&prompt).await {
+            Ok(response) => {
+                let memories =
+                    crate::memory::extraction::parse_extraction_response(&response.content);
+                if memories.is_empty() && !response.content.trim().is_empty() {
+                    // Provider returned content but parsing failed — log for diagnostics
+                    if let Ok(output) = OutputManager::from_existing(run_dir_owned.clone()) {
+                        let _ = output.append_error(
+                            "Memory extraction: provider returned unparseable response",
+                        );
+                    }
+                }
+                let mut insert_failures = 0u32;
+                for mem in &memories {
+                    if let Err(e) =
+                        store.insert(&project_id, mem, &source_run, &agent_name, &memory_config)
+                    {
+                        insert_failures += 1;
+                        if let Ok(output) = OutputManager::from_existing(run_dir_owned.clone()) {
+                            let _ = output.append_error(&format!("Memory insert failed: {e}"));
+                        }
+                    }
+                }
+                // Write _memories.json inside the task so it persists even if user quits early
+                if let Ok(output) = OutputManager::from_existing(run_dir_owned) {
+                    output.write_memories_logged(&memories);
+                    if insert_failures > 0 {
+                        let _ = output.append_error(&format!(
+                            "Memory persistence: {insert_failures}/{} memories failed to insert",
+                            memories.len()
+                        ));
+                    }
+                }
+                Ok(memories)
+            }
+            Err(e) => {
+                if let Ok(output) = OutputManager::from_existing(run_dir_owned) {
+                    let _ = output.append_error(&format!("Memory extraction failed: {e}"));
+                }
+                Err(e.to_string())
+            }
+        };
+        let _ = tx.send(result);
+    });
+}
+
+pub(super) fn handle_extraction_result(
+    app: &mut App,
+    result: Result<Vec<crate::memory::types::ExtractedMemory>, String>,
+) {
+    // Receiver already removed by caller (event loop or drain).
+    match result {
+        Ok(memories) => {
+            app.memory.last_extraction_count = Some(memories.len());
+            app.memory.last_extraction_error = None;
+        }
+        Err(e) => {
+            app.memory.last_extraction_count = Some(0);
+            app.memory.last_extraction_error = Some(e);
+        }
+    }
+}
+
+/// Non-blocking drain of any extraction receivers that have already completed.
+/// Called before recall so that memories from the previous run are available.
+/// Iterates all receivers (not just the last) so earlier completions aren't
+/// blocked behind in-flight ones.
+fn drain_completed_extractions(app: &mut App) {
+    app.memory.extraction_rx.retain_mut(|rx| {
+        match rx.try_recv() {
+            Ok(result) => {
+                match result {
+                    Ok(memories) => {
+                        app.memory.last_extraction_count = Some(memories.len());
+                        app.memory.last_extraction_error = None;
+                    }
+                    Err(e) => {
+                        app.memory.last_extraction_count = Some(0);
+                        app.memory.last_extraction_error = Some(e);
+                    }
+                }
+                false // remove completed receiver
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                true // still in flight, keep
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                false // sender dropped, remove
+            }
+        }
+    });
 }
