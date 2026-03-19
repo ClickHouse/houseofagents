@@ -1214,7 +1214,7 @@ fn compute_total_steps(app: &App) -> usize {
             if app.running.expected_total_steps > 0 {
                 app.running.expected_total_steps
             } else {
-                app.running.block_rows.len() * app.pipeline.pipeline_def.iterations as usize
+                app.running.block_rows.len()
             }
         }
     }
@@ -1697,5 +1697,47 @@ mod tests {
         let a = app();
         let target = crate::app::StreamTarget::Block(99);
         assert_eq!(resolve_stream_target_label(&a, &target), "Block 99");
+    }
+
+    #[test]
+    fn compute_total_steps_pipeline_uses_block_rows_without_iterations() {
+        let mut a = app();
+        a.selected_mode = ExecutionMode::Pipeline;
+        // Simulate 3 block rows
+        a.running.block_rows = vec![
+            crate::app::BlockStatusRow {
+                block_id: 0,
+                source_block_id: 1,
+                replica_index: 0,
+                label: "A".into(),
+                agent_name: "Claude".into(),
+                provider: ProviderKind::Anthropic,
+                status: crate::app::AgentRowStatus::Pending,
+            },
+            crate::app::BlockStatusRow {
+                block_id: 1,
+                source_block_id: 2,
+                replica_index: 0,
+                label: "B".into(),
+                agent_name: "Claude".into(),
+                provider: ProviderKind::Anthropic,
+                status: crate::app::AgentRowStatus::Pending,
+            },
+            crate::app::BlockStatusRow {
+                block_id: 2,
+                source_block_id: 3,
+                replica_index: 0,
+                label: "C".into(),
+                agent_name: "Claude".into(),
+                provider: ProviderKind::Anthropic,
+                status: crate::app::AgentRowStatus::Pending,
+            },
+        ];
+        // With no expected_total_steps, falls back to block_rows.len()
+        a.running.expected_total_steps = 0;
+        assert_eq!(compute_total_steps(&a), 3);
+        // With expected_total_steps set, use that
+        a.running.expected_total_steps = 10;
+        assert_eq!(compute_total_steps(&a), 10);
     }
 }

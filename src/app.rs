@@ -376,7 +376,6 @@ pub(crate) struct PipelineState {
     pub(crate) pipeline_canvas_offset: (i16, i16),
     pub(crate) pipeline_prompt_cursor: usize,
     pub(crate) pipeline_session_name: String,
-    pub(crate) pipeline_iterations_buf: String,
     pub(crate) pipeline_runs: u32,
     pub(crate) pipeline_runs_buf: String,
     pub(crate) pipeline_concurrency: u32,
@@ -418,8 +417,6 @@ pub(crate) struct PipelineState {
     pub(crate) pipeline_save_path: Option<PathBuf>,
     pub(crate) pipeline_show_session_config: bool,
     pub(crate) pipeline_session_config_cursor: usize,
-    /// 0 = Iter column, 1 = Loop column
-    pub(crate) pipeline_session_config_col: usize,
     pub(crate) pipeline_loop_connecting_from: Option<BlockId>,
     pub(crate) pipeline_show_loop_edit: bool,
     pub(crate) pipeline_loop_edit_field: PipelineLoopEditField,
@@ -529,7 +526,6 @@ pub enum ConsolidationTarget {
 pub enum PipelineFocus {
     InitialPrompt,
     SessionName,
-    Iterations,
     Runs,
     Concurrency,
     Builder,
@@ -1386,7 +1382,6 @@ impl PipelineState {
             pipeline_canvas_offset: (0, 0),
             pipeline_prompt_cursor: 0,
             pipeline_session_name: String::new(),
-            pipeline_iterations_buf: "1".into(),
             pipeline_runs: 1,
             pipeline_runs_buf: "1".into(),
             pipeline_concurrency: 0,
@@ -1426,7 +1421,6 @@ impl PipelineState {
             pipeline_save_path: None,
             pipeline_show_session_config: false,
             pipeline_session_config_cursor: 0,
-            pipeline_session_config_col: 0,
             pipeline_loop_connecting_from: None,
             pipeline_show_loop_edit: false,
             pipeline_loop_edit_field: PipelineLoopEditField::Count,
@@ -1613,7 +1607,6 @@ mod tests {
         app.pipeline.pipeline_canvas_offset = (4, 7);
         app.pipeline.pipeline_prompt_cursor = 9;
         app.pipeline.pipeline_session_name = "pipeline".into();
-        app.pipeline.pipeline_iterations_buf = "5".into();
         app.pipeline.pipeline_runs = 6;
         app.pipeline.pipeline_runs_buf = "6".into();
         app.pipeline.pipeline_concurrency = 4;
@@ -1648,7 +1641,6 @@ mod tests {
         app.pipeline.pipeline_save_path = Some(PathBuf::from("pipeline.toml"));
         app.pipeline.pipeline_show_session_config = true;
         app.pipeline.pipeline_session_config_cursor = 2;
-        app.pipeline.pipeline_session_config_col = 1;
         app.help_popup.open(crate::screen::help::PIPELINE_TAB_COUNT);
         app.help_popup.tab = 3;
         app.help_popup.scroll = 15;
@@ -1712,7 +1704,6 @@ mod tests {
         assert_eq!(app.pipeline.pipeline_canvas_offset, (0, 0));
         assert_eq!(app.pipeline.pipeline_prompt_cursor, 0);
         assert_eq!(app.pipeline.pipeline_session_name, "");
-        assert_eq!(app.pipeline.pipeline_iterations_buf, "1");
         assert_eq!(app.pipeline.pipeline_runs, 1);
         assert_eq!(app.pipeline.pipeline_runs_buf, "1");
         assert_eq!(app.pipeline.pipeline_concurrency, 0);
@@ -1749,7 +1740,6 @@ mod tests {
         assert!(app.pipeline.pipeline_save_path.is_none());
         assert!(!app.pipeline.pipeline_show_session_config);
         assert_eq!(app.pipeline.pipeline_session_config_cursor, 0);
-        assert_eq!(app.pipeline.pipeline_session_config_col, 0);
         assert!(!app.help_popup.active);
         assert_eq!(app.help_popup.tab, 0);
         assert_eq!(app.help_popup.scroll, 0);
