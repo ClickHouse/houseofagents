@@ -292,6 +292,9 @@ pub(crate) struct RunningState {
     pub(crate) expected_total_steps: usize,
     active_agents: HashSet<String>,
     active_blocks: Vec<(u32, String)>,
+    // Key: parent_block_id
+    // Value: Vec of (inner_block_id, inner_loop_pass, outer_loop_pass, inner_label)
+    pub(crate) active_sub_blocks: HashMap<u32, Vec<(u32, u32, u32, String)>>,
     pub(crate) is_running: bool,
     pub(crate) run_error: Option<String>,
     pub(crate) consolidation_active: bool,
@@ -918,11 +921,23 @@ impl App {
         self.running.active_agents.contains(name)
     }
 
-    pub fn active_block_labels(&self) -> impl Iterator<Item = &str> {
-        self.running
-            .active_blocks
-            .iter()
-            .map(|(_, label)| label.as_str())
+    pub fn active_block_labels_enriched(&self) -> impl Iterator<Item = String> + '_ {
+        self.running.active_blocks.iter().map(|(block_id, label)| {
+            if let Some(subs) = self.running.active_sub_blocks.get(block_id) {
+                if let Some(last) = subs.last() {
+                    let extra = subs.len().saturating_sub(1);
+                    if extra > 0 {
+                        format!("{} \u{203a} {} (+{extra} more)", label, last.3)
+                    } else {
+                        format!("{} \u{203a} {}", label, last.3)
+                    }
+                } else {
+                    label.clone()
+                }
+            } else {
+                label.clone()
+            }
+        })
     }
 
     pub fn run_elapsed(&self) -> Duration {
@@ -1014,6 +1029,7 @@ impl RunningState {
             expected_total_steps: 0,
             active_agents: HashSet::new(),
             active_blocks: Vec::new(),
+            active_sub_blocks: HashMap::new(),
             is_running: false,
             run_error: None,
             consolidation_active: false,
@@ -1063,6 +1079,7 @@ impl RunningState {
         self.completed_block_steps.clear();
         self.active_agents.clear();
         self.active_blocks.clear();
+        self.active_sub_blocks.clear();
         self.agent_timers.clear();
         self.block_timers.clear();
         self.agent_rows.clear();
@@ -1201,6 +1218,7 @@ impl RunningState {
             ProgressEvent::BlockStarted {
                 block_id, label, ..
             } => {
+                self.active_sub_blocks.remove(block_id);
                 self.upsert_active_block(*block_id, label.clone());
                 self.block_timers.insert(*block_id, AgentTimer::new());
                 self.stream_buffers.remove(&StreamTarget::Block(*block_id));
@@ -1226,6 +1244,7 @@ impl RunningState {
                 loop_pass,
                 ..
             } => {
+                self.active_sub_blocks.remove(block_id);
                 self.remove_active_block(*block_id);
                 if self
                     .completed_block_steps
@@ -1250,6 +1269,7 @@ impl RunningState {
                 label,
                 ..
             } => {
+                self.active_sub_blocks.remove(block_id);
                 self.remove_active_block(*block_id);
                 if self
                     .completed_block_steps
@@ -1278,6 +1298,7 @@ impl RunningState {
                 reason,
                 ..
             } => {
+                self.active_sub_blocks.remove(block_id);
                 self.remove_active_block(*block_id);
                 if self
                     .completed_block_steps
@@ -1322,7 +1343,108 @@ impl RunningState {
                     format!("[eval by {agent_name}] Pass {pass}: {decision}"),
                 );
             }
+            ProgressEvent::SubBlockStarted {
+                parent_block_id,
+                inner_block_id,
+                inner_label,
+                parent_label,
+                loop_pass,
+                inner_loop_pass,
+                ..
+            } => {
+                self.active_sub_blocks
+                    .entry(*parent_block_id)
+                    .or_default()
+                    .push((
+                        *inner_block_id,
+                        *inner_loop_pass,
+                        *loop_pass,
+                        inner_label.clone(),
+                    ));
+                self.push_recent_activity_log(
+                    parent_label.clone(),
+                    format!("\u{203a} {inner_label} started"),
+                );
+            }
+            ProgressEvent::SubBlockFinished {
+                parent_block_id,
+                inner_block_id,
+                inner_label,
+                parent_label,
+                loop_pass,
+                inner_loop_pass,
+                ..
+            } => {
+                self.remove_sub_block(
+                    *parent_block_id,
+                    *inner_block_id,
+                    *inner_loop_pass,
+                    *loop_pass,
+                );
+                self.push_recent_activity_log(
+                    parent_label.clone(),
+                    format!("\u{203a} {inner_label} finished"),
+                );
+            }
+            ProgressEvent::SubBlockError {
+                parent_block_id,
+                inner_block_id,
+                inner_label,
+                parent_label,
+                loop_pass,
+                inner_loop_pass,
+                error,
+                details,
+                is_skip,
+                ..
+            } => {
+                self.remove_sub_block(
+                    *parent_block_id,
+                    *inner_block_id,
+                    *inner_loop_pass,
+                    *loop_pass,
+                );
+                if !is_skip {
+                    let body = details.as_deref().unwrap_or(error);
+                    self.push_error_ledger_entry(format!(
+                        "[{parent_label} \u{203a} {inner_label}] {body}"
+                    ));
+                    if let Some(details) = details {
+                        self.last_error = Some((
+                            format!("{parent_label} \u{203a} {inner_label}"),
+                            details.clone(),
+                        ));
+                    }
+                }
+                let body = details.as_deref().unwrap_or(error);
+                self.push_recent_activity_log(
+                    parent_label.clone(),
+                    format!("\u{203a} {inner_label} ERROR: {body}"),
+                );
+            }
             ProgressEvent::AllDone => {}
+        }
+    }
+
+    fn remove_sub_block(
+        &mut self,
+        parent_block_id: u32,
+        inner_block_id: u32,
+        inner_loop_pass: u32,
+        outer_loop_pass: u32,
+    ) {
+        let should_remove = {
+            if let Some(subs) = self.active_sub_blocks.get_mut(&parent_block_id) {
+                subs.retain(|(bid, ilp, olp, _)| {
+                    !(*bid == inner_block_id && *ilp == inner_loop_pass && *olp == outer_loop_pass)
+                });
+                subs.is_empty()
+            } else {
+                false
+            }
+        };
+        if should_remove {
+            self.active_sub_blocks.remove(&parent_block_id);
         }
     }
 

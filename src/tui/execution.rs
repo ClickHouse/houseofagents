@@ -1788,6 +1788,60 @@ pub(super) fn update_multi_run_state(app: &mut App, run_id: u32, event: &Progres
                 "Loop {from}\u{2192}{to} pass {pass} eval ({agent_name}): {decision}"
             ));
         }
+        ProgressEvent::SubBlockStarted {
+            parent_label,
+            inner_label,
+            loop_pass,
+            inner_loop_pass,
+            ..
+        } => {
+            let suffix = match (loop_pass, inner_loop_pass) {
+                (0, 0) => String::new(),
+                (outer, 0) => format!(" (pass {outer})"),
+                (0, inner) => format!(" (loop {inner})"),
+                (outer, inner) => format!(" (pass {outer}, loop {inner})"),
+            };
+            state.push_log(format!(
+                "{parent_label} \u{203a} {inner_label}: started{suffix}"
+            ));
+        }
+        ProgressEvent::SubBlockFinished {
+            parent_label,
+            inner_label,
+            loop_pass,
+            inner_loop_pass,
+            ..
+        } => {
+            let suffix = match (loop_pass, inner_loop_pass) {
+                (0, 0) => String::new(),
+                (outer, 0) => format!(" (pass {outer})"),
+                (0, inner) => format!(" (loop {inner})"),
+                (outer, inner) => format!(" (pass {outer}, loop {inner})"),
+            };
+            state.push_log(format!(
+                "{parent_label} \u{203a} {inner_label}: finished{suffix}"
+            ));
+        }
+        ProgressEvent::SubBlockError {
+            parent_label,
+            inner_label,
+            loop_pass,
+            inner_loop_pass,
+            error,
+            details,
+            ..
+        } => {
+            let suffix = match (loop_pass, inner_loop_pass) {
+                (0, 0) => String::new(),
+                (outer, 0) => format!(" (pass {outer})"),
+                (0, inner) => format!(" (loop {inner})"),
+                (outer, inner) => format!(" (pass {outer}, loop {inner})"),
+            };
+            let detail = details.as_deref().unwrap_or(error);
+            state.push_log(format!(
+                "{parent_label} \u{203a} {inner_label}: ERROR{suffix} {detail}"
+            ));
+        }
         ProgressEvent::AllDone => {}
     }
 }

@@ -166,6 +166,9 @@ houseofagents --pipeline my_pipeline.toml --consolidate Claude
 
 - **stdout**: In text mode, prints the run directory path on success. In JSON mode, prints a structured result object.
 - **stderr**: Progress events (agent starts, iteration completions, errors). Suppressed with `--quiet`. In JSON output format, progress events are NDJSON on stderr.
+  - `sub_block_started` — An inner block within a sub-pipeline has started. Fields: `parent_block_id`, `inner_block_id`, `inner_label`, `parent_label`, `iteration`, `loop_pass`, `inner_loop_pass`.
+  - `sub_block_finished` — An inner block within a sub-pipeline has finished. Same fields as `sub_block_started`.
+  - `sub_block_error` — An inner block within a sub-pipeline encountered an error or was skipped. Same fields as `sub_block_started` plus `error`, `details`, and `is_skip`. When `is_skip` is `true`, the event represents a forwarded `BlockSkipped` (dependency not met). Only non-skip errors feed the error ledger and may affect exit codes.
 - Headless mode never enters alternate-screen mode — safe for piping and CI.
 
 ### Exit Codes

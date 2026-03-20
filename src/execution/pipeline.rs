@@ -2507,38 +2507,101 @@ async fn run_pipeline_with_provider_factory(
                         let (child_tx, mut child_rx) = mpsc::unbounded_channel::<ProgressEvent>();
                         let parent_tx = progress_tx.clone();
                         let fwd_block_name = parent_block_name.clone();
+                        let fwd_parent_label = parent_label.clone();
                         tokio::spawn(async move {
                             while let Some(event) = child_rx.recv().await {
                                 match &event {
-                                    ProgressEvent::BlockStarted { block_id: inner_bid, .. } => {
+                                    ProgressEvent::BlockStarted {
+                                        block_id: inner_bid,
+                                        label: inner_label,
+                                        loop_pass: inner_lp,
+                                        ..
+                                    } => {
+                                        let _ = parent_tx.send(ProgressEvent::SubBlockStarted {
+                                            parent_block_id: rid,
+                                            inner_block_id: *inner_bid,
+                                            inner_label: inner_label.clone(),
+                                            parent_label: fwd_parent_label.clone(),
+                                            iteration: parent_iteration,
+                                            loop_pass: parent_loop_pass,
+                                            inner_loop_pass: *inner_lp,
+                                        });
+                                    }
+                                    ProgressEvent::BlockFinished {
+                                        block_id: inner_bid,
+                                        label: inner_label,
+                                        loop_pass: inner_lp,
+                                        ..
+                                    } => {
+                                        let _ = parent_tx.send(ProgressEvent::SubBlockFinished {
+                                            parent_block_id: rid,
+                                            inner_block_id: *inner_bid,
+                                            inner_label: inner_label.clone(),
+                                            parent_label: fwd_parent_label.clone(),
+                                            iteration: parent_iteration,
+                                            loop_pass: parent_loop_pass,
+                                            inner_loop_pass: *inner_lp,
+                                        });
+                                    }
+                                    ProgressEvent::BlockError {
+                                        block_id: inner_bid,
+                                        label: inner_label,
+                                        loop_pass: inner_lp,
+                                        error,
+                                        details,
+                                        ..
+                                    } => {
+                                        let _ = parent_tx.send(ProgressEvent::SubBlockError {
+                                            parent_block_id: rid,
+                                            inner_block_id: *inner_bid,
+                                            inner_label: inner_label.clone(),
+                                            parent_label: fwd_parent_label.clone(),
+                                            iteration: parent_iteration,
+                                            loop_pass: parent_loop_pass,
+                                            inner_loop_pass: *inner_lp,
+                                            error: error.clone(),
+                                            details: details.clone(),
+                                            is_skip: false,
+                                        });
+                                    }
+                                    ProgressEvent::BlockSkipped {
+                                        block_id: inner_bid,
+                                        label: inner_label,
+                                        loop_pass: inner_lp,
+                                        reason,
+                                        ..
+                                    } => {
+                                        let _ = parent_tx.send(ProgressEvent::SubBlockError {
+                                            parent_block_id: rid,
+                                            inner_block_id: *inner_bid,
+                                            inner_label: inner_label.clone(),
+                                            parent_label: fwd_parent_label.clone(),
+                                            iteration: parent_iteration,
+                                            loop_pass: parent_loop_pass,
+                                            inner_loop_pass: *inner_lp,
+                                            error: format!("SKIPPED: {reason}"),
+                                            details: None,
+                                            is_skip: true,
+                                        });
+                                    }
+                                    ProgressEvent::BlockLog {
+                                        agent_name: inner_agent,
+                                        message,
+                                        ..
+                                    } => {
                                         let _ = parent_tx.send(ProgressEvent::BlockLog {
                                             block_id: rid,
                                             agent_name: format!("[{fwd_block_name}]"),
                                             iteration: parent_iteration,
                                             loop_pass: parent_loop_pass,
-                                            message: format!("Inner block {inner_bid} started"),
+                                            message: format!("[{inner_agent}] {message}"),
                                         });
                                     }
-                                    ProgressEvent::BlockFinished { block_id: inner_bid, .. } => {
-                                        let _ = parent_tx.send(ProgressEvent::BlockLog {
-                                            block_id: rid,
-                                            agent_name: format!("[{fwd_block_name}]"),
-                                            iteration: parent_iteration,
-                                            loop_pass: parent_loop_pass,
-                                            message: format!("Inner block {inner_bid} finished"),
-                                        });
-                                    }
-                                    ProgressEvent::BlockError { block_id: inner_bid, error, .. } => {
-                                        let _ = parent_tx.send(ProgressEvent::BlockLog {
-                                            block_id: rid,
-                                            agent_name: format!("[{fwd_block_name}]"),
-                                            iteration: parent_iteration,
-                                            loop_pass: parent_loop_pass,
-                                            message: format!("Inner block {inner_bid} error: {error}"),
-                                        });
-                                    }
-                                    ProgressEvent::AllDone => { /* Filter — do not forward */ }
-                                    _ => { /* Discard inner events — v1 decision */ }
+                                    ProgressEvent::AllDone => { /* Do not forward */ }
+                                    // TODO: SubBlock* events from depth ≥2 are discarded here.
+                                    // If nested sub-pipelines are ever allowed, these should be
+                                    // forwarded (possibly with depth tracking).
+                                    _ => { /* Discard other inner events */ }
                                 }
                             }
                         });
