@@ -45,6 +45,7 @@ struct PipelineMessageContext<'a> {
     runtime_table: &'a RuntimeReplicaTable,
     block_to_loop: &'a HashMap<BlockId, (BlockId, BlockId)>,
     block_loop_pass: &'a HashMap<BlockId, u32>,
+    scatter_injection: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -281,6 +282,21 @@ fn loop_replica_filename(info: &RuntimeReplicaInfo, loop_pass: u32) -> String {
     }
 }
 
+fn scatter_replica_filename(
+    info: &RuntimeReplicaInfo,
+    item_index: usize,
+    loop_pass: u32,
+) -> String {
+    if loop_pass == 0 {
+        format!("{}_item{}.md", info.filename_stem, item_index)
+    } else {
+        format!(
+            "{}_item{}_loop{}.md",
+            info.filename_stem, item_index, loop_pass
+        )
+    }
+}
+
 /// Parse an evaluator response: returns `true` if the first word is "BREAK"
 /// (case-insensitive, ignoring trailing punctuation).
 fn parse_break_decision(content: &str) -> bool {
@@ -512,6 +528,20 @@ fn is_one(v: &u32) -> bool {
     *v == 1
 }
 
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
+pub(crate) const DEFAULT_SCATTER_DELIMITER: &str = "===SCATTER_ITEM===";
+
+fn default_scatter_delimiter() -> String {
+    DEFAULT_SCATTER_DELIMITER.into()
+}
+
+fn is_default_scatter_delimiter(s: &str) -> bool {
+    s == DEFAULT_SCATTER_DELIMITER || s.is_empty()
+}
+
 impl PipelineBlock {
     pub fn is_sub_pipeline(&self) -> bool {
         self.sub_pipeline.is_some()
@@ -542,6 +572,69 @@ impl PipelineBlock {
 pub struct PipelineConnection {
     pub from: BlockId,
     pub to: BlockId,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub scatter: bool,
+    #[serde(
+        default = "default_scatter_delimiter",
+        skip_serializing_if = "is_default_scatter_delimiter"
+    )]
+    pub scatter_delimiter: String,
+}
+
+impl PipelineConnection {
+    pub fn new(from: BlockId, to: BlockId) -> Self {
+        Self {
+            from,
+            to,
+            scatter: false,
+            scatter_delimiter: DEFAULT_SCATTER_DELIMITER.into(),
+        }
+    }
+}
+
+pub(crate) struct ScatterItem {
+    pub index: usize,
+    pub content: String,
+}
+
+pub(crate) struct ScatterQueue {
+    items: VecDeque<ScatterItem>,
+    total_count: usize,
+}
+
+impl ScatterQueue {
+    pub fn from_output(output: &str, delimiter: &str) -> Self {
+        let delim = if delimiter.is_empty() {
+            DEFAULT_SCATTER_DELIMITER
+        } else {
+            delimiter
+        };
+        let items: VecDeque<ScatterItem> = output
+            .split(delim)
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .enumerate()
+            .map(|(i, s)| ScatterItem {
+                index: i,
+                content: s.to_string(),
+            })
+            .collect();
+        let total_count = items.len();
+        ScatterQueue { items, total_count }
+    }
+    pub fn pop(&mut self) -> Option<ScatterItem> {
+        self.items.pop_front()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+    pub fn total(&self) -> usize {
+        self.total_count
+    }
+    #[allow(dead_code)]
+    pub fn remaining(&self) -> usize {
+        self.items.len()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -874,6 +967,16 @@ pub fn upstream_of(def: &PipelineDefinition, id: BlockId) -> Vec<BlockId> {
     def.connections
         .iter()
         .filter(|c| c.to == id)
+        .map(|c| c.from)
+        .collect()
+}
+
+/// Like `upstream_of`, but excludes scatter connections.
+/// Use this for building prompt messages — scatter items are injected separately.
+fn upstream_of_non_scatter(def: &PipelineDefinition, id: BlockId) -> Vec<BlockId> {
+    def.connections
+        .iter()
+        .filter(|c| c.to == id && !c.scatter)
         .map(|c| c.from)
         .collect()
 }
@@ -1423,6 +1526,81 @@ pub(crate) fn validate_pipeline(def: &PipelineDefinition) -> Result<(), AppError
                     "Duplicate connection from {} to {}",
                     conn.from, conn.to
                 )));
+            }
+        }
+    }
+
+    // Scatter validation rules
+    {
+        // Max one incoming scatter connection per block
+        let mut scatter_targets: HashMap<BlockId, usize> = HashMap::new();
+        for conn in &def.connections {
+            if conn.scatter {
+                *scatter_targets.entry(conn.to).or_default() += 1;
+            }
+        }
+        for (&block_id, &count) in &scatter_targets {
+            if count > 1 {
+                return Err(AppError::Config(format!(
+                    "Block {block_id} has {count} incoming scatter connections; only one is supported"
+                )));
+            }
+        }
+
+        // Scatter source must have logical_task_count() == 1
+        for conn in &def.connections {
+            if conn.scatter {
+                if let Some(block) = def.blocks.iter().find(|b| b.id == conn.from) {
+                    if block.logical_task_count() != 1 {
+                        return Err(AppError::Config(format!(
+                            "Scatter source block {} has logical_task_count {} (must be 1)",
+                            conn.from,
+                            block.logical_task_count()
+                        )));
+                    }
+                }
+            }
+        }
+
+        // Scatter target must not be a sub-pipeline block
+        for conn in &def.connections {
+            if conn.scatter {
+                if let Some(block) = def.blocks.iter().find(|b| b.id == conn.to) {
+                    if block.is_sub_pipeline() {
+                        return Err(AppError::Config(format!(
+                            "Scatter target block {} is a sub-pipeline; scatter not supported for sub-pipelines",
+                            conn.to
+                        )));
+                    }
+                }
+            }
+        }
+
+        // Scatter target inside a loop must be the loop restart block (`to`)
+        if def.connections.iter().any(|c| c.scatter) && !def.loop_connections.is_empty() {
+            let graph = RegularGraph::from_def(def);
+            for conn in &def.connections {
+                if conn.scatter {
+                    for lc in &def.loop_connections {
+                        if let Some(sub_dag) = compute_loop_sub_dag(&graph, lc.from, lc.to) {
+                            if sub_dag.contains(&conn.to) && conn.to != lc.to {
+                                return Err(AppError::Config(format!(
+                                    "Scatter target block {} is inside loop ({} → {}) but is not the loop restart block {}",
+                                    conn.to, lc.from, lc.to, lc.to
+                                )));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Scatter forbidden on finalization connections
+        for conn in &def.finalization_connections {
+            if conn.scatter {
+                return Err(AppError::Config(
+                    "Scatter connections are not allowed in finalization phase".into(),
+                ));
             }
         }
     }
@@ -2083,6 +2261,8 @@ async fn run_pipeline_with_provider_factory(
             };
         // Track current loop pass per block for progress events
         let mut block_loop_pass: HashMap<BlockId, u32> = HashMap::new();
+        let mut scatter_queues: HashMap<(BlockId, BlockId), ScatterQueue> = HashMap::new();
+        let mut scatter_done_replicas: HashMap<BlockId, HashSet<u32>> = HashMap::new();
 
         // Seed ready queue with root blocks (logical IDs)
         let (ready_tx, mut ready_rx) = mpsc::unbounded_channel::<BlockId>();
@@ -2471,6 +2651,141 @@ async fn run_pipeline_with_provider_factory(
                             .map(|(_, _, cli)| *cli)
                             .unwrap_or(false);
 
+                        // --- Scatter: pop item from queue ---
+                        let incoming_scatter: Option<&PipelineConnection> = def
+                            .connections
+                            .iter()
+                            .find(|c| c.scatter && c.to == block_id);
+
+                        let scatter_item: Option<ScatterItem> =
+                            if let Some(sc) = incoming_scatter {
+                                scatter_queues
+                                    .get_mut(&(sc.from, block_id))
+                                    .and_then(|q| q.pop())
+                            } else {
+                                None
+                            };
+
+                        let scatter_total = incoming_scatter
+                            .and_then(|sc| scatter_queues.get(&(sc.from, block_id)))
+                            .map(|q| q.total())
+                            .unwrap_or(0);
+
+                        // Queue exhausted → no-op task
+                        if incoming_scatter.is_some() && scatter_item.is_none() {
+                            let _ = progress_tx.send(ProgressEvent::BlockFinished {
+                                block_id: rid,
+                                agent_name: info.agent.clone(),
+                                label: info.display_label.clone(),
+                                iteration,
+                                loop_pass: current_loop_pass,
+                            });
+                            scatter_done_replicas.entry(block_id).or_default().insert(rid);
+
+                            let task_handle = tasks.spawn(async move { (rid, Ok(String::new())) });
+                            task_metadata.insert(
+                                task_handle.id(),
+                                PipelineTaskMetadata {
+                                    runtime_id: rid,
+                                    source_block_id: block_id,
+                                    agent_name: info.agent.clone(),
+                                    label: info.display_label.clone(),
+                                    iteration,
+                                    loop_pass: current_loop_pass,
+                                },
+                            );
+                            continue;
+                        }
+
+                        // CLI scatter: materialize item to disk
+                        let scatter_cli_path: Option<std::path::PathBuf> =
+                            if let Some(ref item) = scatter_item {
+                                if use_cli {
+                                    let scatter_dir = output.run_dir().join("_scatter");
+                                    let sc = incoming_scatter.unwrap();
+                                    let temp_name = format!(
+                                        "from{}_to{}_rid{}_item{}_loop{}.md",
+                                        sc.from, block_id, rid, item.index, current_loop_pass
+                                    );
+                                    match std::fs::create_dir_all(&scatter_dir).and_then(|_| {
+                                        let path = scatter_dir.join(&temp_name);
+                                        std::fs::write(&path, &item.content)?;
+                                        Ok(path)
+                                    }) {
+                                        Ok(path) => Some(path),
+                                        Err(e) => {
+                                            let error_msg =
+                                                format!("Failed to write scatter item: {e}");
+                                            let _ = output.append_error(&format!(
+                                                "runtime {rid}: {error_msg}"
+                                            ));
+                                            let _ =
+                                                progress_tx.send(ProgressEvent::BlockError {
+                                                    block_id: rid,
+                                                    agent_name: info.agent.clone(),
+                                                    label: info.display_label.clone(),
+                                                    iteration,
+                                                    loop_pass: current_loop_pass,
+                                                    error: error_msg.clone(),
+                                                    details: Some(error_msg.clone()),
+                                                });
+                                            let err = error_msg;
+                                            let task_handle =
+                                                tasks.spawn(async move { (rid, Err(err)) });
+                                            task_metadata.insert(
+                                                task_handle.id(),
+                                                PipelineTaskMetadata {
+                                                    runtime_id: rid,
+                                                    source_block_id: block_id,
+                                                    agent_name: info.agent.clone(),
+                                                    label: info.display_label.clone(),
+                                                    iteration,
+                                                    loop_pass: current_loop_pass,
+                                                },
+                                            );
+                                            continue;
+                                        }
+                                    }
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            };
+
+                        // Scatter log
+                        if let Some(ref item) = scatter_item {
+                            let _ = progress_tx.send(ProgressEvent::BlockLog {
+                                block_id: rid,
+                                agent_name: info.agent.clone(),
+                                iteration,
+                                loop_pass: current_loop_pass,
+                                message: format!(
+                                    "[scatter] Processing item {}/{}",
+                                    item.index + 1,
+                                    scatter_total
+                                ),
+                            });
+                        }
+
+                        // Build scatter injection text (inserted before augment_prompt_for_agent)
+                        let scatter_injection: Option<String> = scatter_item.as_ref().map(|item| {
+                            if use_cli {
+                                let path = scatter_cli_path.as_ref().expect("CLI scatter path must exist");
+                                format!(
+                                    "[Scatter work item {} of {scatter_total}]\nRead this file: {}",
+                                    item.index + 1,
+                                    path.display()
+                                )
+                            } else {
+                                format!(
+                                    "[Scatter work item {} of {scatter_total}]\n{}",
+                                    item.index + 1,
+                                    item.content
+                                )
+                            }
+                        });
+
                         let message = if current_loop_pass > 0 {
                             if let Some(&(loop_from, loop_to)) = block_to_loop.get(&block_id) {
                                 if block_id == loop_to {
@@ -2484,6 +2799,7 @@ async fn run_pipeline_with_provider_factory(
                                         current_loop_pass, lc.count + 1,
                                         &ls.prompt, &replica_outputs, &rt, output,
                                         prompt_context, &block_to_loop, &block_loop_pass,
+                                        scatter_injection.as_deref(),
                                     )
                                 } else {
                                     build_pipeline_block_message(
@@ -2494,6 +2810,7 @@ async fn run_pipeline_with_provider_factory(
                                             output, prompt_context, runtime_table: &rt,
                                             block_to_loop: &block_to_loop,
                                             block_loop_pass: &block_loop_pass,
+                                            scatter_injection,
                                         },
                                     )
                                 }
@@ -2509,6 +2826,7 @@ async fn run_pipeline_with_provider_factory(
                                     output, prompt_context, runtime_table: &rt,
                                     block_to_loop: &block_to_loop,
                                     block_loop_pass: &block_loop_pass,
+                                    scatter_injection,
                                 },
                             )
                         };
@@ -2563,7 +2881,11 @@ async fn run_pipeline_with_provider_factory(
                         let ptx = progress_tx.clone();
                         let cancel_clone = cancel.clone();
                         let task_output = output.clone();
-                        let task_filename = loop_replica_filename(info, current_loop_pass);
+                        let task_filename = if let Some(ref item) = scatter_item {
+                            scatter_replica_filename(info, item.index, current_loop_pass)
+                        } else {
+                            loop_replica_filename(info, current_loop_pass)
+                        };
                         let task_agent_name = info.agent.clone();
                         let task_label = info.display_label.clone();
                         let message_clone = message;
@@ -2746,7 +3068,39 @@ async fn run_pipeline_with_provider_factory(
                         let entry_lp = block_loop_pass.get(&sid).copied().unwrap_or(0);
                         match outcome {
                             Ok(content) => {
-                                replica_outputs.insert(runtime_id, content.clone());
+                                let is_scatter_done = scatter_done_replicas
+                                    .get(&sid)
+                                    .is_some_and(|s| s.contains(&runtime_id));
+                                if !is_scatter_done {
+                                    replica_outputs.insert(runtime_id, content.clone());
+
+                                    // Create scatter queues for outgoing scatter connections
+                                    for conn in &def.connections {
+                                        if conn.scatter && conn.from == sid {
+                                            if let Some(rids) = rt.logical_to_runtime.get(&sid) {
+                                                if let Some(text) = replica_outputs.get(&rids[0]) {
+                                                    let delim = if conn.scatter_delimiter.is_empty() {
+                                                        DEFAULT_SCATTER_DELIMITER
+                                                    } else {
+                                                        &conn.scatter_delimiter
+                                                    };
+                                                    let queue = ScatterQueue::from_output(text, delim);
+                                                    let _ = progress_tx.send(ProgressEvent::BlockLog {
+                                                        block_id: runtime_id,
+                                                        agent_name: entry_agent.clone(),
+                                                        iteration,
+                                                        loop_pass: entry_lp,
+                                                        message: format!(
+                                                            "[scatter] Queue created: {} items",
+                                                            queue.total()
+                                                        ),
+                                                    });
+                                                    scatter_queues.insert((conn.from, conn.to), queue);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                                 // Emit BlockFinished for sub-pipeline blocks (normal
                                 // tasks emit this inside the spawned task; sub-pipelines
                                 // emit it here because the inner run does not know the
@@ -2900,12 +3254,31 @@ async fn run_pipeline_with_provider_factory(
                                         }
                                     }
 
+                                    // Scatter queue exhaustion → force loop termination
+                                    let scatter_queue_empty = def.connections.iter()
+                                        .find(|c| c.scatter && c.to == loop_to)
+                                        .and_then(|sc| scatter_queues.get(&(sc.from, loop_to)))
+                                        .map(|q| q.is_empty())
+                                        .unwrap_or(false);
+
+                                    if scatter_queue_empty && !should_break {
+                                        if let Some(ls) = loop_state.get_mut(&key) {
+                                            if !ls.abandoned {
+                                                completed += ls.abandoned_task_count();
+                                                ls.extra_tasks_remaining = 0;
+                                                ls.remaining = 0;
+                                                ls.abandoned = true;
+                                            }
+                                        }
+                                    }
+
                                     if let Some(ls) = loop_state.get_mut(&key) {
                                         if ls.remaining > 0 {
                                             // More loop passes — reset sub-DAG and queue `to`
                                             ls.remaining -= 1;
                                             ls.current_pass += 1;
                                             ls.block_completed_this_pass.clear();
+                                            scatter_done_replicas.remove(&loop_to);
                                             // Clear stale failure/output state for sub-DAG blocks
                                             // so that failures from pass N don't poison pass N+1.
                                             // Keep `from`'s outputs — needed as feedback for `to`.
@@ -3163,7 +3536,7 @@ fn assemble_raw_upstream_context(
     runtime_table: &RuntimeReplicaTable,
     block_outputs: &HashMap<u32, String>,
 ) -> String {
-    let upstream_ids = upstream_of(def, block.id);
+    let upstream_ids = upstream_of_non_scatter(def, block.id);
     if upstream_ids.is_empty() {
         return def.initial_prompt.clone();
     }
@@ -3204,7 +3577,7 @@ fn build_pipeline_block_message(
     use_cli: bool,
     context: &PipelineMessageContext<'_>,
 ) -> String {
-    let is_root = upstream_of(context.def, block.id).is_empty();
+    let is_root = upstream_of_non_scatter(context.def, block.id).is_empty();
     let base_message = if is_root {
         if block.prompt.is_empty() {
             context.def.initial_prompt.clone()
@@ -3212,7 +3585,7 @@ fn build_pipeline_block_message(
             format!("{}\n\n{}", block.prompt, context.def.initial_prompt)
         }
     } else {
-        let upstream_ids = upstream_of(context.def, block.id);
+        let upstream_ids = upstream_of_non_scatter(context.def, block.id);
         let prefix = if block.prompt.is_empty() {
             String::new()
         } else {
@@ -3224,15 +3597,19 @@ fn build_pipeline_block_message(
                 if let Some(rids) = context.runtime_table.logical_to_runtime.get(uid) {
                     for &rid in rids {
                         let info = &context.runtime_table.entries[rid as usize];
-                        let filename = loop_aware_upstream_filename(
+                        let filenames = cli_upstream_filenames(
                             info,
                             *uid,
+                            context.def,
                             context.block_to_loop,
                             context.block_loop_pass,
+                            context.output.run_dir(),
                         );
-                        let path = context.output.run_dir().join(&filename);
-                        if path.exists() {
-                            file_refs.push_str(&format!("- {}\n", path.display()));
+                        for filename in filenames {
+                            let path = context.output.run_dir().join(&filename);
+                            if path.exists() {
+                                file_refs.push_str(&format!("- {}\n", path.display()));
+                            }
                         }
                     }
                 }
@@ -3271,10 +3648,15 @@ fn build_pipeline_block_message(
     };
 
     let profile_prefix = resolve_profile_instructions(&block.profiles, use_cli);
-    let full_message = if profile_prefix.is_empty() {
+    let with_profiles = if profile_prefix.is_empty() {
         base_message
     } else {
         format!("{profile_prefix}{base_message}")
+    };
+    let full_message = if let Some(ref scatter_text) = context.scatter_injection {
+        format!("{with_profiles}\n\n{scatter_text}")
+    } else {
+        with_profiles
     };
     context
         .prompt_context
@@ -3303,6 +3685,96 @@ fn loop_aware_upstream_filename(
     }
 }
 
+/// Scatter-aware CLI filename resolver.
+/// For scatter-target blocks, enumerates `_item{N}` files on disk because the
+/// standard filename (`stem.md` / `stem_loop{P}.md`) does not exist — scatter
+/// replicas write per-item files instead.
+fn cli_upstream_filenames(
+    info: &RuntimeReplicaInfo,
+    upstream_block_id: BlockId,
+    def: &PipelineDefinition,
+    block_to_loop: &HashMap<BlockId, (BlockId, BlockId)>,
+    block_loop_pass: &HashMap<BlockId, u32>,
+    run_dir: &std::path::Path,
+) -> Vec<String> {
+    let is_scatter_target = def
+        .connections
+        .iter()
+        .any(|c| c.scatter && c.to == upstream_block_id);
+
+    if !is_scatter_target {
+        return vec![loop_aware_upstream_filename(
+            info,
+            upstream_block_id,
+            block_to_loop,
+            block_loop_pass,
+        )];
+    }
+
+    // Scatter target: glob for _item files matching this replica's stem.
+    // Uses exact prefix match (stem + "_item") to avoid collisions between
+    // replica suffixes like _r1 and _r10.
+    let stem = &info.filename_stem;
+    let item_prefix = format!("{stem}_item");
+    let pass = block_loop_pass
+        .get(&upstream_block_id)
+        .copied()
+        .unwrap_or(0);
+    let mut files = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(run_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.starts_with(&item_prefix) || !name.ends_with(".md") {
+                continue;
+            }
+            if pass > 0 {
+                // On loop pass P, match only _item{N}_loop{P}.md
+                if name.ends_with(&format!("_loop{pass}.md")) {
+                    files.push(name);
+                }
+            } else {
+                // Pass 0: match _item{N}.md (no _loop suffix).
+                // Use suffix-aware check: reject only if the part before .md
+                // ends with _loop{digits}, avoiding false negatives when the
+                // block name itself contains "_loop" (e.g. "fix_loop").
+                let without_ext = name.trim_end_matches(".md");
+                let has_loop_suffix = without_ext.rfind("_loop").is_some_and(|i| {
+                    let after = &without_ext[i + 5..];
+                    !after.is_empty() && after.chars().all(|c| c.is_ascii_digit())
+                });
+                if !has_loop_suffix {
+                    files.push(name);
+                }
+            }
+        }
+    }
+    // Sort by item index numerically (item0, item1, ..., item10) not lexicographically
+    files.sort_by(|a, b| {
+        let idx = |s: &str| -> usize {
+            s.rfind("_item")
+                .and_then(|i| {
+                    s[i + 5..]
+                        .split(|c: char| !c.is_ascii_digit())
+                        .next()
+                        .and_then(|n| n.parse().ok())
+                })
+                .unwrap_or(0)
+        };
+        idx(a).cmp(&idx(b))
+    });
+    if files.is_empty() {
+        // Fallback: no _item files found yet — use standard filename
+        vec![loop_aware_upstream_filename(
+            info,
+            upstream_block_id,
+            block_to_loop,
+            block_loop_pass,
+        )]
+    } else {
+        files
+    }
+}
+
 /// Message builder for `to` (restart target) block on re-run passes.
 /// Includes external upstream context + loop header + loop prompt + block prompt + `from`'s feedback.
 #[allow(clippy::too_many_arguments)]
@@ -3321,16 +3793,17 @@ fn build_loop_rerun_message_v2(
     prompt_context: &PromptRuntimeContext,
     block_to_loop: &HashMap<BlockId, (BlockId, BlockId)>,
     block_loop_pass: &HashMap<BlockId, u32>,
+    scatter_injection: Option<&str>,
 ) -> String {
     let mut message = String::new();
 
     // External upstream context (parents outside the loop sub-DAG)
-    let external_parents: Vec<BlockId> = upstream_of(def, block.id)
+    let external_parents: Vec<BlockId> = upstream_of_non_scatter(def, block.id)
         .into_iter()
         .filter(|uid| !loop_sub_dag_blocks.contains(uid))
         .collect();
 
-    let is_root = upstream_of(def, block.id).is_empty();
+    let is_root = upstream_of_non_scatter(def, block.id).is_empty();
     if is_root {
         // Root restart target: include initial_prompt
         if !def.initial_prompt.is_empty() {
@@ -3345,11 +3818,19 @@ fn build_loop_rerun_message_v2(
                 if let Some(rids) = runtime_table.logical_to_runtime.get(&uid) {
                     for &rid in rids {
                         let info = &runtime_table.entries[rid as usize];
-                        let filename =
-                            loop_aware_upstream_filename(info, uid, block_to_loop, block_loop_pass);
-                        let path = output.run_dir().join(&filename);
-                        if path.exists() {
-                            file_refs.push_str(&format!("- {}\n", path.display()));
+                        let filenames = cli_upstream_filenames(
+                            info,
+                            uid,
+                            def,
+                            block_to_loop,
+                            block_loop_pass,
+                            output.run_dir(),
+                        );
+                        for filename in filenames {
+                            let path = output.run_dir().join(&filename);
+                            if path.exists() {
+                                file_refs.push_str(&format!("- {}\n", path.display()));
+                            }
                         }
                     }
                 }
@@ -3449,10 +3930,15 @@ fn build_loop_rerun_message_v2(
     }
 
     let profile_prefix = resolve_profile_instructions(&block.profiles, use_cli);
-    let full_message = if profile_prefix.is_empty() {
+    let with_profiles = if profile_prefix.is_empty() {
         message
     } else {
         format!("{profile_prefix}{message}")
+    };
+    let full_message = if let Some(scatter_text) = scatter_injection {
+        format!("{with_profiles}\n\n{scatter_text}")
+    } else {
+        with_profiles
     };
     prompt_context.augment_prompt_for_agent(&full_message, use_cli)
 }
@@ -3712,6 +4198,7 @@ fn collect_feed_data(
                 remainder == ".md"
                     || (remainder.starts_with("_loop") && remainder.ends_with(".md"))
                     || (remainder.starts_with("_iter") && remainder.ends_with(".md"))
+                    || (remainder.starts_with("_item") && remainder.ends_with(".md"))
             });
             if !matches_stem {
                 continue;
@@ -4565,7 +5052,7 @@ mod tests {
     }
 
     fn conn(from: BlockId, to: BlockId) -> PipelineConnection {
-        PipelineConnection { from, to }
+        PipelineConnection::new(from, to)
     }
 
     fn def_with(
@@ -5044,6 +5531,7 @@ to = 1
             runtime_table: &rt,
             block_to_loop: &btl,
             block_loop_pass: &blp,
+            scatter_injection: None,
         };
         let cli_message = build_pipeline_block_message(&def.blocks[0], true, &message_context);
         let api_message = build_pipeline_block_message(&def.blocks[0], false, &message_context);
@@ -8370,9 +8858,17 @@ position = [0, 0]
 
         // HIGH fix: BlockFinished must be emitted for the sub-pipeline parent row
         assert!(
-            events.iter().any(|e| matches!(e, ProgressEvent::BlockFinished { block_id, .. } if *block_id == 0)),
+            events.iter().any(
+                |e| matches!(e, ProgressEvent::BlockFinished { block_id, .. } if *block_id == 0)
+            ),
             "BlockFinished must be emitted for sub-pipeline (runtime_id 0): {:?}",
-            events.iter().filter(|e| matches!(e, ProgressEvent::BlockFinished { .. } | ProgressEvent::BlockError { .. })).collect::<Vec<_>>()
+            events
+                .iter()
+                .filter(|e| matches!(
+                    e,
+                    ProgressEvent::BlockFinished { .. } | ProgressEvent::BlockError { .. }
+                ))
+                .collect::<Vec<_>>()
         );
 
         // HIGH fix: parent-level output file must be written for downstream/feed consumers
@@ -8383,7 +8879,10 @@ position = [0, 0]
             "Parent-level output file {expected_parent_file:?} must be written",
         );
         let content = std::fs::read_to_string(&expected_parent_file).unwrap();
-        assert!(!content.is_empty(), "Parent-level output file must not be empty");
+        assert!(
+            !content.is_empty(),
+            "Parent-level output file must not be empty"
+        );
     }
 
     #[test]
@@ -8422,7 +8921,10 @@ position = [0, 0]
             position = [0, 1]
         "#;
         let result: Result<PipelineBlock, _> = toml::from_str(toml_str);
-        assert!(result.is_err(), "should reject agents on sub-pipeline block");
+        assert!(
+            result.is_err(),
+            "should reject agents on sub-pipeline block"
+        );
         assert!(
             result.unwrap_err().to_string().contains("must not have"),
             "error should mention agents restriction"
@@ -8465,24 +8967,29 @@ position = [0, 0]
             position = [0, 1]
         "#;
         let result: Result<PipelineBlock, _> = toml::from_str(toml_str);
-        assert!(result.is_ok(), "empty agents on sub-pipeline should be allowed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "empty agents on sub-pipeline should be allowed: {:?}",
+            result.err()
+        );
     }
 
     #[test]
     fn test_add_allowed_dir_on_provider_trait() {
         // Verify the default trait implementation is a no-op (doesn't panic)
         use crate::provider::Provider;
-        let mut mock = MockProvider::ok(ProviderKind::Anthropic, "test", Arc::new(Mutex::new(Vec::new())));
+        let mut mock = MockProvider::ok(
+            ProviderKind::Anthropic,
+            "test",
+            Arc::new(Mutex::new(Vec::new())),
+        );
         mock.add_allowed_dir("/tmp/test".into());
         // Should not panic — default no-op
     }
 
     #[test]
     fn test_sub_pipeline_filename_stem_passes_output_contract() {
-        let def = def_with(
-            vec![sub_pipeline_block(1, 0, 0, minimal_sub_def())],
-            vec![],
-        );
+        let def = def_with(vec![sub_pipeline_block(1, 0, 0, minimal_sub_def())], vec![]);
         let rt = build_runtime_table(&def);
         let sub_rid = rt.logical_to_runtime.get(&1).unwrap()[0];
         let stem = &rt.entries[sub_rid as usize].filename_stem;
@@ -8507,10 +9014,7 @@ position = [0, 0]
 
         let def = PipelineDefinition {
             initial_prompt: "test".into(),
-            blocks: vec![
-                sub_pipeline_block(1, 0, 0, sub_def),
-                block(2, 1, 0),
-            ],
+            blocks: vec![sub_pipeline_block(1, 0, 0, sub_def), block(2, 1, 0)],
             connections: vec![conn(1, 2)],
             session_configs: Vec::new(),
             loop_connections: vec![lconn(2, 1, 1)],
@@ -8642,8 +9146,7 @@ position = [0, 0]
         let sub_errors_log = output.run_dir().join("sub_1").join("_errors.log");
         assert!(
             sub_errors_log.exists(),
-            "_errors.log must exist in sub-pipeline run dir {0:?}",
-            sub_errors_log
+            "_errors.log must exist in sub-pipeline run dir {sub_errors_log:?}",
         );
         let log_content = std::fs::read_to_string(&sub_errors_log).unwrap();
         assert!(
@@ -8786,5 +9289,549 @@ position = [0, 0]
             events.iter().any(|e| matches!(e, ProgressEvent::AllDone)),
             "AllDone event must be emitted"
         );
+    }
+
+    // ── Scatter Queue Tests ──
+
+    #[test]
+    fn scatter_queue_basic_split() {
+        let output = "item1\n===SCATTER_ITEM===\nitem2\n===SCATTER_ITEM===\nitem3";
+        let mut q = ScatterQueue::from_output(output, "===SCATTER_ITEM===");
+        assert_eq!(q.total(), 3);
+        assert_eq!(q.remaining(), 3);
+
+        let first = q.pop().unwrap();
+        assert_eq!(first.index, 0);
+        assert_eq!(first.content, "item1");
+
+        let second = q.pop().unwrap();
+        assert_eq!(second.index, 1);
+        assert_eq!(second.content, "item2");
+
+        let third = q.pop().unwrap();
+        assert_eq!(third.index, 2);
+        assert_eq!(third.content, "item3");
+
+        assert!(q.pop().is_none());
+        assert!(q.is_empty());
+        assert_eq!(q.total(), 3); // total doesn't change
+    }
+
+    #[test]
+    fn scatter_queue_empty_input() {
+        let q = ScatterQueue::from_output("", "===SCATTER_ITEM===");
+        assert_eq!(q.total(), 0);
+        assert!(q.is_empty());
+    }
+
+    #[test]
+    fn scatter_queue_single_item_no_delimiter() {
+        let mut q = ScatterQueue::from_output("just one item", "===SCATTER_ITEM===");
+        assert_eq!(q.total(), 1);
+        let item = q.pop().unwrap();
+        assert_eq!(item.index, 0);
+        assert_eq!(item.content, "just one item");
+        assert!(q.pop().is_none());
+    }
+
+    #[test]
+    fn scatter_queue_trims_whitespace() {
+        let output =
+            "  a  \n===SCATTER_ITEM===\n  b  \n===SCATTER_ITEM===\n\n===SCATTER_ITEM===\n  c  ";
+        let mut q = ScatterQueue::from_output(output, "===SCATTER_ITEM===");
+        // Empty items after trimming are filtered out
+        assert_eq!(q.total(), 3);
+        assert_eq!(q.pop().unwrap().content, "a");
+        assert_eq!(q.pop().unwrap().content, "b");
+        assert_eq!(q.pop().unwrap().content, "c");
+    }
+
+    #[test]
+    fn scatter_queue_custom_delimiter() {
+        let output = "part1---part2---part3";
+        let mut q = ScatterQueue::from_output(output, "---");
+        assert_eq!(q.total(), 3);
+        assert_eq!(q.pop().unwrap().content, "part1");
+        assert_eq!(q.pop().unwrap().content, "part2");
+        assert_eq!(q.pop().unwrap().content, "part3");
+    }
+
+    #[test]
+    fn scatter_queue_fifo_ordering() {
+        let output = "first\n===SCATTER_ITEM===\nsecond\n===SCATTER_ITEM===\nthird";
+        let mut q = ScatterQueue::from_output(output, "===SCATTER_ITEM===");
+        assert_eq!(q.pop().unwrap().index, 0);
+        assert_eq!(q.pop().unwrap().index, 1);
+        assert_eq!(q.pop().unwrap().index, 2);
+        assert!(q.pop().is_none());
+    }
+
+    // ── Scatter Serialization Tests ──
+
+    #[test]
+    fn scatter_connection_serialization_roundtrip() {
+        let mut def = def_with(
+            vec![block(1, 0, 0), block(2, 1, 0)],
+            vec![{
+                let mut c = PipelineConnection::new(1, 2);
+                c.scatter = true;
+                c.scatter_delimiter = "|||".into();
+                c
+            }],
+        );
+        def.connections.push(PipelineConnection::new(1, 2)); // non-scatter won't duplicate — just for serialization test
+        def.connections.remove(1); // keep only scatter
+
+        let toml_str = toml::to_string(&def).unwrap();
+        assert!(toml_str.contains("scatter = true"));
+        assert!(toml_str.contains("scatter_delimiter = \"|||\""));
+
+        let round: PipelineDefinition = toml::from_str(&toml_str).unwrap();
+        assert!(round.connections[0].scatter);
+        assert_eq!(round.connections[0].scatter_delimiter, "|||");
+    }
+
+    #[test]
+    fn scatter_false_omitted_from_toml() {
+        let def = def_with(
+            vec![block(1, 0, 0), block(2, 1, 0)],
+            vec![PipelineConnection::new(1, 2)],
+        );
+        let toml_str = toml::to_string(&def).unwrap();
+        assert!(!toml_str.contains("scatter"));
+    }
+
+    #[test]
+    fn scatter_backward_compat_old_toml() {
+        // Old TOML without scatter fields should deserialize with scatter=false
+        let toml_str = r#"
+            initial_prompt = "test"
+            [[blocks]]
+            id = 1
+            name = "A"
+            agents = ["Claude"]
+            position = [0, 0]
+            [[blocks]]
+            id = 2
+            name = "B"
+            agents = ["Claude"]
+            position = [1, 0]
+            [[connections]]
+            from = 1
+            to = 2
+        "#;
+        let def: PipelineDefinition = toml::from_str(toml_str).unwrap();
+        assert!(!def.connections[0].scatter);
+        // scatter_delimiter should be the default
+        assert_eq!(def.connections[0].scatter_delimiter, "===SCATTER_ITEM===");
+    }
+
+    // ── Scatter Validation Tests ──
+
+    #[test]
+    fn scatter_validation_max_one_per_block() {
+        let mut def = def_with(vec![block(1, 0, 0), block(2, 1, 0), block(3, 2, 0)], vec![]);
+        let mut c1 = PipelineConnection::new(1, 3);
+        c1.scatter = true;
+        let mut c2 = PipelineConnection::new(2, 3);
+        c2.scatter = true;
+        def.connections = vec![c1, c2];
+        let result = validate_pipeline(&def);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("scatter connections"));
+    }
+
+    #[test]
+    fn scatter_validation_source_must_be_single_task() {
+        let mut def = def_with(
+            vec![
+                {
+                    let mut b = block(1, 0, 0);
+                    b.replicas = 2;
+                    b
+                },
+                block(2, 1, 0),
+            ],
+            vec![],
+        );
+        let mut c = PipelineConnection::new(1, 2);
+        c.scatter = true;
+        def.connections = vec![c];
+        let result = validate_pipeline(&def);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("logical_task_count"));
+    }
+
+    #[test]
+    fn scatter_validation_target_not_sub_pipeline() {
+        let mut def = def_with(vec![block(1, 0, 0)], vec![]);
+        let mut sub_block = block(2, 1, 0);
+        sub_block.sub_pipeline = Some(PipelineDefinition::default());
+        def.blocks.push(sub_block);
+        let mut c = PipelineConnection::new(1, 2);
+        c.scatter = true;
+        def.connections = vec![c];
+        let result = validate_pipeline(&def);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("sub-pipeline"));
+    }
+
+    #[test]
+    fn scatter_validation_forbidden_on_finalization() {
+        let mut def = def_with(vec![block(1, 0, 0)], vec![]);
+        def.finalization_blocks.push(block(10, 0, 1));
+        def.finalization_blocks.push(block(11, 1, 1));
+        let mut fc = PipelineConnection::new(10, 11);
+        fc.scatter = true;
+        def.finalization_connections = vec![fc];
+        let result = validate_pipeline(&def);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("finalization"));
+    }
+
+    // ── Scatter File Naming Tests ──
+
+    #[test]
+    fn scatter_replica_filename_pass_0() {
+        let info = RuntimeReplicaInfo {
+            runtime_id: 0,
+            source_block_id: 2,
+            replica_index: 0,
+            phase: RuntimePhase::Execution,
+            run_scope: None,
+            agent: "Claude".into(),
+            session_key: "k".into(),
+            display_label: "Fixer_b2_Claude_r0".into(),
+            filename_stem: "Fixer_b2_Claude_r0".into(),
+        };
+        assert_eq!(
+            scatter_replica_filename(&info, 3, 0),
+            "Fixer_b2_Claude_r0_item3.md"
+        );
+    }
+
+    #[test]
+    fn scatter_replica_filename_pass_gt_0() {
+        let info = RuntimeReplicaInfo {
+            runtime_id: 1,
+            source_block_id: 2,
+            replica_index: 1,
+            phase: RuntimePhase::Execution,
+            run_scope: None,
+            agent: "Claude".into(),
+            session_key: "k".into(),
+            display_label: "Fixer_b2_Claude_r1".into(),
+            filename_stem: "Fixer_b2_Claude_r1".into(),
+        };
+        assert_eq!(
+            scatter_replica_filename(&info, 5, 2),
+            "Fixer_b2_Claude_r1_item5_loop2.md"
+        );
+    }
+
+    #[test]
+    fn pipeline_connection_new_defaults_scatter_false() {
+        let c = PipelineConnection::new(1, 2);
+        assert!(!c.scatter);
+        assert_eq!(c.scatter_delimiter, DEFAULT_SCATTER_DELIMITER);
+    }
+
+    // ── H2 fix: upstream_of_non_scatter ──
+
+    #[test]
+    fn upstream_of_non_scatter_excludes_scatter_edges() {
+        let mut def = def_with(vec![block(1, 0, 0), block(2, 1, 0), block(3, 2, 0)], vec![]);
+        // Regular edge 1→3, scatter edge 2→3
+        def.connections.push(PipelineConnection::new(1, 3));
+        let mut sc = PipelineConnection::new(2, 3);
+        sc.scatter = true;
+        def.connections.push(sc);
+
+        // upstream_of includes both
+        let all = upstream_of(&def, 3);
+        assert_eq!(all.len(), 2);
+
+        // upstream_of_non_scatter excludes scatter
+        let non_scatter = upstream_of_non_scatter(&def, 3);
+        assert_eq!(non_scatter.len(), 1);
+        assert_eq!(non_scatter[0], 1);
+    }
+
+    #[test]
+    fn upstream_of_non_scatter_root_when_only_scatter() {
+        let mut def = def_with(vec![block(1, 0, 0), block(2, 1, 0)], vec![]);
+        let mut sc = PipelineConnection::new(1, 2);
+        sc.scatter = true;
+        def.connections.push(sc);
+
+        // Block 2 has upstream via upstream_of (scatter edge)
+        assert!(!upstream_of(&def, 2).is_empty());
+        // But is considered root by non-scatter version
+        assert!(upstream_of_non_scatter(&def, 2).is_empty());
+    }
+
+    // ── M3 fix: scatter target must be loop restart block ──
+
+    #[test]
+    fn scatter_validation_target_must_be_loop_restart_block() {
+        // Setup: blocks 4→1→2→3, loop 3→2, scatter 4→2 (target is loop restart ✓)
+        let mut def = def_with(
+            vec![
+                block(4, 0, 0),
+                block(1, 1, 0),
+                block(2, 2, 0),
+                block(3, 3, 0),
+            ],
+            vec![
+                PipelineConnection::new(4, 1),
+                PipelineConnection::new(1, 2),
+                PipelineConnection::new(2, 3),
+            ],
+        );
+        def.loop_connections.push(LoopConnection {
+            from: 3,
+            to: 2,
+            count: 2,
+            prompt: String::new(),
+            break_agent: String::new(),
+            break_condition: String::new(),
+        });
+        let mut sc = PipelineConnection::new(4, 2);
+        sc.scatter = true;
+        def.connections.push(sc);
+
+        // scatter target = loop_to (2) → valid
+        if let Err(e) = validate_pipeline(&def) {
+            panic!("expected valid but got: {e}");
+        }
+
+        // Now make scatter target = 3 (inside loop but NOT the restart block)
+        def.connections.pop();
+        let mut sc2 = PipelineConnection::new(4, 3);
+        sc2.scatter = true;
+        def.connections.push(sc2);
+        let result = validate_pipeline(&def);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("not the loop restart block"));
+    }
+
+    // ── L2 fix: feed collection matches _item filenames ──
+
+    #[test]
+    fn scatter_item_filename_matches_feed_pattern() {
+        // The feed collection closure matches _item suffixes
+        let stem = "Block1_b1_Claude_r0";
+        let item_name = format!("{stem}_item3.md");
+        let item_loop_name = format!("{stem}_item2_loop1.md");
+        let base_name = format!("{stem}.md");
+        let loop_name = format!("{stem}_loop2.md");
+
+        let filename_stems = [stem.to_string()];
+        let check = |name: &str| -> bool {
+            filename_stems.iter().any(|s| {
+                if !name.starts_with(s) {
+                    return false;
+                }
+                let remainder = &name[s.len()..];
+                remainder == ".md"
+                    || (remainder.starts_with("_loop") && remainder.ends_with(".md"))
+                    || (remainder.starts_with("_iter") && remainder.ends_with(".md"))
+                    || (remainder.starts_with("_item") && remainder.ends_with(".md"))
+            })
+        };
+
+        assert!(check(&base_name));
+        assert!(check(&loop_name));
+        assert!(check(&item_name));
+        assert!(check(&item_loop_name));
+        assert!(!check("unrelated.md"));
+    }
+
+    // ── cli_upstream_filenames: prefix collision and sort order ──
+
+    #[test]
+    fn cli_upstream_filenames_no_prefix_collision() {
+        // Stems _r1 and _r10 must not cross-match
+        let dir = tempfile::tempdir().unwrap();
+        let run_dir = dir.path();
+
+        // Create files for r1 (items 0,1) and r10 (items 0,1)
+        std::fs::write(run_dir.join("B_b1_A_r1_item0.md"), "r1i0").unwrap();
+        std::fs::write(run_dir.join("B_b1_A_r1_item1.md"), "r1i1").unwrap();
+        std::fs::write(run_dir.join("B_b1_A_r10_item0.md"), "r10i0").unwrap();
+        std::fs::write(run_dir.join("B_b1_A_r10_item1.md"), "r10i1").unwrap();
+
+        let mut def = def_with(vec![block(1, 0, 0), block(2, 1, 0)], vec![]);
+        let mut sc = PipelineConnection::new(1, 2);
+        sc.scatter = true;
+        def.connections.push(sc);
+
+        let btl = HashMap::new();
+        let blp = HashMap::new();
+
+        // Query for r1 stem — must NOT match r10 files
+        let info_r1 = RuntimeReplicaInfo {
+            runtime_id: 0,
+            source_block_id: 2,
+            replica_index: 1,
+            phase: RuntimePhase::Execution,
+            run_scope: None,
+            agent: "A".into(),
+            session_key: "k".into(),
+            display_label: "B_b1_A_r1".into(),
+            filename_stem: "B_b1_A_r1".into(),
+        };
+        let files_r1 = cli_upstream_filenames(&info_r1, 2, &def, &btl, &blp, run_dir);
+        assert_eq!(
+            files_r1.len(),
+            2,
+            "r1 should match 2 files, got: {files_r1:?}"
+        );
+        assert!(files_r1.iter().all(|f| f.contains("_r1_item")));
+        assert!(!files_r1.iter().any(|f| f.contains("_r10")));
+
+        // Query for r10 stem — must NOT match r1 files
+        let info_r10 = RuntimeReplicaInfo {
+            runtime_id: 1,
+            source_block_id: 2,
+            replica_index: 10,
+            phase: RuntimePhase::Execution,
+            run_scope: None,
+            agent: "A".into(),
+            session_key: "k".into(),
+            display_label: "B_b1_A_r10".into(),
+            filename_stem: "B_b1_A_r10".into(),
+        };
+        let files_r10 = cli_upstream_filenames(&info_r10, 2, &def, &btl, &blp, run_dir);
+        assert_eq!(
+            files_r10.len(),
+            2,
+            "r10 should match 2 files, got: {files_r10:?}"
+        );
+        assert!(files_r10.iter().all(|f| f.contains("_r10_item")));
+    }
+
+    #[test]
+    fn cli_upstream_filenames_numeric_sort() {
+        let dir = tempfile::tempdir().unwrap();
+        let run_dir = dir.path();
+
+        // Create 12 item files (out of order on disk)
+        for i in [10, 2, 0, 11, 1, 5, 9, 3, 8, 4, 7, 6] {
+            std::fs::write(run_dir.join(format!("B_b1_A_r0_item{i}.md")), "x").unwrap();
+        }
+
+        let mut def = def_with(vec![block(1, 0, 0), block(2, 1, 0)], vec![]);
+        let mut sc = PipelineConnection::new(1, 2);
+        sc.scatter = true;
+        def.connections.push(sc);
+
+        let btl = HashMap::new();
+        let blp = HashMap::new();
+
+        let info = RuntimeReplicaInfo {
+            runtime_id: 0,
+            source_block_id: 2,
+            replica_index: 0,
+            phase: RuntimePhase::Execution,
+            run_scope: None,
+            agent: "A".into(),
+            session_key: "k".into(),
+            display_label: "B_b1_A_r0".into(),
+            filename_stem: "B_b1_A_r0".into(),
+        };
+        let files = cli_upstream_filenames(&info, 2, &def, &btl, &blp, run_dir);
+        assert_eq!(files.len(), 12);
+        // Verify numeric order: item0, item1, ..., item11
+        for (i, f) in files.iter().enumerate() {
+            assert!(
+                f.contains(&format!("_item{i}.")),
+                "Expected item{i} at position {i}, got {f}"
+            );
+        }
+    }
+
+    #[test]
+    fn cli_upstream_filenames_stem_with_loop_in_name() {
+        // Block named "fix_loop" produces stem "fix_loop_b2_A_r0".
+        // Pass-0 scatter files like "fix_loop_b2_A_r0_item0.md" contain "_loop"
+        // in the stem but must NOT be rejected by the pass-0 filter.
+        let dir = tempfile::tempdir().unwrap();
+        let run_dir = dir.path();
+
+        std::fs::write(run_dir.join("fix_loop_b2_A_r0_item0.md"), "x").unwrap();
+        std::fs::write(run_dir.join("fix_loop_b2_A_r0_item1.md"), "x").unwrap();
+        // Also create a real loop file that SHOULD be rejected on pass 0
+        std::fs::write(run_dir.join("fix_loop_b2_A_r0_item0_loop1.md"), "x").unwrap();
+
+        let mut def = def_with(vec![block(1, 0, 0), block(2, 1, 0)], vec![]);
+        let mut sc = PipelineConnection::new(1, 2);
+        sc.scatter = true;
+        def.connections.push(sc);
+
+        let btl = HashMap::new();
+        let blp = HashMap::new(); // pass 0
+
+        let info = RuntimeReplicaInfo {
+            runtime_id: 0,
+            source_block_id: 2,
+            replica_index: 0,
+            phase: RuntimePhase::Execution,
+            run_scope: None,
+            agent: "A".into(),
+            session_key: "k".into(),
+            display_label: "fix_loop_b2_A_r0".into(),
+            filename_stem: "fix_loop_b2_A_r0".into(),
+        };
+        let files = cli_upstream_filenames(&info, 2, &def, &btl, &blp, run_dir);
+        assert_eq!(files.len(), 2, "Should find 2 pass-0 files, got: {files:?}");
+        assert!(files.iter().all(|f| !f.contains("_loop1")));
+    }
+
+    #[test]
+    fn cli_upstream_filenames_loop_pass_gt_0() {
+        // On loop pass 2, only _item{N}_loop2.md files should be returned.
+        let dir = tempfile::tempdir().unwrap();
+        let run_dir = dir.path();
+
+        // Pass 0 files (should be excluded)
+        std::fs::write(run_dir.join("B_b2_A_r0_item0.md"), "x").unwrap();
+        std::fs::write(run_dir.join("B_b2_A_r0_item1.md"), "x").unwrap();
+        // Pass 1 files (should be excluded)
+        std::fs::write(run_dir.join("B_b2_A_r0_item2_loop1.md"), "x").unwrap();
+        // Pass 2 files (should be included)
+        std::fs::write(run_dir.join("B_b2_A_r0_item3_loop2.md"), "x").unwrap();
+        std::fs::write(run_dir.join("B_b2_A_r0_item4_loop2.md"), "x").unwrap();
+
+        let mut def = def_with(vec![block(1, 0, 0), block(2, 1, 0)], vec![]);
+        let mut sc = PipelineConnection::new(1, 2);
+        sc.scatter = true;
+        def.connections.push(sc);
+
+        let btl = HashMap::new();
+        let mut blp = HashMap::new();
+        blp.insert(2, 2u32); // upstream block 2 is on loop pass 2
+
+        let info = RuntimeReplicaInfo {
+            runtime_id: 0,
+            source_block_id: 2,
+            replica_index: 0,
+            phase: RuntimePhase::Execution,
+            run_scope: None,
+            agent: "A".into(),
+            session_key: "k".into(),
+            display_label: "B_b2_A_r0".into(),
+            filename_stem: "B_b2_A_r0".into(),
+        };
+        let files = cli_upstream_filenames(&info, 2, &def, &btl, &blp, run_dir);
+        assert_eq!(files.len(), 2, "Should find 2 loop-2 files, got: {files:?}");
+        // Verify numeric ordering: item3 before item4
+        assert!(files[0].contains("_item3_loop2"));
+        assert!(files[1].contains("_item4_loop2"));
     }
 }

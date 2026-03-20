@@ -93,14 +93,12 @@ pub(super) fn start_pipeline_execution(app: &mut App) {
                 match avail_agents.get(agent_name) {
                     Some(true) => {}
                     Some(false) => {
-                        agent_error = Some(format!(
-                            "{agent_name} is not available (block {block_id})"
-                        ));
+                        agent_error =
+                            Some(format!("{agent_name} is not available (block {block_id})"));
                     }
                     None => {
-                        agent_error = Some(format!(
-                            "Agent '{agent_name}' not found (block {block_id})"
-                        ));
+                        agent_error =
+                            Some(format!("Agent '{agent_name}' not found (block {block_id})"));
                     }
                 }
             });

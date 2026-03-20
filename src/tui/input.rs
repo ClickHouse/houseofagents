@@ -583,8 +583,12 @@ pub(super) fn handle_pipeline_key(app: &mut App, key: KeyEvent) {
         handle_pipeline_feed_list_key(app, key);
         return;
     }
+    if app.pipeline.pipeline_scatter_edit {
+        handle_pipeline_scatter_edit_key(app, key);
+        return;
+    }
     if app.pipeline.pipeline_removing_conn {
-        handle_pipeline_remove_conn_key(app, key);
+        handle_pipeline_conn_action_key(app, key);
         return;
     }
     if app.pipeline.pipeline_loop_connecting_from.is_some() {
@@ -639,7 +643,7 @@ pub(super) fn handle_pipeline_key(app: &mut App, key: KeyEvent) {
                             app.pipeline
                                 .pipeline_def
                                 .finalization_connections
-                                .push(pipeline_mod::PipelineConnection { from, to });
+                                .push(pipeline_mod::PipelineConnection::new(from, to));
                             app.pipeline.pipeline_connecting_from = None;
                         }
                     } else {
@@ -662,7 +666,7 @@ pub(super) fn handle_pipeline_key(app: &mut App, key: KeyEvent) {
                             app.pipeline
                                 .pipeline_def
                                 .connections
-                                .push(pipeline_mod::PipelineConnection { from, to });
+                                .push(pipeline_mod::PipelineConnection::new(from, to));
                             let warnings =
                                 pipeline_mod::prune_invalid_loops(&mut app.pipeline.pipeline_def);
                             if !warnings.is_empty() {
@@ -1684,7 +1688,13 @@ pub(super) fn handle_pipeline_edit_key(app: &mut App, key: KeyEvent) {
             let is_sub = app
                 .pipeline
                 .pipeline_block_cursor
-                .and_then(|sel| app.pipeline.pipeline_def.blocks.iter().find(|b| b.id == sel))
+                .and_then(|sel| {
+                    app.pipeline
+                        .pipeline_def
+                        .blocks
+                        .iter()
+                        .find(|b| b.id == sel)
+                })
                 .is_some_and(|b| b.is_sub_pipeline());
             if is_sub {
                 return;
@@ -2191,6 +2201,8 @@ fn load_pipeline_by_filtered_cursor(app: &mut App) {
                 app.pipeline.pipeline_feed_edit_field = PipelineFeedEditField::Collection;
                 app.pipeline.pipeline_show_loop_edit = false;
                 app.pipeline.pipeline_loop_edit_target = None;
+                app.pipeline.pipeline_scatter_edit = false;
+                app.pipeline.pipeline_scatter_edit_conn_idx = 0;
                 close_load_dialog(app);
             }
             Err(e) => {
@@ -2200,7 +2212,7 @@ fn load_pipeline_by_filtered_cursor(app: &mut App) {
     }
 }
 
-pub(super) fn handle_pipeline_remove_conn_key(app: &mut App, key: KeyEvent) {
+pub(super) fn handle_pipeline_conn_action_key(app: &mut App, key: KeyEvent) {
     let sel = app.pipeline.pipeline_block_cursor.unwrap_or(0);
 
     enum ConnRef {
@@ -2272,6 +2284,129 @@ pub(super) fn handle_pipeline_remove_conn_key(app: &mut App, key: KeyEvent) {
                 }
             }
             app.pipeline.pipeline_removing_conn = false;
+        }
+        KeyCode::Char('s') => {
+            if let Some(conn_ref) = refs.get(app.pipeline.pipeline_conn_cursor) {
+                match conn_ref {
+                    ConnRef::Regular(idx) => {
+                        let idx = *idx;
+                        let conn = &mut app.pipeline.pipeline_def.connections[idx];
+                        if conn.scatter {
+                            // Already scatter — reopen delimiter edit popup for re-editing
+                            let current_delim = conn.scatter_delimiter.clone();
+                            let delim = if current_delim.is_empty() {
+                                crate::execution::pipeline::DEFAULT_SCATTER_DELIMITER.to_string()
+                            } else {
+                                current_delim
+                            };
+                            app.pipeline.pipeline_scatter_edit = true;
+                            app.pipeline.pipeline_scatter_edit_is_new = false;
+                            app.pipeline.pipeline_scatter_delimiter_buf = delim.clone();
+                            app.pipeline.pipeline_scatter_delimiter_cursor = delim.len();
+                            app.pipeline.pipeline_scatter_edit_conn_idx = idx;
+                            app.pipeline.pipeline_removing_conn = false;
+                        } else {
+                            // Toggle on — open delimiter edit popup
+                            conn.scatter = true;
+                            let default_delim =
+                                crate::execution::pipeline::DEFAULT_SCATTER_DELIMITER.to_string();
+                            conn.scatter_delimiter = default_delim.clone();
+                            app.pipeline.pipeline_scatter_edit = true;
+                            app.pipeline.pipeline_scatter_edit_is_new = true;
+                            app.pipeline.pipeline_scatter_delimiter_buf = default_delim.clone();
+                            app.pipeline.pipeline_scatter_delimiter_cursor = default_delim.len();
+                            app.pipeline.pipeline_scatter_edit_conn_idx = idx;
+                            app.pipeline.pipeline_removing_conn = false;
+                        }
+                    }
+                    ConnRef::Loop(_) | ConnRef::Finalization(_) => {
+                        app.error_modal =
+                            Some("Scatter not available for loop/finalization connections".into());
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_pipeline_scatter_edit_key(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => {
+            if app.pipeline.pipeline_scatter_edit_is_new {
+                // Cancel new scatter — revert to non-scatter
+                let idx = app.pipeline.pipeline_scatter_edit_conn_idx;
+                if idx < app.pipeline.pipeline_def.connections.len() {
+                    let conn = &mut app.pipeline.pipeline_def.connections[idx];
+                    conn.scatter = false;
+                    conn.scatter_delimiter =
+                        crate::execution::pipeline::DEFAULT_SCATTER_DELIMITER.into();
+                }
+            }
+            // Re-edit: just close popup, keep existing scatter + delimiter unchanged
+            app.pipeline.pipeline_scatter_edit = false;
+        }
+        KeyCode::Enter => {
+            // Save delimiter
+            let idx = app.pipeline.pipeline_scatter_edit_conn_idx;
+            if idx < app.pipeline.pipeline_def.connections.len() {
+                let buf = app.pipeline.pipeline_scatter_delimiter_buf.clone();
+                app.pipeline.pipeline_def.connections[idx].scatter_delimiter = buf;
+            }
+            app.pipeline.pipeline_scatter_edit = false;
+        }
+        KeyCode::Char(c) => {
+            let pos = app.pipeline.pipeline_scatter_delimiter_cursor;
+            app.pipeline.pipeline_scatter_delimiter_buf.insert(pos, c);
+            app.pipeline.pipeline_scatter_delimiter_cursor += c.len_utf8();
+        }
+        KeyCode::Backspace => {
+            let pos = app.pipeline.pipeline_scatter_delimiter_cursor;
+            if pos > 0 {
+                let prev = app.pipeline.pipeline_scatter_delimiter_buf[..pos]
+                    .chars()
+                    .last()
+                    .map(|c| c.len_utf8())
+                    .unwrap_or(0);
+                app.pipeline
+                    .pipeline_scatter_delimiter_buf
+                    .drain(pos - prev..pos);
+                app.pipeline.pipeline_scatter_delimiter_cursor -= prev;
+            }
+        }
+        KeyCode::Left => {
+            let pos = app.pipeline.pipeline_scatter_delimiter_cursor;
+            if pos > 0 {
+                let prev = app.pipeline.pipeline_scatter_delimiter_buf[..pos]
+                    .chars()
+                    .last()
+                    .map(|c| c.len_utf8())
+                    .unwrap_or(0);
+                app.pipeline.pipeline_scatter_delimiter_cursor -= prev;
+            }
+        }
+        KeyCode::Right => {
+            let pos = app.pipeline.pipeline_scatter_delimiter_cursor;
+            let len = app.pipeline.pipeline_scatter_delimiter_buf.len();
+            if pos < len {
+                let next = app.pipeline.pipeline_scatter_delimiter_buf[pos..]
+                    .chars()
+                    .next()
+                    .map(|c| c.len_utf8())
+                    .unwrap_or(0);
+                app.pipeline.pipeline_scatter_delimiter_cursor += next;
+            }
+        }
+        KeyCode::Delete => {
+            // Disable scatter entirely
+            let idx = app.pipeline.pipeline_scatter_edit_conn_idx;
+            if idx < app.pipeline.pipeline_def.connections.len() {
+                let conn = &mut app.pipeline.pipeline_def.connections[idx];
+                conn.scatter = false;
+                conn.scatter_delimiter =
+                    crate::execution::pipeline::DEFAULT_SCATTER_DELIMITER.into();
+            }
+            app.pipeline.pipeline_scatter_edit = false;
         }
         _ => {}
     }
