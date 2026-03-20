@@ -4257,6 +4257,57 @@ async fn discover_final_outputs_async_sub_pipeline_loop_variants() {
 }
 
 #[test]
+fn tab_cycles_prompt_and_builder_inside_sub_pipeline() {
+    use crate::execution::pipeline::{PipelineBlock, PipelineDefinition};
+    let mut app = test_app();
+    app.screen = Screen::Pipeline;
+    app.pipeline.pipeline_focus = PipelineFocus::Builder;
+    app.pipeline.pipeline_def.blocks.push(PipelineBlock {
+        id: 1,
+        name: "MySub".into(),
+        agents: vec![],
+        prompt: String::new(),
+        profiles: vec![],
+        session_id: None,
+        position: (0, 0),
+        replicas: 1,
+        sub_pipeline: Some(PipelineDefinition::default()),
+    });
+    app.pipeline.pipeline_block_cursor = Some(1);
+    app.pipeline.pipeline_next_id = 2;
+
+    // Drill into sub-pipeline
+    handle_key(&mut app, key(KeyCode::Char('e')));
+    assert!(
+        !app.pipeline.sub_pipeline_stack.is_empty(),
+        "should be inside sub-pipeline"
+    );
+    assert_eq!(app.pipeline.pipeline_focus, PipelineFocus::Builder);
+
+    // Tab from Builder → InitialPrompt
+    handle_key(&mut app, key(KeyCode::Tab));
+    assert_eq!(app.pipeline.pipeline_focus, PipelineFocus::InitialPrompt);
+
+    // Tab from InitialPrompt → Builder
+    handle_key(&mut app, key(KeyCode::Tab));
+    assert_eq!(app.pipeline.pipeline_focus, PipelineFocus::Builder);
+
+    // BackTab from Builder → InitialPrompt
+    handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
+    );
+    assert_eq!(app.pipeline.pipeline_focus, PipelineFocus::InitialPrompt);
+
+    // BackTab from InitialPrompt → Builder
+    handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
+    );
+    assert_eq!(app.pipeline.pipeline_focus, PipelineFocus::Builder);
+}
+
+#[test]
 fn n_key_opens_rename_popup_for_sub_pipeline_block() {
     use crate::execution::pipeline::{PipelineBlock, PipelineDefinition};
     let mut app = test_app();
