@@ -856,6 +856,15 @@ fn build_event_items(app: &App) -> Vec<ListItem<'_>> {
             loop_pass: u32,
             status: AgentStatus,
         },
+        SubBlock {
+            parent_label: String,
+            inner_label: String,
+            #[allow(dead_code)]
+            inner_block_id: u32,
+            loop_pass: u32,
+            inner_loop_pass: u32,
+            status: AgentStatus,
+        },
         Log {
             name: String,
             message: String,
@@ -867,6 +876,7 @@ fn build_event_items(app: &App) -> Vec<ListItem<'_>> {
     let mut rows: Vec<Row> = Vec::new();
     let mut agent_row_idx: HashMap<(String, u32), usize> = HashMap::new();
     let mut block_row_idx: HashMap<(u32, u32, u32), usize> = HashMap::new();
+    let mut sub_block_row_idx: HashMap<(u32, u32, u32, u32), usize> = HashMap::new();
 
     for evt in app.activity_log() {
         match evt {
@@ -1057,6 +1067,101 @@ fn build_event_items(app: &App) -> Vec<ListItem<'_>> {
                 }
             }
             ProgressEvent::AgentStreamChunk { .. } | ProgressEvent::BlockStreamChunk { .. } => {}
+            ProgressEvent::SubBlockStarted {
+                parent_block_id,
+                inner_block_id,
+                inner_label,
+                parent_label,
+                loop_pass,
+                inner_loop_pass,
+                ..
+            } => {
+                let key = (
+                    *parent_block_id,
+                    *loop_pass,
+                    *inner_block_id,
+                    *inner_loop_pass,
+                );
+                if let Some(idx) = sub_block_row_idx.get(&key).copied() {
+                    if let Row::SubBlock { status, .. } = &mut rows[idx] {
+                        *status = AgentStatus::Thinking;
+                    }
+                } else {
+                    sub_block_row_idx.insert(key, rows.len());
+                    rows.push(Row::SubBlock {
+                        parent_label: parent_label.clone(),
+                        inner_label: inner_label.clone(),
+                        inner_block_id: *inner_block_id,
+                        loop_pass: *loop_pass,
+                        inner_loop_pass: *inner_loop_pass,
+                        status: AgentStatus::Thinking,
+                    });
+                }
+            }
+            ProgressEvent::SubBlockFinished {
+                parent_block_id,
+                inner_block_id,
+                inner_label,
+                parent_label,
+                loop_pass,
+                inner_loop_pass,
+                ..
+            } => {
+                let key = (
+                    *parent_block_id,
+                    *loop_pass,
+                    *inner_block_id,
+                    *inner_loop_pass,
+                );
+                if let Some(idx) = sub_block_row_idx.get(&key).copied() {
+                    if let Row::SubBlock { status, .. } = &mut rows[idx] {
+                        *status = AgentStatus::Finished;
+                    }
+                } else {
+                    sub_block_row_idx.insert(key, rows.len());
+                    rows.push(Row::SubBlock {
+                        parent_label: parent_label.clone(),
+                        inner_label: inner_label.clone(),
+                        inner_block_id: *inner_block_id,
+                        loop_pass: *loop_pass,
+                        inner_loop_pass: *inner_loop_pass,
+                        status: AgentStatus::Finished,
+                    });
+                }
+            }
+            ProgressEvent::SubBlockError {
+                parent_block_id,
+                inner_block_id,
+                inner_label,
+                parent_label,
+                loop_pass,
+                inner_loop_pass,
+                error,
+                ..
+            } => {
+                let key = (
+                    *parent_block_id,
+                    *loop_pass,
+                    *inner_block_id,
+                    *inner_loop_pass,
+                );
+                let err = truncate_line(error, 100);
+                if let Some(idx) = sub_block_row_idx.get(&key).copied() {
+                    if let Row::SubBlock { status, .. } = &mut rows[idx] {
+                        *status = AgentStatus::Error(err);
+                    }
+                } else {
+                    sub_block_row_idx.insert(key, rows.len());
+                    rows.push(Row::SubBlock {
+                        parent_label: parent_label.clone(),
+                        inner_label: inner_label.clone(),
+                        inner_block_id: *inner_block_id,
+                        loop_pass: *loop_pass,
+                        inner_loop_pass: *inner_loop_pass,
+                        status: AgentStatus::Error(err),
+                    });
+                }
+            }
         }
     }
 
@@ -1069,7 +1174,9 @@ fn build_event_items(app: &App) -> Vec<ListItem<'_>> {
     {
         for row in &mut rows {
             match row {
-                Row::Agent { status, .. } | Row::Block { status, .. } => {
+                Row::Agent { status, .. }
+                | Row::Block { status, .. }
+                | Row::SubBlock { status, .. } => {
                     if matches!(status, AgentStatus::Thinking) {
                         *status = AgentStatus::Cancelled;
                     }
@@ -1146,6 +1253,43 @@ fn build_event_items(app: &App) -> Vec<ListItem<'_>> {
                         Span::styled("\u{2717} ", Style::default().fg(Color::Yellow)),
                         Span::styled(
                             format!("{label} cancelled{suffix}"),
+                            Style::default().fg(Color::Yellow),
+                        ),
+                    ]))),
+                }
+            }
+            Row::SubBlock {
+                parent_label,
+                inner_label,
+                loop_pass,
+                inner_loop_pass,
+                status,
+                ..
+            } => {
+                let suffix = match (loop_pass, inner_loop_pass) {
+                    (0, 0) => String::new(),
+                    (outer, 0) => format!(" (pass {outer})"),
+                    (0, inner) => format!(" (loop {inner})"),
+                    (outer, inner) => format!(" (pass {outer}, loop {inner})"),
+                };
+                let display = format!("{parent_label} \u{203a} {inner_label}");
+                match status {
+                    AgentStatus::Thinking => items.push(ListItem::new(Line::from(vec![
+                        Span::styled(format!("  {spinner} "), Style::default().fg(Color::Cyan)),
+                        Span::raw(format!("{display} thinking{suffix}")),
+                    ]))),
+                    AgentStatus::Finished => items.push(ListItem::new(Line::from(vec![
+                        Span::styled("  \u{2713} ", Style::default().fg(Color::Green)),
+                        Span::raw(format!("{display} finished{suffix}")),
+                    ]))),
+                    AgentStatus::Error(err) => items.push(ListItem::new(Line::from(vec![
+                        Span::styled("  \u{2717} ", Style::default().fg(Color::Red)),
+                        Span::raw(format!("{display}{suffix}: {err}")),
+                    ]))),
+                    AgentStatus::Cancelled => items.push(ListItem::new(Line::from(vec![
+                        Span::styled("  \u{2717} ", Style::default().fg(Color::Yellow)),
+                        Span::styled(
+                            format!("{display} cancelled{suffix}"),
                             Style::default().fg(Color::Yellow),
                         ),
                     ]))),
@@ -1264,10 +1408,7 @@ fn current_status(app: &App) -> String {
     }
 
     if app.selected_mode == ExecutionMode::Pipeline {
-        let active_blocks = app
-            .active_block_labels()
-            .map(str::to_string)
-            .collect::<Vec<_>>();
+        let active_blocks = app.active_block_labels_enriched().collect::<Vec<_>>();
         return if active_blocks.is_empty() {
             "Waiting...".into()
         } else {
@@ -1756,5 +1897,397 @@ mod tests {
         // With expected_total_steps set, use that
         a.running.expected_total_steps = 10;
         assert_eq!(compute_total_steps(&a), 10);
+    }
+
+    // -----------------------------------------------------------------------
+    // Sub-block progress tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sub_block_rows_appear_nested() {
+        let mut a = app();
+        a.running.is_running = true;
+        push_events(
+            &mut a,
+            vec![
+                ProgressEvent::BlockStarted {
+                    block_id: 1,
+                    agent_name: "[sub]".into(),
+                    label: "Parent".into(),
+                    iteration: 0,
+                    loop_pass: 0,
+                },
+                ProgressEvent::SubBlockStarted {
+                    parent_block_id: 1,
+                    inner_block_id: 10,
+                    inner_label: "InnerA".into(),
+                    parent_label: "Parent".into(),
+                    iteration: 0,
+                    loop_pass: 0,
+                    inner_loop_pass: 0,
+                },
+                ProgressEvent::SubBlockFinished {
+                    parent_block_id: 1,
+                    inner_block_id: 10,
+                    inner_label: "InnerA".into(),
+                    parent_label: "Parent".into(),
+                    iteration: 0,
+                    loop_pass: 0,
+                    inner_loop_pass: 0,
+                },
+                ProgressEvent::SubBlockStarted {
+                    parent_block_id: 1,
+                    inner_block_id: 11,
+                    inner_label: "InnerB".into(),
+                    parent_label: "Parent".into(),
+                    iteration: 0,
+                    loop_pass: 0,
+                    inner_loop_pass: 0,
+                },
+            ],
+        );
+        let items = build_event_items(&a);
+        let joined: String = items.iter().map(|i| format!("{i:?}")).collect();
+        assert!(joined.contains("InnerA"), "expected InnerA in: {joined}");
+        assert!(joined.contains("InnerB"), "expected InnerB in: {joined}");
+        assert!(
+            joined.contains("finished"),
+            "expected finished for InnerA in: {joined}"
+        );
+        assert!(
+            joined.contains("thinking"),
+            "expected thinking for InnerB in: {joined}"
+        );
+        assert!(
+            joined.contains("\u{203a}"),
+            "expected \u{203a} separator in: {joined}"
+        );
+    }
+
+    #[test]
+    fn sub_block_cancellation_marks_thinking_sub_blocks() {
+        let mut a = app();
+        a.running.is_running = false;
+        a.running
+            .cancel_flag
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        push_events(
+            &mut a,
+            vec![ProgressEvent::SubBlockStarted {
+                parent_block_id: 1,
+                inner_block_id: 10,
+                inner_label: "InnerA".into(),
+                parent_label: "Parent".into(),
+                iteration: 0,
+                loop_pass: 0,
+                inner_loop_pass: 0,
+            }],
+        );
+        let items = build_event_items(&a);
+        let joined: String = items.iter().map(|i| format!("{i:?}")).collect();
+        assert!(
+            joined.contains("cancelled"),
+            "expected cancelled in: {joined}"
+        );
+        assert!(
+            !joined.contains("thinking"),
+            "expected no thinking in: {joined}"
+        );
+    }
+
+    #[test]
+    fn concurrent_inner_blocks_show_enriched_label() {
+        let mut a = app();
+        a.running.is_running = true;
+        a.selected_mode = ExecutionMode::Pipeline;
+        push_events(
+            &mut a,
+            vec![
+                ProgressEvent::BlockStarted {
+                    block_id: 1,
+                    agent_name: "[sub]".into(),
+                    label: "Parent".into(),
+                    iteration: 0,
+                    loop_pass: 0,
+                },
+                ProgressEvent::SubBlockStarted {
+                    parent_block_id: 1,
+                    inner_block_id: 10,
+                    inner_label: "A".into(),
+                    parent_label: "Parent".into(),
+                    iteration: 0,
+                    loop_pass: 0,
+                    inner_loop_pass: 0,
+                },
+                ProgressEvent::SubBlockStarted {
+                    parent_block_id: 1,
+                    inner_block_id: 11,
+                    inner_label: "B".into(),
+                    parent_label: "Parent".into(),
+                    iteration: 0,
+                    loop_pass: 0,
+                    inner_loop_pass: 0,
+                },
+            ],
+        );
+        // Both should appear in activity list
+        let items = build_event_items(&a);
+        let joined: String = items.iter().map(|i| format!("{i:?}")).collect();
+        assert!(joined.contains("A"), "expected A in: {joined}");
+        assert!(joined.contains("B"), "expected B in: {joined}");
+        // Status bar should show enriched label
+        let s = current_status(&a);
+        assert!(s.contains("\u{203a}"), "expected \u{203a} in status: {s}");
+        assert!(s.contains("+1 more"), "expected (+1 more) in status: {s}");
+    }
+
+    #[test]
+    fn inner_loop_repeats_produce_separate_rows() {
+        let mut a = app();
+        a.running.is_running = true;
+        push_events(
+            &mut a,
+            vec![
+                ProgressEvent::SubBlockStarted {
+                    parent_block_id: 1,
+                    inner_block_id: 5,
+                    inner_label: "Inner".into(),
+                    parent_label: "Parent".into(),
+                    iteration: 0,
+                    loop_pass: 0,
+                    inner_loop_pass: 0,
+                },
+                ProgressEvent::SubBlockFinished {
+                    parent_block_id: 1,
+                    inner_block_id: 5,
+                    inner_label: "Inner".into(),
+                    parent_label: "Parent".into(),
+                    iteration: 0,
+                    loop_pass: 0,
+                    inner_loop_pass: 0,
+                },
+                ProgressEvent::SubBlockStarted {
+                    parent_block_id: 1,
+                    inner_block_id: 5,
+                    inner_label: "Inner".into(),
+                    parent_label: "Parent".into(),
+                    iteration: 0,
+                    loop_pass: 0,
+                    inner_loop_pass: 1,
+                },
+            ],
+        );
+        let items = build_event_items(&a);
+        // Should have 2 SubBlock rows (different inner_loop_pass)
+        let sub_count = items
+            .iter()
+            .filter(|i| format!("{i:?}").contains("Inner"))
+            .count();
+        assert_eq!(sub_count, 2, "expected 2 sub-block rows, got {sub_count}");
+    }
+
+    #[test]
+    fn sub_block_error_is_non_fatal() {
+        let mut a = app();
+        a.running.is_running = true;
+        push_events(
+            &mut a,
+            vec![
+                ProgressEvent::BlockStarted {
+                    block_id: 1,
+                    agent_name: "[sub]".into(),
+                    label: "Parent".into(),
+                    iteration: 0,
+                    loop_pass: 0,
+                },
+                ProgressEvent::SubBlockError {
+                    parent_block_id: 1,
+                    inner_block_id: 10,
+                    inner_label: "InnerA".into(),
+                    parent_label: "Parent".into(),
+                    iteration: 0,
+                    loop_pass: 0,
+                    inner_loop_pass: 0,
+                    error: "inner failed".into(),
+                    details: None,
+                    is_skip: false,
+                },
+                ProgressEvent::BlockFinished {
+                    block_id: 1,
+                    agent_name: "[sub]".into(),
+                    label: "Parent".into(),
+                    iteration: 0,
+                    loop_pass: 0,
+                },
+            ],
+        );
+        // completed_steps should be 1 (from parent BlockFinished only)
+        assert_eq!(a.completed_steps(), 1);
+        // run_error should be None — SubBlockError is informational
+        assert!(a.running.run_error.is_none());
+    }
+
+    #[test]
+    fn status_bar_shows_sub_block_info() {
+        let mut a = app();
+        a.running.is_running = true;
+        a.selected_mode = ExecutionMode::Pipeline;
+        push_events(
+            &mut a,
+            vec![
+                ProgressEvent::BlockStarted {
+                    block_id: 1,
+                    agent_name: "[sub]".into(),
+                    label: "Parent".into(),
+                    iteration: 0,
+                    loop_pass: 0,
+                },
+                ProgressEvent::SubBlockStarted {
+                    parent_block_id: 1,
+                    inner_block_id: 10,
+                    inner_label: "Inner".into(),
+                    parent_label: "Parent".into(),
+                    iteration: 0,
+                    loop_pass: 0,
+                    inner_loop_pass: 0,
+                },
+            ],
+        );
+        let s = current_status(&a);
+        assert!(s.contains("\u{203a}"), "expected \u{203a} in status: {s}");
+        assert!(s.contains("Inner"), "expected Inner in status: {s}");
+    }
+
+    #[test]
+    fn sub_pipeline_inside_outer_loop_produces_separate_rows() {
+        let mut a = app();
+        a.running.is_running = true;
+        push_events(
+            &mut a,
+            vec![
+                // First outer loop pass
+                ProgressEvent::SubBlockStarted {
+                    parent_block_id: 3,
+                    inner_block_id: 1,
+                    inner_label: "Inner".into(),
+                    parent_label: "Parent".into(),
+                    iteration: 0,
+                    loop_pass: 0,
+                    inner_loop_pass: 0,
+                },
+                ProgressEvent::SubBlockFinished {
+                    parent_block_id: 3,
+                    inner_block_id: 1,
+                    inner_label: "Inner".into(),
+                    parent_label: "Parent".into(),
+                    iteration: 0,
+                    loop_pass: 0,
+                    inner_loop_pass: 0,
+                },
+                // Second outer loop pass
+                ProgressEvent::SubBlockStarted {
+                    parent_block_id: 3,
+                    inner_block_id: 1,
+                    inner_label: "Inner".into(),
+                    parent_label: "Parent".into(),
+                    iteration: 0,
+                    loop_pass: 1,
+                    inner_loop_pass: 0,
+                },
+            ],
+        );
+        let items = build_event_items(&a);
+        let sub_count = items
+            .iter()
+            .filter(|i| format!("{i:?}").contains("Inner"))
+            .count();
+        assert_eq!(sub_count, 2, "expected 2 sub-block rows, got {sub_count}");
+    }
+
+    #[test]
+    fn forwarded_block_skipped_renders_as_sub_block_error() {
+        let mut a = app();
+        a.running.is_running = true;
+        push_events(
+            &mut a,
+            vec![
+                ProgressEvent::BlockStarted {
+                    block_id: 1,
+                    agent_name: "[sub]".into(),
+                    label: "Parent".into(),
+                    iteration: 0,
+                    loop_pass: 0,
+                },
+                // Simulates what the forwarder produces for a BlockSkipped
+                ProgressEvent::SubBlockError {
+                    parent_block_id: 1,
+                    inner_block_id: 10,
+                    inner_label: "Skipped".into(),
+                    parent_label: "Parent".into(),
+                    iteration: 0,
+                    loop_pass: 0,
+                    inner_loop_pass: 0,
+                    error: "SKIPPED: dep failed".into(),
+                    details: None,
+                    is_skip: true,
+                },
+            ],
+        );
+        let items = build_event_items(&a);
+        let joined: String = items.iter().map(|i| format!("{i:?}")).collect();
+        // Row should show up with error status containing the SKIPPED prefix
+        assert!(joined.contains("SKIPPED"), "expected SKIPPED in: {joined}");
+        // last_error should NOT be set (details is None)
+        assert!(
+            a.last_error().is_none(),
+            "expected last_error to be None for forwarded skip"
+        );
+        // run_error should remain None — skips are non-fatal
+        assert!(a.running.run_error.is_none());
+    }
+
+    #[test]
+    fn stale_sub_blocks_cleared_on_parent_restart() {
+        let mut a = app();
+        a.running.is_running = true;
+        push_events(
+            &mut a,
+            vec![
+                ProgressEvent::BlockStarted {
+                    block_id: 3,
+                    agent_name: "[sub]".into(),
+                    label: "Parent".into(),
+                    iteration: 0,
+                    loop_pass: 0,
+                },
+                ProgressEvent::SubBlockStarted {
+                    parent_block_id: 3,
+                    inner_block_id: 10,
+                    inner_label: "Inner".into(),
+                    parent_label: "Parent".into(),
+                    iteration: 0,
+                    loop_pass: 0,
+                    inner_loop_pass: 0,
+                },
+            ],
+        );
+        // Verify sub-blocks are tracked
+        assert!(a.running.active_sub_blocks.contains_key(&3));
+        // New outer loop pass starts the parent again
+        push_events(
+            &mut a,
+            vec![ProgressEvent::BlockStarted {
+                block_id: 3,
+                agent_name: "[sub]".into(),
+                label: "Parent".into(),
+                iteration: 0,
+                loop_pass: 1,
+            }],
+        );
+        // active_sub_blocks for parent 3 should be empty (cleared by BlockStarted)
+        assert!(
+            !a.running.active_sub_blocks.contains_key(&3),
+            "expected active_sub_blocks for parent 3 to be cleared"
+        );
     }
 }

@@ -318,6 +318,45 @@ impl ProgressLogger {
             } => {
                 eprintln!("[{now}] {prefix}Loop {from}\u{2192}{to} pass {pass} eval ({agent_name}): {decision}");
             }
+            ProgressEvent::SubBlockStarted {
+                parent_label,
+                inner_label,
+                iteration,
+                loop_pass,
+                inner_loop_pass,
+                ..
+            } => {
+                eprintln!(
+                    "[{now}] {prefix}  [{parent_label} \u{203a} {inner_label}] started (iteration {iteration}, pass {loop_pass}, inner pass {inner_loop_pass})"
+                );
+            }
+            ProgressEvent::SubBlockFinished {
+                parent_label,
+                inner_label,
+                iteration,
+                loop_pass,
+                inner_loop_pass,
+                ..
+            } => {
+                eprintln!(
+                    "[{now}] {prefix}  [{parent_label} \u{203a} {inner_label}] finished (iteration {iteration}, pass {loop_pass}, inner pass {inner_loop_pass})"
+                );
+            }
+            ProgressEvent::SubBlockError {
+                parent_label,
+                inner_label,
+                iteration,
+                loop_pass,
+                inner_loop_pass,
+                error,
+                details,
+                ..
+            } => {
+                let detail = details.as_deref().unwrap_or(error);
+                eprintln!(
+                    "[{now}] {prefix}  [{parent_label} \u{203a} {inner_label}] ERROR (iteration {iteration}, pass {loop_pass}, inner pass {inner_loop_pass}): {detail}"
+                );
+            }
             ProgressEvent::AllDone => {}
         }
         self.accumulate_errors(event, run_id);
@@ -516,6 +555,22 @@ impl ProgressLogger {
                     "[{run_tag}{label} {agent_name} iter {iteration}] {detail}"
                 ));
             }
+            ProgressEvent::SubBlockError {
+                parent_label,
+                inner_label,
+                iteration,
+                error,
+                details,
+                is_skip,
+                ..
+            } => {
+                if !is_skip {
+                    let detail = details.as_deref().unwrap_or(error);
+                    self.push_error(format!(
+                        "[{run_tag}{parent_label} \u{203a} {inner_label} iter {iteration}] {detail}"
+                    ));
+                }
+            }
             _ => {}
         }
     }
@@ -711,6 +766,66 @@ fn progress_event_to_json(event: &ProgressEvent, run_id: Option<u32>) -> Option<
             "pass": pass,
             "agent": agent_name,
             "decision": decision,
+        }),
+        ProgressEvent::SubBlockStarted {
+            parent_block_id,
+            inner_block_id,
+            inner_label,
+            parent_label,
+            iteration,
+            loop_pass,
+            inner_loop_pass,
+        } => serde_json::json!({
+            "event": "sub_block_started",
+            "parent_block_id": parent_block_id,
+            "inner_block_id": inner_block_id,
+            "inner_label": inner_label,
+            "parent_label": parent_label,
+            "iteration": iteration,
+            "loop_pass": loop_pass,
+            "inner_loop_pass": inner_loop_pass,
+        }),
+        ProgressEvent::SubBlockFinished {
+            parent_block_id,
+            inner_block_id,
+            inner_label,
+            parent_label,
+            iteration,
+            loop_pass,
+            inner_loop_pass,
+        } => serde_json::json!({
+            "event": "sub_block_finished",
+            "parent_block_id": parent_block_id,
+            "inner_block_id": inner_block_id,
+            "inner_label": inner_label,
+            "parent_label": parent_label,
+            "iteration": iteration,
+            "loop_pass": loop_pass,
+            "inner_loop_pass": inner_loop_pass,
+        }),
+        ProgressEvent::SubBlockError {
+            parent_block_id,
+            inner_block_id,
+            inner_label,
+            parent_label,
+            iteration,
+            loop_pass,
+            inner_loop_pass,
+            error,
+            details,
+            is_skip,
+        } => serde_json::json!({
+            "event": "sub_block_error",
+            "parent_block_id": parent_block_id,
+            "inner_block_id": inner_block_id,
+            "inner_label": inner_label,
+            "parent_label": parent_label,
+            "iteration": iteration,
+            "loop_pass": loop_pass,
+            "inner_loop_pass": inner_loop_pass,
+            "error": error,
+            "details": details,
+            "is_skip": is_skip,
         }),
         ProgressEvent::AllDone => serde_json::json!({
             "event": "all_done",
