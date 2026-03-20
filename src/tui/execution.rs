@@ -211,7 +211,7 @@ pub(super) fn start_pipeline_execution(app: &mut App) {
         Err(e) => {
             app.error_modal = Some(format!("Failed to create HTTP client: {e}"));
             app.screen = Screen::Pipeline;
-            app.running.is_running = false;
+            app.running.stop_run();
             return;
         }
     };
@@ -236,7 +236,7 @@ pub(super) fn start_pipeline_execution(app: &mut App) {
         Err(e) => {
             app.error_modal = Some(format!("Cannot create output dir: {e}"));
             app.screen = Screen::Pipeline;
-            app.running.is_running = false;
+            app.running.stop_run();
             return;
         }
     };
@@ -462,7 +462,7 @@ pub(super) fn start_multi_execution(app: &mut App, params: MultiExecutionParams)
         Err(message) => {
             app.error_modal = Some(message);
             app.screen = Screen::Prompt;
-            app.running.is_running = false;
+            app.running.stop_run();
             return;
         }
     };
@@ -478,7 +478,7 @@ pub(super) fn start_multi_execution(app: &mut App, params: MultiExecutionParams)
         Err(e) => {
             app.error_modal = Some(format!("Failed to create batch output dir: {e}"));
             app.screen = Screen::Prompt;
-            app.running.is_running = false;
+            app.running.stop_run();
             return;
         }
     };
@@ -487,7 +487,7 @@ pub(super) fn start_multi_execution(app: &mut App, params: MultiExecutionParams)
     {
         app.error_modal = Some(format!("Failed to write batch metadata: {e}"));
         app.screen = Screen::Prompt;
-        app.running.is_running = false;
+        app.running.stop_run();
         return;
     }
     if let Some(ctx) = prompt_context.memory_context() {
@@ -685,7 +685,7 @@ pub(super) fn start_multi_pipeline_execution(
         Err(e) => {
             app.error_modal = Some(format!("Cannot create batch output dir: {e}"));
             app.screen = Screen::Pipeline;
-            app.running.is_running = false;
+            app.running.stop_run();
             return;
         }
     };
@@ -700,7 +700,7 @@ pub(super) fn start_multi_pipeline_execution(
     ) {
         app.error_modal = Some(format!("Failed to write batch metadata: {e}"));
         app.screen = Screen::Pipeline;
-        app.running.is_running = false;
+        app.running.stop_run();
         return;
     }
 
@@ -1519,7 +1519,7 @@ fn prepare_resume_execution(
 fn fail_execution_setup(app: &mut App, message: String) {
     app.error_modal = Some(message);
     app.screen = Screen::Prompt;
-    app.running.is_running = false;
+    app.running.stop_run();
     app.running.progress_rx = None;
     app.running.resume_prepare_rx = None;
     app.running.pending_single_execution = None;
@@ -1556,7 +1556,7 @@ pub(super) fn handle_progress(app: &mut App, event: ProgressEvent) {
     let is_done = matches!(event, ProgressEvent::AllDone);
     app.record_progress(event);
     if is_done {
-        app.running.is_running = false;
+        app.running.stop_run();
         app.running.progress_rx = None;
         // Normalize completed_steps so the progress bar reaches 100%
         // even when early-break or cancellation skipped loop passes.
@@ -1657,7 +1657,7 @@ pub(super) fn handle_batch_progress(app: &mut App, event: BatchProgressEvent) {
             app.running.batch_stage_error = error;
         }
         BatchProgressEvent::AllRunsDone => {
-            app.running.is_running = false;
+            app.running.stop_run();
             app.running.batch_progress_rx = None;
             maybe_start_memory_extraction(app);
             if should_offer_consolidation(app) {

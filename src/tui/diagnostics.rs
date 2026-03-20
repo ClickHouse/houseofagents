@@ -101,7 +101,7 @@ pub(super) fn maybe_start_diagnostics(app: &mut App) {
 
 pub(super) fn handle_diagnostic_result(app: &mut App, result: Result<String, String>) {
     app.running.diagnostic_running = false;
-    app.running.is_running = false;
+    app.running.stop_run();
     app.running.diagnostic_rx = None;
 
     let agent_name = app

@@ -7,9 +7,9 @@ pub(super) fn should_offer_consolidation(app: &App) -> bool {
     if app.running.cancel_flag.load(Ordering::Relaxed) {
         return false;
     }
-    // Skip consolidation for pipelines with finalization
-    if app.selected_mode == ExecutionMode::Pipeline && app.pipeline.pipeline_def.has_finalization()
-    {
+    // Skip consolidation for pipelines — they have their own finalization
+    // mechanism and should never offer a post-run consolidation prompt.
+    if app.selected_mode == ExecutionMode::Pipeline {
         return false;
     }
     if app.running.multi_run_total > 1 {
@@ -155,7 +155,7 @@ pub(super) fn start_consolidation(app: &mut App) {
 
 pub(super) fn handle_consolidation_result(app: &mut App, result: Result<String, String>) {
     app.running.consolidation_running = false;
-    app.running.is_running = false;
+    app.running.stop_run();
     app.running.consolidation_rx = None;
 
     let agent_name = app
