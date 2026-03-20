@@ -208,9 +208,6 @@ pub fn draw(f: &mut Frame, app: &App) {
     if app.pipeline.pipeline_scatter_edit {
         draw_scatter_edit_popup(f, app, area);
     }
-    if app.pipeline.pipeline_replica_edit {
-        draw_replica_edit_popup(f, app, area);
-    }
     if app.help_popup.active {
         let tab = app.help_popup.tab;
         let name = help::PIPELINE_TAB_NAMES[tab];
@@ -307,7 +304,6 @@ fn draw_prompt_area(f: &mut Frame, app: &App, area: Rect) {
         || app.pipeline.pipeline_show_feed_edit
         || app.pipeline.pipeline_show_feed_list
         || app.pipeline.pipeline_scatter_edit
-        || app.pipeline.pipeline_replica_edit
         || app.error_modal.is_some()
         || app.info_modal.is_some()
         || app.help_popup.active
@@ -472,14 +468,16 @@ fn draw_canvas(f: &mut Frame, app: &App, area: Rect) {
             } else {
                 Color::LightCyan
             };
-            let title = format!(
-                " [{}] ",
-                if block.name.is_empty() {
-                    "Sub-Pipeline"
-                } else {
-                    &block.name
-                }
-            );
+            let base_name = if block.name.is_empty() {
+                "Sub-Pipeline"
+            } else {
+                &block.name
+            };
+            let title = if block.replicas > 1 {
+                format!(" [{base_name}] \u{00d7}{} ", block.replicas)
+            } else {
+                format!(" [{base_name}] ")
+            };
             let block_widget = Block::default()
                 .title(title)
                 .borders(Borders::ALL)
@@ -1998,7 +1996,7 @@ fn draw_edit_popup(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Clear, popup);
 
     let title = if is_sub {
-        " Rename Sub-Pipeline "
+        " Edit Sub-Pipeline "
     } else {
         " Edit Block "
     };
@@ -2013,28 +2011,50 @@ fn draw_edit_popup(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    // Sub-pipeline blocks: show only Name + hint
+    // Sub-pipeline blocks: show Name + Replicas
     if is_sub {
+        let name_focused = app.pipeline.pipeline_edit_field == PipelineEditField::Name;
+        let rep_focused = app.pipeline.pipeline_edit_field == PipelineEditField::Replicas;
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(2), // Name
+                Constraint::Length(1), // Name
+                Constraint::Length(1), // spacer
+                Constraint::Length(1), // Replicas
                 Constraint::Length(1), // spacer
                 Constraint::Length(1), // hint
             ])
             .split(inner);
+        let name_bracket_color = if name_focused {
+            Color::Cyan
+        } else {
+            Color::DarkGray
+        };
         let name_line = Line::from(vec![
-            Span::styled("Name: ", Style::default().fg(Color::White)),
-            Span::styled("[", Style::default().fg(Color::Cyan)),
+            Span::styled("Name:     ", Style::default().fg(Color::White)),
+            Span::styled("[", Style::default().fg(name_bracket_color)),
             Span::raw(&app.pipeline.pipeline_edit_name_buf),
-            Span::styled("]", Style::default().fg(Color::Cyan)),
+            Span::styled("]", Style::default().fg(name_bracket_color)),
         ]);
         f.render_widget(Paragraph::new(name_line), chunks[0]);
+        let rep_bracket_color = if rep_focused {
+            Color::Cyan
+        } else {
+            Color::DarkGray
+        };
+        let rep_line = Line::from(vec![
+            Span::styled("Replicas: ", Style::default().fg(Color::White)),
+            Span::styled("[", Style::default().fg(rep_bracket_color)),
+            Span::raw(&app.pipeline.pipeline_edit_replicas_buf),
+            Span::styled("]", Style::default().fg(rep_bracket_color)),
+            Span::styled("  (1-32)", Style::default().fg(Color::DarkGray)),
+        ]);
+        f.render_widget(Paragraph::new(rep_line), chunks[2]);
         let hint = Line::from(Span::styled(
-            "Enter: save | Esc: cancel",
+            "Tab: switch field | Enter: save | Esc: cancel",
             Style::default().fg(Color::DarkGray),
         ));
-        f.render_widget(Paragraph::new(hint), chunks[2]);
+        f.render_widget(Paragraph::new(hint), chunks[4]);
         return;
     }
 
@@ -2979,54 +2999,6 @@ fn draw_scatter_edit_popup(f: &mut Frame, app: &App, area: Rect) {
     };
     let hint = Paragraph::new(hint_text).style(Style::default().fg(Color::DarkGray));
     f.render_widget(hint, chunks[3]);
-}
-
-fn draw_replica_edit_popup(f: &mut Frame, app: &App, area: Rect) {
-    let popup = centered_rect(35, 15, area);
-    f.render_widget(Clear, popup);
-
-    let block_name = app
-        .pipeline
-        .pipeline_replica_edit_block
-        .and_then(|bid| {
-            app.pipeline
-                .pipeline_def
-                .blocks
-                .iter()
-                .chain(app.pipeline.pipeline_def.finalization_blocks.iter())
-                .find(|b| b.id == bid)
-        })
-        .map(|b| b.name.as_str())
-        .unwrap_or("?");
-    let title = format!(" Replicas \u{2014} {block_name} ");
-
-    let block_widget = Block::default()
-        .title(title.as_str())
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::LightCyan));
-    let inner = block_widget.inner(popup);
-    f.render_widget(block_widget, popup);
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1), // input
-            Constraint::Length(1), // gap
-            Constraint::Length(1), // hint
-        ])
-        .split(inner);
-
-    let buf = &app.pipeline.pipeline_replica_edit_buf;
-    let visible =
-        Paragraph::new(buf.as_str()).style(Style::default().fg(Color::White).bg(Color::DarkGray));
-    f.render_widget(visible, chunks[0]);
-
-    let char_offset = buf.chars().count() as u16;
-    f.set_cursor_position((chunks[0].x + char_offset, chunks[0].y));
-
-    let hint = Paragraph::new("Enter=save  Esc=cancel  \u{2191}\u{2193}=adjust")
-        .style(Style::default().fg(Color::DarkGray));
-    f.render_widget(hint, chunks[2]);
 }
 
 fn draw_feed_edit_popup(f: &mut Frame, app: &App, area: Rect) {

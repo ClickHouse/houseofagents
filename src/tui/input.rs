@@ -512,15 +512,6 @@ pub(super) fn handle_pipeline_paste(app: &mut App, text: &str) {
             }
             PipelineLoopEditField::Count => {}
         }
-    } else if app.pipeline.pipeline_replica_edit {
-        let clean: String = text.chars().filter(|c| c.is_ascii_digit()).collect();
-        if !clean.is_empty() {
-            if app.pipeline.pipeline_replica_edit_fresh {
-                app.pipeline.pipeline_replica_edit_buf.clear();
-                app.pipeline.pipeline_replica_edit_fresh = false;
-            }
-            app.pipeline.pipeline_replica_edit_buf.push_str(&clean);
-        }
     } else if let Some(PipelineDialogMode::Save) = app.pipeline.pipeline_file_dialog {
         app.pipeline.pipeline_file_input.push_str(text);
     } else if let Some(PipelineDialogMode::Load) = app.pipeline.pipeline_file_dialog {
@@ -590,10 +581,6 @@ pub(super) fn handle_pipeline_key(app: &mut App, key: KeyEvent) {
     }
     if app.pipeline.pipeline_show_feed_list {
         handle_pipeline_feed_list_key(app, key);
-        return;
-    }
-    if app.pipeline.pipeline_replica_edit {
-        handle_pipeline_replica_edit_key(app, key);
         return;
     }
     if app.pipeline.pipeline_scatter_edit {
@@ -968,29 +955,6 @@ pub(super) fn handle_pipeline_builder_key(app: &mut App, key: KeyEvent) {
             app.pipeline.pipeline_block_cursor = Some(id);
             pipeline_ensure_visible(app);
         }
-        KeyCode::Char('r') => {
-            if let Some(sel) = app.pipeline.pipeline_block_cursor {
-                if let Some(block) = app
-                    .pipeline
-                    .pipeline_def
-                    .blocks
-                    .iter()
-                    .find(|b| b.id == sel)
-                    .or_else(|| {
-                        app.pipeline
-                            .pipeline_def
-                            .finalization_blocks
-                            .iter()
-                            .find(|b| b.id == sel)
-                    })
-                {
-                    app.pipeline.pipeline_replica_edit_block = Some(sel);
-                    app.pipeline.pipeline_replica_edit_buf = block.replicas.to_string();
-                    app.pipeline.pipeline_replica_edit = true;
-                    app.pipeline.pipeline_replica_edit_fresh = true;
-                }
-            }
-        }
         KeyCode::Char('f') => {
             if let Some(sel) = app.pipeline.pipeline_block_cursor {
                 let is_exec = app.pipeline.pipeline_def.blocks.iter().any(|b| b.id == sel);
@@ -1139,34 +1103,33 @@ pub(super) fn handle_pipeline_builder_key(app: &mut App, key: KeyEvent) {
                 }
             }
         }
-        KeyCode::Char('n') => {
-            // Rename sub-pipeline block (name-only edit popup)
-            if let Some(sel) = app.pipeline.pipeline_block_cursor {
-                if let Some(block) = app
-                    .pipeline
-                    .pipeline_def
-                    .blocks
-                    .iter()
-                    .find(|b| b.id == sel && b.is_sub_pipeline())
-                {
-                    app.pipeline.pipeline_show_edit = true;
-                    app.pipeline.pipeline_edit_field = PipelineEditField::Name;
-                    app.pipeline.pipeline_edit_name_buf = block.name.clone();
-                    app.pipeline.pipeline_edit_name_cursor = block.name.len();
-                }
-            }
-        }
         KeyCode::Char('e') | KeyCode::Enter => {
             if let Some(sel) = app.pipeline.pipeline_block_cursor {
-                // Drill into sub-pipeline
-                if app
+                let is_sub = app
                     .pipeline
                     .pipeline_def
                     .blocks
                     .iter()
-                    .any(|b| b.id == sel && b.is_sub_pipeline())
-                {
-                    push_sub_pipeline_context(app, sel);
+                    .any(|b| b.id == sel && b.is_sub_pipeline());
+                if is_sub {
+                    if key.code == KeyCode::Enter {
+                        // Enter: drill into sub-pipeline inner DAG
+                        push_sub_pipeline_context(app, sel);
+                    } else {
+                        // e: edit sub-pipeline (name + replicas)
+                        let block = app
+                            .pipeline
+                            .pipeline_def
+                            .blocks
+                            .iter()
+                            .find(|b| b.id == sel)
+                            .unwrap();
+                        app.pipeline.pipeline_show_edit = true;
+                        app.pipeline.pipeline_edit_field = PipelineEditField::Name;
+                        app.pipeline.pipeline_edit_name_buf = block.name.clone();
+                        app.pipeline.pipeline_edit_name_cursor = block.name.len();
+                        app.pipeline.pipeline_edit_replicas_buf = block.replicas.to_string();
+                    }
                     return;
                 }
                 if let Some(block) = app
@@ -1730,7 +1693,7 @@ pub(super) fn handle_pipeline_edit_key(app: &mut App, key: KeyEvent) {
             app.pipeline.pipeline_show_edit = false;
         }
         KeyCode::Tab | KeyCode::BackTab => {
-            // Sub-pipeline blocks only expose the Name field — don't cycle.
+            // Sub-pipeline blocks: cycle between Name and Replicas only.
             let is_sub = app
                 .pipeline
                 .pipeline_block_cursor
@@ -1743,6 +1706,12 @@ pub(super) fn handle_pipeline_edit_key(app: &mut App, key: KeyEvent) {
                 })
                 .is_some_and(|b| b.is_sub_pipeline());
             if is_sub {
+                app.pipeline.pipeline_edit_field =
+                    if app.pipeline.pipeline_edit_field == PipelineEditField::Name {
+                        PipelineEditField::Replicas
+                    } else {
+                        PipelineEditField::Name
+                    };
                 return;
             }
             let is_fin_block = app
@@ -1798,9 +1767,16 @@ pub(super) fn handle_pipeline_edit_key(app: &mut App, key: KeyEvent) {
                             })
                         {
                             block.name = app.pipeline.pipeline_edit_name_buf.clone();
-                            // Sub-pipeline blocks: only save name — agents, prompt,
-                            // profiles etc. are managed inside the nested definition.
+                            // Sub-pipeline blocks: save name + replicas only —
+                            // agents, prompt, profiles etc. are managed inside
+                            // the nested definition.
                             if block.is_sub_pipeline() {
+                                block.replicas = app
+                                    .pipeline
+                                    .pipeline_edit_replicas_buf
+                                    .parse::<u32>()
+                                    .unwrap_or(1)
+                                    .clamp(1, 32);
                                 app.pipeline.pipeline_show_edit = false;
                                 return;
                             }
@@ -2371,93 +2347,6 @@ pub(super) fn handle_pipeline_conn_action_key(app: &mut App, key: KeyEvent) {
                     }
                 }
             }
-        }
-        _ => {}
-    }
-}
-
-fn handle_pipeline_replica_edit_key(app: &mut App, key: KeyEvent) {
-    match key.code {
-        KeyCode::Esc => {
-            app.pipeline.pipeline_replica_edit = false;
-        }
-        KeyCode::Enter => {
-            if let Some(block_id) = app.pipeline.pipeline_replica_edit_block {
-                if let Some(block) = app
-                    .pipeline
-                    .pipeline_def
-                    .blocks
-                    .iter_mut()
-                    .find(|b| b.id == block_id)
-                    .or_else(|| {
-                        app.pipeline
-                            .pipeline_def
-                            .finalization_blocks
-                            .iter_mut()
-                            .find(|b| b.id == block_id)
-                    })
-                {
-                    let max = if block.is_sub_pipeline() {
-                        32
-                    } else {
-                        (32 / block.agents.len().max(1) as u32).max(1)
-                    };
-                    let v: u32 = app
-                        .pipeline
-                        .pipeline_replica_edit_buf
-                        .parse()
-                        .unwrap_or(1)
-                        .clamp(1, max);
-                    block.replicas = v;
-                }
-            }
-            app.pipeline.pipeline_replica_edit = false;
-        }
-        KeyCode::Char(c) if c.is_ascii_digit() => {
-            if app.pipeline.pipeline_replica_edit_fresh {
-                app.pipeline.pipeline_replica_edit_buf.clear();
-                app.pipeline.pipeline_replica_edit_fresh = false;
-            }
-            app.pipeline.pipeline_replica_edit_buf.push(c);
-        }
-        KeyCode::Backspace => {
-            app.pipeline.pipeline_replica_edit_fresh = false;
-            app.pipeline.pipeline_replica_edit_buf.pop();
-        }
-        KeyCode::Up => {
-            app.pipeline.pipeline_replica_edit_fresh = false;
-            let max = app
-                .pipeline
-                .pipeline_replica_edit_block
-                .and_then(|bid| {
-                    app.pipeline
-                        .pipeline_def
-                        .blocks
-                        .iter()
-                        .find(|b| b.id == bid)
-                        .or_else(|| {
-                            app.pipeline
-                                .pipeline_def
-                                .finalization_blocks
-                                .iter()
-                                .find(|b| b.id == bid)
-                        })
-                })
-                .map(|block| {
-                    if block.is_sub_pipeline() {
-                        32
-                    } else {
-                        (32 / block.agents.len().max(1) as u32).max(1)
-                    }
-                })
-                .unwrap_or(32);
-            let v: u32 = app.pipeline.pipeline_replica_edit_buf.parse().unwrap_or(1);
-            app.pipeline.pipeline_replica_edit_buf = (v + 1).min(max).to_string();
-        }
-        KeyCode::Down => {
-            app.pipeline.pipeline_replica_edit_fresh = false;
-            let v: u32 = app.pipeline.pipeline_replica_edit_buf.parse().unwrap_or(1);
-            app.pipeline.pipeline_replica_edit_buf = v.saturating_sub(1).max(1).to_string();
         }
         _ => {}
     }
@@ -4366,6 +4255,21 @@ pub(super) fn sync_pipeline_concurrency_buf(app: &mut App) {
 }
 
 fn pipeline_edit_max_replicas(app: &App) -> u32 {
+    // Sub-pipeline blocks have no agents — max is always 32.
+    let is_sub = app
+        .pipeline
+        .pipeline_block_cursor
+        .and_then(|sel| {
+            app.pipeline
+                .pipeline_def
+                .blocks
+                .iter()
+                .find(|b| b.id == sel)
+        })
+        .is_some_and(|b| b.is_sub_pipeline());
+    if is_sub {
+        return 32;
+    }
     let selected = app
         .pipeline
         .pipeline_edit_agent_selection

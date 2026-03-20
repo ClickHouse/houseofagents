@@ -4276,8 +4276,8 @@ fn tab_cycles_prompt_and_builder_inside_sub_pipeline() {
     app.pipeline.pipeline_block_cursor = Some(1);
     app.pipeline.pipeline_next_id = 2;
 
-    // Drill into sub-pipeline
-    handle_key(&mut app, key(KeyCode::Char('e')));
+    // Drill into sub-pipeline (Enter drills in, 'e' opens edit popup)
+    handle_key(&mut app, key(KeyCode::Enter));
     assert!(
         !app.pipeline.sub_pipeline_stack.is_empty(),
         "should be inside sub-pipeline"
@@ -4308,7 +4308,7 @@ fn tab_cycles_prompt_and_builder_inside_sub_pipeline() {
 }
 
 #[test]
-fn n_key_opens_rename_popup_for_sub_pipeline_block() {
+fn e_key_opens_edit_popup_for_sub_pipeline_block() {
     use crate::execution::pipeline::{PipelineBlock, PipelineDefinition};
     let mut app = test_app();
     app.screen = Screen::Pipeline;
@@ -4327,25 +4327,32 @@ fn n_key_opens_rename_popup_for_sub_pipeline_block() {
     app.pipeline.pipeline_block_cursor = Some(1);
     app.pipeline.pipeline_next_id = 2;
 
-    // 'n' on sub-pipeline block opens name-only edit popup
-    handle_key(&mut app, key(KeyCode::Char('n')));
+    // 'e' on sub-pipeline block opens name+replicas edit popup
+    handle_key(&mut app, key(KeyCode::Char('e')));
     assert!(app.pipeline.pipeline_show_edit, "edit popup should open");
     assert_eq!(
         app.pipeline.pipeline_edit_field,
         PipelineEditField::Name,
-        "edit field should be Name"
+        "edit field should start on Name"
     );
     assert_eq!(app.pipeline.pipeline_edit_name_buf, "MySub");
+    assert_eq!(app.pipeline.pipeline_edit_replicas_buf, "1");
 
-    // Tab should NOT cycle to Agent (stays on Name for sub-pipelines)
+    // Tab cycles between Name and Replicas only
+    handle_key(&mut app, key(KeyCode::Tab));
+    assert_eq!(
+        app.pipeline.pipeline_edit_field,
+        PipelineEditField::Replicas,
+        "Tab should cycle to Replicas"
+    );
     handle_key(&mut app, key(KeyCode::Tab));
     assert_eq!(
         app.pipeline.pipeline_edit_field,
         PipelineEditField::Name,
-        "Tab should not cycle for sub-pipeline blocks"
+        "Tab should cycle back to Name"
     );
 
-    // Type a new name, confirm with Enter — only name should change
+    // Type a new name, confirm with Enter
     app.pipeline.pipeline_edit_name_buf = "Renamed".into();
     handle_key(&mut app, key(KeyCode::Enter));
     assert!(!app.pipeline.pipeline_show_edit, "popup should close");
@@ -4359,70 +4366,7 @@ fn n_key_opens_rename_popup_for_sub_pipeline_block() {
 // ── Replica edit popup tests ──
 
 #[test]
-fn replica_edit_popup_open_and_save() {
-    use crate::execution::pipeline::PipelineBlock;
-    let mut app = test_app();
-    app.screen = Screen::Pipeline;
-    app.pipeline.pipeline_focus = PipelineFocus::Builder;
-    app.pipeline.pipeline_def.blocks.push(PipelineBlock {
-        id: 1,
-        name: "Test".into(),
-        agents: vec!["agent".into()],
-        prompt: String::new(),
-        profiles: vec![],
-        session_id: None,
-        position: (0, 0),
-        replicas: 1,
-        sub_pipeline: None,
-    });
-    app.pipeline.pipeline_next_id = 2;
-    app.pipeline.pipeline_block_cursor = Some(1);
-    handle_key(&mut app, key(KeyCode::Char('r')));
-    assert!(app.pipeline.pipeline_replica_edit);
-    assert_eq!(app.pipeline.pipeline_replica_edit_buf, "1");
-    assert!(app.pipeline.pipeline_replica_edit_fresh);
-    // First digit replaces the buffer (fresh behavior), not appends
-    handle_key(&mut app, key(KeyCode::Char('4')));
-    assert_eq!(app.pipeline.pipeline_replica_edit_buf, "4");
-    assert!(!app.pipeline.pipeline_replica_edit_fresh);
-    // Second digit appends normally
-    handle_key(&mut app, key(KeyCode::Char('2')));
-    assert_eq!(app.pipeline.pipeline_replica_edit_buf, "42");
-    // Backspace to get to just "4"
-    handle_key(&mut app, key(KeyCode::Backspace));
-    handle_key(&mut app, key(KeyCode::Enter));
-    assert!(!app.pipeline.pipeline_replica_edit);
-    assert_eq!(app.pipeline.pipeline_def.blocks[0].replicas, 4);
-}
-
-#[test]
-fn replica_edit_popup_cancel() {
-    use crate::execution::pipeline::PipelineBlock;
-    let mut app = test_app();
-    app.screen = Screen::Pipeline;
-    app.pipeline.pipeline_focus = PipelineFocus::Builder;
-    app.pipeline.pipeline_def.blocks.push(PipelineBlock {
-        id: 1,
-        name: "Test".into(),
-        agents: vec!["agent".into()],
-        prompt: String::new(),
-        profiles: vec![],
-        session_id: None,
-        position: (0, 0),
-        replicas: 2,
-        sub_pipeline: None,
-    });
-    app.pipeline.pipeline_next_id = 2;
-    app.pipeline.pipeline_block_cursor = Some(1);
-    handle_key(&mut app, key(KeyCode::Char('r')));
-    handle_key(&mut app, key(KeyCode::Char('9')));
-    handle_key(&mut app, key(KeyCode::Esc));
-    assert!(!app.pipeline.pipeline_replica_edit);
-    assert_eq!(app.pipeline.pipeline_def.blocks[0].replicas, 2); // unchanged
-}
-
-#[test]
-fn replica_edit_popup_sub_pipeline_max_32() {
+fn sub_pipeline_edit_popup_saves_name_and_replicas() {
     use crate::execution::pipeline::{PipelineBlock, PipelineDefinition};
     let mut app = test_app();
     app.screen = Screen::Pipeline;
@@ -4440,12 +4384,69 @@ fn replica_edit_popup_sub_pipeline_max_32() {
     });
     app.pipeline.pipeline_next_id = 2;
     app.pipeline.pipeline_block_cursor = Some(1);
-    handle_key(&mut app, key(KeyCode::Char('r')));
+    // 'e' opens the edit popup for sub-pipelines
+    handle_key(&mut app, key(KeyCode::Char('e')));
+    assert!(app.pipeline.pipeline_show_edit);
+    assert_eq!(app.pipeline.pipeline_edit_name_buf, "MySub");
+    assert_eq!(app.pipeline.pipeline_edit_replicas_buf, "1");
+    // Tab to replicas field, type "99", save — clamped to 32
+    handle_key(&mut app, key(KeyCode::Tab));
     handle_key(&mut app, key(KeyCode::Backspace));
     handle_key(&mut app, key(KeyCode::Char('9')));
     handle_key(&mut app, key(KeyCode::Char('9')));
     handle_key(&mut app, key(KeyCode::Enter));
+    assert!(!app.pipeline.pipeline_show_edit);
     assert_eq!(app.pipeline.pipeline_def.blocks[0].replicas, 32); // clamped
+}
+
+#[test]
+fn sub_pipeline_replicas_not_capped_by_stale_agent_selection() {
+    use crate::execution::pipeline::{PipelineBlock, PipelineDefinition};
+    let mut app = test_app();
+    app.screen = Screen::Pipeline;
+    app.pipeline.pipeline_focus = PipelineFocus::Builder;
+    // Regular block with 2 agents (leaves stale agent_selection = [true, true])
+    app.pipeline.pipeline_def.blocks.push(PipelineBlock {
+        id: 1,
+        name: "Regular".into(),
+        agents: vec!["a1".into(), "a2".into()],
+        prompt: String::new(),
+        profiles: vec![],
+        session_id: None,
+        position: (0, 0),
+        replicas: 1,
+        sub_pipeline: None,
+    });
+    // Sub-pipeline block
+    app.pipeline.pipeline_def.blocks.push(PipelineBlock {
+        id: 2,
+        name: "Sub".into(),
+        agents: vec![],
+        prompt: String::new(),
+        profiles: vec![],
+        session_id: None,
+        position: (1, 0),
+        replicas: 1,
+        sub_pipeline: Some(PipelineDefinition::default()),
+    });
+    app.pipeline.pipeline_next_id = 3;
+    // Edit the regular block first to populate stale agent_selection
+    app.pipeline.pipeline_block_cursor = Some(1);
+    handle_key(&mut app, key(KeyCode::Char('e')));
+    handle_key(&mut app, key(KeyCode::Esc));
+    // Now edit the sub-pipeline block — replicas should allow up to 32
+    app.pipeline.pipeline_block_cursor = Some(2);
+    handle_key(&mut app, key(KeyCode::Char('e')));
+    assert!(app.pipeline.pipeline_show_edit);
+    // Tab to Replicas, type 32
+    handle_key(&mut app, key(KeyCode::Tab));
+    assert_eq!(app.pipeline.pipeline_edit_field, PipelineEditField::Replicas);
+    handle_key(&mut app, key(KeyCode::Backspace));
+    handle_key(&mut app, key(KeyCode::Char('3')));
+    handle_key(&mut app, key(KeyCode::Char('2')));
+    handle_key(&mut app, key(KeyCode::Enter));
+    // Without the fix, this would clamp to 16 (32/2 agents from stale selection)
+    assert_eq!(app.pipeline.pipeline_def.blocks[1].replicas, 32);
 }
 
 #[test]
@@ -4475,63 +4476,3 @@ async fn discover_final_outputs_async_sub_pipeline_multi_replica() {
     assert_eq!(files.len(), 2);
 }
 
-#[test]
-fn replica_edit_paste_respects_fresh_flag() {
-    use crate::execution::pipeline::PipelineBlock;
-    let mut app = test_app();
-    app.screen = Screen::Pipeline;
-    app.pipeline.pipeline_focus = PipelineFocus::Builder;
-    app.pipeline.pipeline_def.blocks.push(PipelineBlock {
-        id: 1,
-        name: "Test".into(),
-        agents: vec!["agent".into()],
-        prompt: String::new(),
-        profiles: vec![],
-        session_id: None,
-        position: (0, 0),
-        replicas: 1,
-        sub_pipeline: None,
-    });
-    app.pipeline.pipeline_next_id = 2;
-    app.pipeline.pipeline_block_cursor = Some(1);
-    handle_key(&mut app, key(KeyCode::Char('r')));
-    assert!(app.pipeline.pipeline_replica_edit_fresh);
-    assert_eq!(app.pipeline.pipeline_replica_edit_buf, "1");
-    // Paste "4" while fresh — should replace "1" with "4", not append to "14"
-    handle_paste(&mut app, "4");
-    assert_eq!(app.pipeline.pipeline_replica_edit_buf, "4");
-    assert!(!app.pipeline.pipeline_replica_edit_fresh);
-    // Second paste appends normally
-    handle_paste(&mut app, "2");
-    assert_eq!(app.pipeline.pipeline_replica_edit_buf, "42");
-}
-
-#[test]
-fn replica_edit_up_arrow_respects_per_block_max() {
-    use crate::execution::pipeline::PipelineBlock;
-    let mut app = test_app();
-    app.screen = Screen::Pipeline;
-    app.pipeline.pipeline_focus = PipelineFocus::Builder;
-    // Block with 4 agents — max replicas = 32/4 = 8
-    app.pipeline.pipeline_def.blocks.push(PipelineBlock {
-        id: 1,
-        name: "Test".into(),
-        agents: vec!["a1".into(), "a2".into(), "a3".into(), "a4".into()],
-        prompt: String::new(),
-        profiles: vec![],
-        session_id: None,
-        position: (0, 0),
-        replicas: 7,
-        sub_pipeline: None,
-    });
-    app.pipeline.pipeline_next_id = 2;
-    app.pipeline.pipeline_block_cursor = Some(1);
-    handle_key(&mut app, key(KeyCode::Char('r')));
-    assert_eq!(app.pipeline.pipeline_replica_edit_buf, "7");
-    // Up once: 7 → 8 (at max for 4-agent block)
-    handle_key(&mut app, key(KeyCode::Up));
-    assert_eq!(app.pipeline.pipeline_replica_edit_buf, "8");
-    // Up again: should stay at 8 (clamped to 32/4)
-    handle_key(&mut app, key(KeyCode::Up));
-    assert_eq!(app.pipeline.pipeline_replica_edit_buf, "8");
-}

@@ -354,13 +354,13 @@ pub fn pipeline_help_lines(tab: usize) -> &'static [Line<'static>] {
                     Span::raw(": Delete the selected block and all its connections"),
                 ]),
                 Line::from(vec![
-                    Span::styled("  e / Enter", k),
+                    Span::styled("  e", k),
                     Span::raw(": Edit the selected block (name, agents, profiles,"),
                 ]),
                 Line::from("    prompt, session ID, replicas). Space toggles selection."),
                 Line::from(vec![
-                    Span::styled("  r", k),
-                    Span::raw(": Edit replica count for the selected block"),
+                    Span::styled("  Enter", k),
+                    Span::raw(": Edit the selected block (or drill into sub-pipeline)"),
                 ]),
                 Line::from(""),
                 Line::from("  Profiles are reusable .md instruction files in"),
@@ -568,16 +568,16 @@ pub fn pipeline_help_lines(tab: usize) -> &'static [Line<'static>] {
                     Span::raw(": Create a new sub-pipeline block at the next position"),
                 ]),
                 Line::from(vec![
-                    Span::styled("  Enter/e", k),
+                    Span::styled("  Enter", k),
                     Span::raw(": Drill into the sub-pipeline to edit its inner DAG"),
+                ]),
+                Line::from(vec![
+                    Span::styled("  e", k),
+                    Span::raw(": Edit the sub-pipeline block (name, replicas)"),
                 ]),
                 Line::from(vec![
                     Span::styled("  Esc", k),
                     Span::raw(": Pop back out to the parent pipeline"),
-                ]),
-                Line::from(vec![
-                    Span::styled("  n", k),
-                    Span::raw(": Rename the sub-pipeline block"),
                 ]),
                 Line::from(""),
                 Line::from(Span::styled("  Rules", h)),
