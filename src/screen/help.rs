@@ -582,8 +582,9 @@ pub fn pipeline_help_lines(tab: usize) -> &'static [Line<'static>] {
                 Line::from("  block with a single agent and replicas=1. That block's"),
                 Line::from("  output becomes the sub-pipeline's output to the parent."),
                 Line::from(""),
-                Line::from("  Save/Load (Ctrl+S/Ctrl+L), Run (F5), and Tab"),
-                Line::from("  switching are disabled inside a sub-pipeline."),
+                Line::from("  Save (Ctrl+S) and Run (F5) are disabled inside a"),
+                Line::from("  sub-pipeline. Tab cycles between the initial prompt"),
+                Line::from("  and the builder canvas."),
                 Line::from(""),
             ],
         ]

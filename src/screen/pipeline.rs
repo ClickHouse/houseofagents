@@ -244,9 +244,14 @@ fn draw_title(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_prompt_area(f: &mut Frame, app: &App, area: Rect) {
+    let in_sub = !app.pipeline.sub_pipeline_stack.is_empty();
     let cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
+        .constraints(if in_sub {
+            [Constraint::Percentage(100), Constraint::Percentage(0)]
+        } else {
+            [Constraint::Percentage(70), Constraint::Percentage(30)]
+        })
         .split(area);
 
     // Initial prompt textarea
@@ -310,87 +315,89 @@ fn draw_prompt_area(f: &mut Frame, app: &App, area: Rect) {
         f.set_cursor_position((x, y));
     }
 
-    // Right column: session name + runs + concurrency
-    let right_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Min(0),
-        ])
-        .split(cols[1]);
+    // Right column: session name + runs + concurrency (hidden inside sub-pipelines)
+    if !in_sub {
+        let right_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Length(3),
+                Constraint::Length(3),
+                Constraint::Min(0),
+            ])
+            .split(cols[1]);
 
-    // Session name field
-    let name_focus = app.pipeline.pipeline_focus == PipelineFocus::SessionName;
-    let name_border = if name_focus {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    let name_display = if app.pipeline.pipeline_session_name.is_empty() {
-        if name_focus {
-            "_".to_string()
+        // Session name field
+        let name_focus = app.pipeline.pipeline_focus == PipelineFocus::SessionName;
+        let name_border = if name_focus {
+            Style::default().fg(Color::Cyan)
         } else {
-            "(optional)".to_string()
-        }
-    } else if name_focus {
-        format!("{}_", app.pipeline.pipeline_session_name)
-    } else {
-        app.pipeline.pipeline_session_name.clone()
-    };
-    let name_style = if app.pipeline.pipeline_session_name.is_empty() && !name_focus {
-        Style::default().fg(Color::DarkGray)
-    } else {
-        Style::default()
-    };
-    let session_name = Paragraph::new(name_display).style(name_style).block(
-        Block::default()
-            .title(" Session Name ")
-            .borders(Borders::ALL)
-            .border_style(name_border),
-    );
-    f.render_widget(session_name, right_chunks[0]);
+            Style::default().fg(Color::DarkGray)
+        };
+        let name_display = if app.pipeline.pipeline_session_name.is_empty() {
+            if name_focus {
+                "_".to_string()
+            } else {
+                "(optional)".to_string()
+            }
+        } else if name_focus {
+            format!("{}_", app.pipeline.pipeline_session_name)
+        } else {
+            app.pipeline.pipeline_session_name.clone()
+        };
+        let name_style = if app.pipeline.pipeline_session_name.is_empty() && !name_focus {
+            Style::default().fg(Color::DarkGray)
+        } else {
+            Style::default()
+        };
+        let session_name = Paragraph::new(name_display).style(name_style).block(
+            Block::default()
+                .title(" Session Name ")
+                .borders(Borders::ALL)
+                .border_style(name_border),
+        );
+        f.render_widget(session_name, right_chunks[0]);
 
-    let runs_focus = app.pipeline.pipeline_focus == PipelineFocus::Runs;
-    let runs_border = if runs_focus {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    let runs_display = if runs_focus {
-        format!("{}_", app.pipeline.pipeline_runs_buf)
-    } else {
-        app.pipeline.pipeline_runs.to_string()
-    };
-    let runs_widget = Paragraph::new(runs_display).block(
-        Block::default()
-            .title(" Runs ")
-            .borders(Borders::ALL)
-            .border_style(runs_border),
-    );
-    f.render_widget(runs_widget, right_chunks[1]);
+        let runs_focus = app.pipeline.pipeline_focus == PipelineFocus::Runs;
+        let runs_border = if runs_focus {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        let runs_display = if runs_focus {
+            format!("{}_", app.pipeline.pipeline_runs_buf)
+        } else {
+            app.pipeline.pipeline_runs.to_string()
+        };
+        let runs_widget = Paragraph::new(runs_display).block(
+            Block::default()
+                .title(" Runs ")
+                .borders(Borders::ALL)
+                .border_style(runs_border),
+        );
+        f.render_widget(runs_widget, right_chunks[1]);
 
-    let concurrency_focus = app.pipeline.pipeline_focus == PipelineFocus::Concurrency;
-    let concurrency_border = if concurrency_focus {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    let concurrency_display = if concurrency_focus {
-        format!("{}_", app.pipeline.pipeline_concurrency_buf)
-    } else if app.pipeline.pipeline_concurrency == 0 {
-        "0 (unlimited)".to_string()
-    } else {
-        app.pipeline.pipeline_concurrency.to_string()
-    };
-    let concurrency_widget = Paragraph::new(concurrency_display).block(
-        Block::default()
-            .title(" Concurrency ")
-            .borders(Borders::ALL)
-            .border_style(concurrency_border),
-    );
-    f.render_widget(concurrency_widget, right_chunks[2]);
+        let concurrency_focus = app.pipeline.pipeline_focus == PipelineFocus::Concurrency;
+        let concurrency_border = if concurrency_focus {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        let concurrency_display = if concurrency_focus {
+            format!("{}_", app.pipeline.pipeline_concurrency_buf)
+        } else if app.pipeline.pipeline_concurrency == 0 {
+            "0 (unlimited)".to_string()
+        } else {
+            app.pipeline.pipeline_concurrency.to_string()
+        };
+        let concurrency_widget = Paragraph::new(concurrency_display).block(
+            Block::default()
+                .title(" Concurrency ")
+                .borders(Borders::ALL)
+                .border_style(concurrency_border),
+        );
+        f.render_widget(concurrency_widget, right_chunks[2]);
+    }
 }
 
 fn draw_canvas(f: &mut Frame, app: &App, area: Rect) {

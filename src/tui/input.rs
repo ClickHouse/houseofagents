@@ -712,6 +712,11 @@ pub(super) fn handle_pipeline_key(app: &mut App, key: KeyEvent) {
                     PipelineFocus::Concurrency => PipelineFocus::Builder,
                     PipelineFocus::Builder => PipelineFocus::InitialPrompt,
                 };
+            } else {
+                app.pipeline.pipeline_focus = match app.pipeline.pipeline_focus {
+                    PipelineFocus::Builder => PipelineFocus::InitialPrompt,
+                    _ => PipelineFocus::Builder,
+                };
             }
         }
         KeyCode::BackTab => {
@@ -722,6 +727,11 @@ pub(super) fn handle_pipeline_key(app: &mut App, key: KeyEvent) {
                     PipelineFocus::Runs => PipelineFocus::SessionName,
                     PipelineFocus::Concurrency => PipelineFocus::Runs,
                     PipelineFocus::Builder => PipelineFocus::Concurrency,
+                };
+            } else {
+                app.pipeline.pipeline_focus = match app.pipeline.pipeline_focus {
+                    PipelineFocus::InitialPrompt => PipelineFocus::Builder,
+                    _ => PipelineFocus::InitialPrompt,
                 };
             }
         }
