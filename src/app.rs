@@ -321,6 +321,8 @@ pub(crate) struct RunningState {
         Option<mpsc::UnboundedReceiver<Result<ResumePreparation, String>>>,
     // Phase 1: Timing
     pub(crate) run_started_at: Option<Instant>,
+    /// Frozen elapsed time — set when the run finishes so the timer stops ticking.
+    pub(crate) run_finished_elapsed: Option<Duration>,
     pub(crate) current_iteration: u32,
     pub(crate) final_iteration: u32,
     pub(crate) agent_timers: HashMap<String, AgentTimer>,
@@ -945,6 +947,9 @@ impl App {
     }
 
     pub fn run_elapsed(&self) -> Duration {
+        if let Some(frozen) = self.running.run_finished_elapsed {
+            return frozen;
+        }
         self.running
             .run_started_at
             .map(|t| t.elapsed())
@@ -1058,6 +1063,7 @@ impl RunningState {
             pending_single_execution: None,
             resume_prepare_rx: None,
             run_started_at: None,
+            run_finished_elapsed: None,
             current_iteration: 0,
             final_iteration: 0,
             agent_timers: HashMap::new(),
@@ -1092,6 +1098,14 @@ impl RunningState {
         self.preview_target = None;
     }
 
+    /// Mark the run as finished and freeze the elapsed timer.
+    pub(crate) fn stop_run(&mut self) {
+        if self.is_running {
+            self.run_finished_elapsed = self.run_started_at.map(|t| t.elapsed());
+            self.is_running = false;
+        }
+    }
+
     fn reset_for_run(&mut self) {
         self.clear_activity();
         self.is_running = true;
@@ -1116,6 +1130,7 @@ impl RunningState {
         self.pending_single_execution = None;
         self.resume_prepare_rx = None;
         self.run_started_at = Some(Instant::now());
+        self.run_finished_elapsed = None;
         self.current_iteration = 0;
         self.final_iteration = 0;
         self.show_activity_log = true;

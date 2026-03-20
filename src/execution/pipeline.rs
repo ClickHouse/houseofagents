@@ -2824,6 +2824,14 @@ async fn run_pipeline_with_provider_factory(
                                             return (rid, Err(e.to_string()));
                                         }
 
+                                        // Cancelled — skip finalization and output read;
+                                        // the run is incomplete and no output files exist.
+                                        if cancel_clone
+                                            .load(std::sync::atomic::Ordering::Relaxed)
+                                        {
+                                            return (rid, Ok(String::new()));
+                                        }
+
                                         // Finalization phase
                                         let exec_rt = build_runtime_table(&sub_def_ctx);
                                         let fin_scope = FinalizationRunScope::SingleRun {
