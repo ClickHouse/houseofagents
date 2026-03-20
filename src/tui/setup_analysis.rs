@@ -1,8 +1,8 @@
 use super::execution::validate_agent_runtime;
 use super::*;
 use crate::execution::pipeline::{
-    self as pipeline_mod, build_runtime_table, root_blocks, terminal_blocks, topological_layers,
-    validate_pipeline,
+    self as pipeline_mod, build_runtime_table, compute_loop_sub_dag, root_blocks, terminal_blocks,
+    topological_layers, validate_pipeline, RegularGraph,
 };
 use crate::execution::truncate_chars;
 
@@ -511,10 +511,82 @@ fn build_pipeline_prompt(app: &App, prompt: &mut String) {
                 .find(|b| b.id == conn.to)
                 .map(pipeline_block_label)
                 .unwrap_or_else(|| format!("Block {}", conn.to));
+            if conn.scatter {
+                let delim = if conn.scatter_delimiter.is_empty() {
+                    crate::execution::pipeline::DEFAULT_SCATTER_DELIMITER
+                } else {
+                    &conn.scatter_delimiter
+                };
+                prompt.push_str(&format!(
+                    "  {} \"{}\" -> {} \"{}\" [SCATTER, delim: \"{}\"]\n",
+                    conn.from, from_label, conn.to, to_label, delim
+                ));
+            } else {
+                prompt.push_str(&format!(
+                    "  {} \"{}\" -> {} \"{}\"\n",
+                    conn.from, from_label, conn.to, to_label
+                ));
+            }
+        }
+    }
+
+    // Scatter warnings
+    let scatter_graph =
+        if def.connections.iter().any(|c| c.scatter) && !def.loop_connections.is_empty() {
+            Some(RegularGraph::from_def(def))
+        } else {
+            None
+        };
+    for conn in &def.connections {
+        if !conn.scatter {
+            continue;
+        }
+        let to_block = def.blocks.iter().find(|b| b.id == conn.to);
+        let to_label = to_block
+            .map(pipeline_block_label)
+            .unwrap_or_else(|| format!("Block {}", conn.to));
+
+        // Check if scatter target is in a loop sub-DAG and whether it's the restart block
+        let mut in_loop = false;
+        let mut is_restart_block = false;
+        for lc in &def.loop_connections {
+            if lc.to == conn.to {
+                in_loop = true;
+                is_restart_block = true;
+                break;
+            }
+            if let Some(ref graph) = scatter_graph {
+                if let Some(sub_dag) = compute_loop_sub_dag(graph, lc.from, lc.to) {
+                    if sub_dag.contains(&conn.to) {
+                        in_loop = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if !in_loop {
+            let capacity = to_block.map(|b| b.logical_task_count()).unwrap_or(1);
             prompt.push_str(&format!(
-                "  {} \"{}\" -> {} \"{}\"\n",
-                conn.from, from_label, conn.to, to_label
+                "\nWARNING: Block {} \"{}\" receives scatter input but is not in a loop. \
+                 Only {} items will be processed per run.\n",
+                conn.to, to_label, capacity
             ));
+        } else if in_loop && !is_restart_block {
+            prompt.push_str(&format!(
+                "\nWARNING: Block {} \"{}\" receives scatter input and is inside a loop sub-DAG \
+                 but is not the loop restart block. Scatter targets inside a loop must be the \
+                 restart block (the block the loop feeds back into).\n",
+                conn.to, to_label
+            ));
+        }
+        if let Some(b) = to_block {
+            if b.replicas == 1 && !in_loop {
+                prompt.push_str(&format!(
+                    "\nNOTE: Block {} \"{}\" receives scatter input with 1 replica. \
+                     Items will be processed sequentially.\n",
+                    conn.to, to_label
+                ));
+            }
         }
     }
 

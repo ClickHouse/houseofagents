@@ -35,7 +35,7 @@ Each agent can run in API mode or CLI mode (`use_cli = true`). Mix and match fre
 
 - **Terminal UI** — select agents, mode, prompt, iterations, run count, and concurrency from an interactive TUI
 - **Named agents** — define multiple agents per provider with independent configs
-- **Pipeline builder** — visual DAG editor for wiring arbitrary agent blocks with dependency-driven execution, independent per-connection routing, loop-back connections for iterative refinement of sub-DAGs, sub-pipeline blocks for encapsulating inner DAGs as opaque units, and an optional finalization DAG for post-execution analysis and summarization
+- **Pipeline builder** — visual DAG editor for wiring arbitrary agent blocks with dependency-driven execution, independent per-connection routing, loop-back connections for iterative refinement of sub-DAGs, scatter connections for distributing work items across replicas, sub-pipeline blocks for encapsulating inner DAGs as opaque units, and an optional finalization DAG for post-execution analysis and summarization
 - **Multiple runs** — launch N independent copies of the same setup in parallel with bounded concurrency
 - **Resume runs** — pick up where you left off in relay or swarm sessions
 - **Forward Prompt** — relay mode option to include the original prompt in every handoff
@@ -353,7 +353,7 @@ Fields vary by mode for options, but every prompt flow includes Prompt, Session 
 | `d` | Delete selected block |
 | `e` | Edit selected block (name, agents, prompt, session ID, replicas) |
 | `c` | Enter connect mode — select a second block to create a connection |
-| `x` | Enter remove-connection mode — pick a connection to delete |
+| `x` | Enter connection-action mode — pick a connection to delete (`Enter`) or toggle scatter (`s`) |
 | `o` | Create loop-back connection — press on the downstream feedback block, then select the upstream restart target; set count and prompt; press on existing loop to edit |
 | `p` | Add a sub-pipeline block — contains a full inner DAG that executes as one opaque unit |
 | `A` | Add a finalization block (placed below the separator in the finalization region) |
@@ -374,6 +374,8 @@ Fields vary by mode for options, but every prompt flow includes Prompt, Session 
 Inside the **edit popup**: `Tab` cycles between Name, Agents (multiselect list — `Up`/`Down` to navigate, `Space` to toggle), Profiles (multiselect list of reusable instruction files), Prompt (text area), Session ID, and Replicas fields. `Esc` closes the popup. Each block can have one or more agents selected. Setting Replicas > 1 spawns that many copies per agent. Total tasks per block = agents × replicas (max 32).
 
 **Sub-pipeline blocks**: Press `p` to create a sub-pipeline block. Press `Enter` or `e` to drill into it and edit its inner DAG. Press `Esc` to pop back to the parent. Sub-pipelines execute as a single opaque unit — the inner DAG's terminal finalization block output becomes the sub-pipeline's output to the parent pipeline. Limitations: one level of nesting only (sub-pipelines cannot contain sub-pipelines), the inner pipeline must have exactly one finalization leaf with a single agent and `replicas = 1`. Save/Load and Tab focus switching are disabled while inside a sub-pipeline.
+
+**Scatter connections**: A scatter connection splits an upstream block's output into discrete work items using a configurable delimiter (default `===SCATTER_ITEM===`) and distributes them across replicas of the downstream block. To toggle scatter: press `x` to enter connection-action mode, navigate to the connection, and press `s`. Each replica pops one item at a time from an in-memory queue. Combine with a loop connection for full queue drain — replicas keep processing items until the queue is empty, at which point the loop terminates automatically (loop count acts as a safety cap). The scatter target must be the loop's restart block (the block the loop feeds back into). Scatter wires render as dashed lines (`╌╎`) in cyan. Constraints: source must have exactly 1 agent and 1 replica, target cannot be a sub-pipeline block, max 1 scatter input per block.
 
 ### Order Screen (relay with 2+ agents)
 
@@ -449,6 +451,9 @@ output_dir/
       Worker_b3_Claude_r3.md               # replica 3
       Analyzer_b1_Claude_loop1.md          # loop pass 1 (from loop connection)
       Analyzer_b1_Claude_loop2.md          # loop pass 2
+      Fixer_b5_Claude_r1_item0.md          # scatter: replica 1, item 0 (pass 0)
+      Fixer_b5_Claude_r2_item1.md          # scatter: replica 2, item 1 (pass 0)
+      Fixer_b5_Claude_r1_item2_loop1.md    # scatter: replica 1, item 2 (loop pass 1)
       _errors.log
 ```
 

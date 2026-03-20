@@ -320,6 +320,18 @@ fn is_pipeline_output_filename_loop_variants() {
 }
 
 #[test]
+fn is_pipeline_output_filename_scatter_variants() {
+    assert!(is_pipeline_output_filename("Fixer_b2_Claude_r0_item3.md"));
+    assert!(is_pipeline_output_filename("Fixer_b2_Claude_r1_item1.md"));
+    assert!(is_pipeline_output_filename(
+        "Fixer_b2_Claude_r0_item4_loop1.md"
+    ));
+    assert!(is_pipeline_output_filename("block2_claude_item0.md"));
+    // Not a pipeline file: no _b{N}_ pattern
+    assert!(!is_pipeline_output_filename("random_item3.md"));
+}
+
+#[test]
 fn parse_iteration_from_filename_matches_block_files() {
     // Named block format
     assert_eq!(
@@ -2318,7 +2330,7 @@ fn test_loop_connect_creates_loop() {
     app.pipeline
         .pipeline_def
         .connections
-        .push(PipelineConnection { from: 1, to: 2 });
+        .push(PipelineConnection::new(1, 2));
     // Enter loop connect mode from block 2 (downstream feedback source)
     app.pipeline.pipeline_loop_connecting_from = Some(2);
     // Cursor on block 1 (upstream restart target)
@@ -2381,7 +2393,7 @@ fn test_regular_connect_allows_loop_pair() {
     app.pipeline
         .pipeline_def
         .connections
-        .push(crate::execution::pipeline::PipelineConnection { from: 1, to: 2 });
+        .push(crate::execution::pipeline::PipelineConnection::new(1, 2));
     app.pipeline
         .pipeline_def
         .loop_connections
@@ -2646,7 +2658,7 @@ fn setup_analysis_prompt_pipeline() {
             sub_pipeline: None,
         },
     ];
-    app.pipeline.pipeline_def.connections = vec![PipelineConnection { from: 1, to: 2 }];
+    app.pipeline.pipeline_def.connections = vec![PipelineConnection::new(1, 2)];
 
     let prompt = build_setup_analysis_prompt(&app);
     assert!(prompt.contains("Mode: Pipeline"));
@@ -2929,7 +2941,7 @@ fn setup_analysis_invalid_pipeline() {
         sub_pipeline: None,
     }];
     // Self-edge
-    app.pipeline.pipeline_def.connections = vec![PipelineConnection { from: 1, to: 1 }];
+    app.pipeline.pipeline_def.connections = vec![PipelineConnection::new(1, 1)];
     start_setup_analysis(&mut app);
     assert!(app.setup_analysis.active);
     assert!(app.setup_analysis.content.contains("validation failed"));
@@ -3118,10 +3130,8 @@ fn test_delete_internal_block_prunes_loop() {
             sub_pipeline: None,
         },
     ];
-    app.pipeline.pipeline_def.connections = vec![
-        PipelineConnection { from: 1, to: 2 },
-        PipelineConnection { from: 2, to: 3 },
-    ];
+    app.pipeline.pipeline_def.connections =
+        vec![PipelineConnection::new(1, 2), PipelineConnection::new(2, 3)];
     app.pipeline.pipeline_def.loop_connections = vec![LoopConnection {
         from: 3,
         to: 1,

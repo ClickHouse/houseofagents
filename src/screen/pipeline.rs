@@ -2,7 +2,7 @@ use crate::app::{
     App, PipelineDialogMode, PipelineEditField, PipelineFeedEditField, PipelineFocus,
     PipelineLoopEditField,
 };
-use crate::execution::pipeline::BlockId;
+use crate::execution::pipeline::{BlockId, DEFAULT_SCATTER_DELIMITER};
 use crate::execution::{fit_display_width, truncate_chars};
 use crate::screen::centered_rect;
 use crate::screen::help;
@@ -29,11 +29,38 @@ struct WireSeg {
     y2: i16,
 }
 
+/// (priority, raster, optional scatter-label position)
+type RenderedConnection = (u8, ConnectionRaster, Option<(i16, i16)>);
+
+/// Find the midpoint of the longest horizontal wire segment for label placement.
+fn scatter_label_midpoint(segs: &[WireSeg]) -> Option<(i16, i16)> {
+    let mut best: Option<(i16, &WireSeg)> = None;
+    for seg in segs {
+        if seg.y1 == seg.y2 {
+            let len = (seg.x2 - seg.x1).abs();
+            if len > best.map_or(0, |(l, _)| l) {
+                best = Some((len, seg));
+            }
+        }
+    }
+    best.filter(|(len, _)| *len >= 2).map(|(_, seg)| {
+        let mid_x = (seg.x1 + seg.x2) / 2;
+        (mid_x, seg.y1)
+    })
+}
+
 /// Direction bitmask constants for glyph merging.
 const DIR_N: u8 = 1;
 const DIR_E: u8 = 2;
 const DIR_S: u8 = 4;
 const DIR_W: u8 = 8;
+
+#[derive(Clone, Copy, PartialEq)]
+enum WireStyle {
+    Regular,
+    Loop,
+    Scatter,
+}
 
 /// Accumulated wire state at one pixel.
 struct WireCell {
@@ -41,7 +68,7 @@ struct WireCell {
     color: Color,
     is_arrow: bool,
     arrow_char: char,
-    is_loop: bool,
+    style: WireStyle,
 }
 
 type WirePoint = (i16, i16);
@@ -178,6 +205,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     if app.pipeline.pipeline_show_feed_edit {
         draw_feed_edit_popup(f, app, area);
     }
+    if app.pipeline.pipeline_scatter_edit {
+        draw_scatter_edit_popup(f, app, area);
+    }
     if app.help_popup.active {
         let tab = app.help_popup.tab;
         let name = help::PIPELINE_TAB_NAMES[tab];
@@ -268,6 +298,7 @@ fn draw_prompt_area(f: &mut Frame, app: &App, area: Rect) {
         || app.pipeline.pipeline_show_loop_edit
         || app.pipeline.pipeline_show_feed_edit
         || app.pipeline.pipeline_show_feed_list
+        || app.pipeline.pipeline_scatter_edit
         || app.error_modal.is_some()
         || app.info_modal.is_some()
         || app.help_popup.active
@@ -557,7 +588,7 @@ fn draw_canvas(f: &mut Frame, app: &App, area: Rect) {
         None
     };
 
-    let mut rendered_connections: Vec<(u8, ConnectionRaster)> = Vec::new();
+    let mut rendered_connections: Vec<RenderedConnection> = Vec::new();
 
     for (ci, conn) in app.pipeline.pipeline_def.connections.iter().enumerate() {
         let fb = app
@@ -613,29 +644,44 @@ fn draw_canvas(f: &mut Frame, app: &App, area: Rect) {
                         color,
                         is_arrow: true,
                         arrow_char: arrow_ch,
-                        is_loop: false,
+                        style: WireStyle::Regular,
                     },
                 );
             }
         }
-        rendered_connections.push((color_rank(color), conn_map));
+        // Apply scatter styling + find midpoint for "S" label
+        let scatter_label_pos = if conn.scatter {
+            for cell in conn_map.values_mut() {
+                cell.style = WireStyle::Scatter;
+                if !highlighted {
+                    cell.color = Color::LightCyan;
+                }
+            }
+            // Find longest horizontal segment for "S" label placement
+            scatter_label_midpoint(&segs)
+        } else {
+            None
+        };
+        rendered_connections.push((color_rank(color), conn_map, scatter_label_pos));
     }
 
     // Draw lower-priority wires first so highlighted wires remain visible.
-    rendered_connections.sort_by_key(|(rank, _)| *rank);
+    rendered_connections.sort_by_key(|(rank, _, _)| *rank);
 
     // Paint each connection independently; do not merge glyphs across connections.
-    for (_, conn_map) in rendered_connections {
-        for (&(wx, wy), cell) in &conn_map {
+    for (_, conn_map, scatter_label) in &rendered_connections {
+        for (&(wx, wy), cell) in conn_map {
             if pixel_hits_block(wx, wy, &app.pipeline.pipeline_def.blocks) {
                 continue;
             }
             let ch = if cell.is_arrow {
                 cell.arrow_char
-            } else if cell.is_loop {
-                dirs_to_double_char(cell.dirs)
             } else {
-                dirs_to_char(cell.dirs)
+                match cell.style {
+                    WireStyle::Loop => dirs_to_double_char(cell.dirs),
+                    WireStyle::Scatter => dirs_to_dashed_char(cell.dirs),
+                    WireStyle::Regular => dirs_to_char(cell.dirs),
+                }
             };
             put_char(
                 f,
@@ -644,6 +690,18 @@ fn draw_canvas(f: &mut Frame, app: &App, area: Rect) {
                 wy - oy,
                 ch,
                 Style::default().fg(cell.color),
+            );
+        }
+        if let Some((sx, sy)) = scatter_label {
+            put_char(
+                f,
+                canvas_inner,
+                sx - ox,
+                sy - oy,
+                'S',
+                Style::default()
+                    .fg(Color::LightCyan)
+                    .add_modifier(ratatui::style::Modifier::BOLD),
             );
         }
     }
@@ -655,10 +713,7 @@ fn draw_canvas(f: &mut Frame, app: &App, area: Rect) {
             .pipeline_def
             .loop_connections
             .iter()
-            .map(|lc| crate::execution::pipeline::PipelineConnection {
-                from: lc.from,
-                to: lc.to,
-            })
+            .map(|lc| crate::execution::pipeline::PipelineConnection::new(lc.from, lc.to))
             .collect();
         if !loop_conns_as_regular.is_empty() {
             let loop_lanes =
@@ -736,7 +791,7 @@ fn draw_canvas(f: &mut Frame, app: &App, area: Rect) {
                 }
                 // Mark all cells as loop
                 for cell in conn_map.values_mut() {
-                    cell.is_loop = true;
+                    cell.style = WireStyle::Loop;
                 }
                 // Arrow
                 if let Some(last) = segs.last() {
@@ -752,7 +807,7 @@ fn draw_canvas(f: &mut Frame, app: &App, area: Rect) {
                                 color,
                                 is_arrow: true,
                                 arrow_char: arrow_ch,
-                                is_loop: true,
+                                style: WireStyle::Loop,
                             },
                         );
                     }
@@ -1099,7 +1154,7 @@ fn draw_canvas(f: &mut Frame, app: &App, area: Rect) {
                                 color,
                                 is_arrow: true,
                                 arrow_char: arrow_ch,
-                                is_loop: false,
+                                style: WireStyle::Regular,
                             },
                         );
                     }
@@ -1144,8 +1199,26 @@ fn draw_canvas(f: &mut Frame, app: &App, area: Rect) {
         let sy = canvas_inner.y + canvas_inner.height.saturating_sub(1);
         f.render_widget(status, Rect::new(canvas_inner.x, sy, canvas_inner.width, 1));
     } else if app.pipeline.pipeline_removing_conn {
-        let status = Paragraph::new("\u{2191}\u{2193} cycle connections, Enter=remove, Esc=cancel")
-            .style(Style::default().fg(Color::Yellow));
+        let mut status_text =
+            "\u{2191}\u{2193} cycle, Enter=remove, s=scatter, Esc=cancel".to_string();
+        // Show scatter state for highlighted connection
+        let sel = app.pipeline.pipeline_block_cursor.unwrap_or(0);
+        let mut conn_idx = 0usize;
+        for c in &app.pipeline.pipeline_def.connections {
+            if c.from == sel || c.to == sel {
+                if conn_idx == app.pipeline.pipeline_conn_cursor && c.scatter {
+                    let delim = if c.scatter_delimiter.is_empty() {
+                        DEFAULT_SCATTER_DELIMITER
+                    } else {
+                        &c.scatter_delimiter
+                    };
+                    status_text.push_str(&format!("  [scatter: on, delim: \"{delim}\"]"));
+                    break;
+                }
+                conn_idx += 1;
+            }
+        }
+        let status = Paragraph::new(status_text).style(Style::default().fg(Color::Yellow));
         let sy = canvas_inner.y + canvas_inner.height.saturating_sub(1);
         f.render_widget(status, Rect::new(canvas_inner.x, sy, canvas_inner.width, 1));
     }
@@ -1430,7 +1503,7 @@ fn rasterize_seg(seg: &WireSeg, color: Color, map: &mut HashMap<(i16, i16), Wire
                 color,
                 is_arrow: false,
                 arrow_char: ' ',
-                is_loop: false,
+                style: WireStyle::Regular,
             });
             if x > lo {
                 c.dirs |= DIR_W;
@@ -1455,7 +1528,7 @@ fn rasterize_seg(seg: &WireSeg, color: Color, map: &mut HashMap<(i16, i16), Wire
                 color,
                 is_arrow: false,
                 arrow_char: ' ',
-                is_loop: false,
+                style: WireStyle::Regular,
             });
             if y > lo {
                 c.dirs |= DIR_N;
@@ -1505,6 +1578,14 @@ fn dirs_to_double_char(d: u8) -> char {
         d if d & (DIR_E | DIR_W) != 0 => '═',
         d if d & (DIR_N | DIR_S) != 0 => '║',
         _ => '·',
+    }
+}
+
+fn dirs_to_dashed_char(d: u8) -> char {
+    match d {
+        d if d == DIR_E | DIR_W => '\u{254C}', // ╌
+        d if d == DIR_N | DIR_S => '\u{254E}', // ╎
+        _ => dirs_to_char(d),                  // Corners: no dashed equivalents, fall back
     }
 }
 
@@ -1626,7 +1707,7 @@ pub(crate) fn render_dag_readonly(
     let lanes = assign_lanes(connections, blocks);
     let ports = assign_ports(connections, blocks);
 
-    let mut rendered_connections: Vec<(u8, ConnectionRaster)> = Vec::new();
+    let mut rendered_connections: Vec<RenderedConnection> = Vec::new();
 
     for (ci, conn) in connections.iter().enumerate() {
         let fb = blocks.iter().find(|b| b.id == conn.from);
@@ -1662,27 +1743,39 @@ pub(crate) fn render_dag_readonly(
                         color,
                         is_arrow: true,
                         arrow_char: arrow_ch,
-                        is_loop: false,
+                        style: WireStyle::Regular,
                     },
                 );
             }
         }
-        rendered_connections.push((color_rank(color), conn_map));
+        // Apply scatter styling + find midpoint for "S" label
+        let scatter_label_pos = if conn.scatter {
+            for cell in conn_map.values_mut() {
+                cell.color = Color::LightCyan;
+                cell.style = WireStyle::Scatter;
+            }
+            scatter_label_midpoint(&segs)
+        } else {
+            None
+        };
+        rendered_connections.push((color_rank(color), conn_map, scatter_label_pos));
     }
 
-    rendered_connections.sort_by_key(|(rank, _)| *rank);
+    rendered_connections.sort_by_key(|(rank, _, _)| *rank);
 
-    for (_, conn_map) in rendered_connections {
-        for (&(wx, wy), cell) in &conn_map {
+    for (_, conn_map, scatter_label) in &rendered_connections {
+        for (&(wx, wy), cell) in conn_map {
             if pixel_hits_block(wx, wy, blocks) {
                 continue;
             }
             let ch = if cell.is_arrow {
                 cell.arrow_char
-            } else if cell.is_loop {
-                dirs_to_double_char(cell.dirs)
             } else {
-                dirs_to_char(cell.dirs)
+                match cell.style {
+                    WireStyle::Loop => dirs_to_double_char(cell.dirs),
+                    WireStyle::Scatter => dirs_to_dashed_char(cell.dirs),
+                    WireStyle::Regular => dirs_to_char(cell.dirs),
+                }
             };
             put_char(
                 f,
@@ -1693,6 +1786,18 @@ pub(crate) fn render_dag_readonly(
                 Style::default().fg(cell.color),
             );
         }
+        if let Some((sx, sy)) = scatter_label {
+            put_char(
+                f,
+                area,
+                sx - ox,
+                sy - oy,
+                'S',
+                Style::default()
+                    .fg(Color::LightCyan)
+                    .add_modifier(ratatui::style::Modifier::BOLD),
+            );
+        }
     }
 
     // ── Loop connection rendering (readonly) ──
@@ -1700,10 +1805,7 @@ pub(crate) fn render_dag_readonly(
         let loop_conns_as_regular: Vec<crate::execution::pipeline::PipelineConnection> =
             loop_connections
                 .iter()
-                .map(|lc| crate::execution::pipeline::PipelineConnection {
-                    from: lc.from,
-                    to: lc.to,
-                })
+                .map(|lc| crate::execution::pipeline::PipelineConnection::new(lc.from, lc.to))
                 .collect();
         if !loop_conns_as_regular.is_empty() {
             let loop_lanes = assign_lanes(&loop_conns_as_regular, blocks);
@@ -1732,7 +1834,7 @@ pub(crate) fn render_dag_readonly(
                     rasterize_seg(seg, color, &mut conn_map);
                 }
                 for cell in conn_map.values_mut() {
-                    cell.is_loop = true;
+                    cell.style = WireStyle::Loop;
                 }
                 if let Some(last) = segs.last() {
                     let arrow_ch = arrow_for_seg(last);
@@ -1747,7 +1849,7 @@ pub(crate) fn render_dag_readonly(
                                 color,
                                 is_arrow: true,
                                 arrow_char: arrow_ch,
-                                is_loop: true,
+                                style: WireStyle::Loop,
                             },
                         );
                     }
@@ -2828,6 +2930,50 @@ fn draw_loop_edit_popup(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(hint, chunks[7]);
 }
 
+fn draw_scatter_edit_popup(f: &mut Frame, app: &App, area: Rect) {
+    let popup = centered_rect(40, 20, area);
+    f.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .title(" Scatter Delimiter ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::LightCyan));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // label
+            Constraint::Length(1), // input
+            Constraint::Length(1), // gap
+            Constraint::Length(1), // hint
+        ])
+        .split(inner);
+
+    let label = Paragraph::new("Delimiter string:");
+    f.render_widget(label, chunks[0]);
+
+    let buf = &app.pipeline.pipeline_scatter_delimiter_buf;
+    let cursor = app.pipeline.pipeline_scatter_delimiter_cursor;
+    let visible =
+        Paragraph::new(buf.as_str()).style(Style::default().fg(Color::White).bg(Color::DarkGray));
+    f.render_widget(visible, chunks[1]);
+
+    // Cursor
+    let byte_pos = cursor.min(buf.len());
+    let char_offset = buf[..byte_pos].chars().count() as u16;
+    f.set_cursor_position((chunks[1].x + char_offset, chunks[1].y));
+
+    let hint_text = if app.pipeline.pipeline_scatter_edit_is_new {
+        "Enter=save  Esc=cancel"
+    } else {
+        "Enter=save  Del=remove scatter  Esc=close"
+    };
+    let hint = Paragraph::new(hint_text).style(Style::default().fg(Color::DarkGray));
+    f.render_widget(hint, chunks[3]);
+}
+
 fn draw_feed_edit_popup(f: &mut Frame, app: &App, area: Rect) {
     let popup = centered_rect(50, 30, area);
     f.render_widget(Clear, popup);
@@ -3186,9 +3332,9 @@ mod routing_tests {
             block_at(4, 1, 0),
         ];
         let conns = vec![
-            PipelineConnection { from: 1, to: 4 },
-            PipelineConnection { from: 2, to: 4 },
-            PipelineConnection { from: 3, to: 4 },
+            PipelineConnection::new(1, 4),
+            PipelineConnection::new(2, 4),
+            PipelineConnection::new(3, 4),
         ];
         let lanes = assign_lanes(&conns, &blocks);
         let mut sorted = lanes.clone();
@@ -3359,9 +3505,9 @@ mod routing_tests {
         // map it to the correct global connection index.
         let blocks = vec![block_at(1, 0, 0), block_at(2, 1, 0), block_at(3, 2, 0)];
         let conns = vec![
-            PipelineConnection { from: 1, to: 2 }, // global 0
-            PipelineConnection { from: 2, to: 3 }, // global 1
-            PipelineConnection { from: 1, to: 3 }, // global 2
+            PipelineConnection::new(1, 2), // global 0
+            PipelineConnection::new(2, 3), // global 1
+            PipelineConnection::new(1, 3), // global 2
         ];
 
         // Simulate selecting block 2 (sel=2) in remove mode.
@@ -3475,9 +3621,9 @@ mod routing_tests {
             block_at(4, 1, 2),
         ];
         let conns = vec![
-            PipelineConnection { from: 1, to: 2 },
-            PipelineConnection { from: 1, to: 3 },
-            PipelineConnection { from: 1, to: 4 },
+            PipelineConnection::new(1, 2),
+            PipelineConnection::new(1, 3),
+            PipelineConnection::new(1, 4),
         ];
         let ports = assign_ports(&conns, &blocks);
         let exit_offsets: Vec<i16> = ports.iter().map(|p| p.0).collect();
@@ -3492,9 +3638,9 @@ mod routing_tests {
 
         // Fan-in: 3 blocks into one
         let conns_in = vec![
-            PipelineConnection { from: 2, to: 1 },
-            PipelineConnection { from: 3, to: 1 },
-            PipelineConnection { from: 4, to: 1 },
+            PipelineConnection::new(2, 1),
+            PipelineConnection::new(3, 1),
+            PipelineConnection::new(4, 1),
         ];
         let ports_in = assign_ports(&conns_in, &blocks);
         let entry_offsets: Vec<i16> = ports_in.iter().map(|p| p.1).collect();
@@ -3520,9 +3666,9 @@ mod routing_tests {
             block_at(4, 2, 1),
         ];
         let conns = vec![
-            PipelineConnection { from: 1, to: 4 },
-            PipelineConnection { from: 2, to: 4 },
-            PipelineConnection { from: 3, to: 4 },
+            PipelineConnection::new(1, 4),
+            PipelineConnection::new(2, 4),
+            PipelineConnection::new(3, 4),
         ];
         let occ = grid_occupancy(&blocks);
         let lanes = assign_lanes(&conns, &blocks);

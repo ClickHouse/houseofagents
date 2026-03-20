@@ -450,6 +450,12 @@ pub(crate) struct PipelineState {
     pub(crate) pipeline_show_feed_list: bool,
     pub(crate) pipeline_feed_list_cursor: usize,
     pub(crate) pipeline_feed_list_target: Option<BlockId>,
+    pub(crate) pipeline_scatter_edit: bool,
+    pub(crate) pipeline_scatter_delimiter_buf: String,
+    pub(crate) pipeline_scatter_delimiter_cursor: usize,
+    pub(crate) pipeline_scatter_edit_conn_idx: usize,
+    /// True when editing a newly enabled scatter (Esc reverts), false for re-edit (Esc cancels).
+    pub(crate) pipeline_scatter_edit_is_new: bool,
 }
 
 pub(crate) struct PendingSingleExecution {
@@ -1479,6 +1485,11 @@ impl PipelineState {
             pipeline_show_feed_list: false,
             pipeline_feed_list_cursor: 0,
             pipeline_feed_list_target: None,
+            pipeline_scatter_edit: false,
+            pipeline_scatter_delimiter_buf: String::new(),
+            pipeline_scatter_delimiter_cursor: 0,
+            pipeline_scatter_edit_conn_idx: 0,
+            pipeline_scatter_edit_is_new: false,
         }
     }
 }

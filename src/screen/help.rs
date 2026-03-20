@@ -415,6 +415,24 @@ pub fn pipeline_help_lines(tab: usize) -> &'static [Line<'static>] {
                 Line::from("  each pass, the agent evaluates outputs and responds"),
                 Line::from("  BREAK or CONTINUE."),
                 Line::from(""),
+                Line::from(Span::styled(
+                    "  Scatter Connections",
+                    Style::default().fg(Color::Cyan),
+                )),
+                Line::from(vec![
+                    Span::styled("  s", k),
+                    Span::raw(": Toggle/edit scatter on highlighted connection"),
+                ]),
+                Line::from("    (in connection-action mode, press x first)"),
+                Line::from("    Press s again to re-edit delimiter; Del in popup to remove."),
+                Line::from("    Scatter splits upstream output into work items"),
+                Line::from("    distributed across replicas via an atomic queue."),
+                Line::from("    Replicas loop until the queue is drained."),
+                Line::from("    Scatter target must be the loop restart block."),
+                Line::from(""),
+                Line::from("  Scatter wires are drawn as dashed (\u{254C}\u{254E}) in cyan."),
+                Line::from("  Default delimiter: ===SCATTER_ITEM==="),
+                Line::from(""),
             ],
             // Tab 4: Sessions
             vec![
