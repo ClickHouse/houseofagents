@@ -206,6 +206,10 @@ pub trait Provider: Send {
     }
     /// Add an allowed directory for CLI-mode providers. No-op for API providers.
     fn add_allowed_dir(&mut self, _dir: String) {}
+    /// Return the provider's session ID, if any. Only CLI-mode providers have sessions.
+    fn session_id(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// Prune message history by byte budget — remove oldest messages until total fits.

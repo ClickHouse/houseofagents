@@ -10,6 +10,7 @@ pub(crate) struct MockProvider {
     responses: VecDeque<Result<CompletionResponse, AppError>>,
     received: Arc<Mutex<Vec<String>>>,
     live_tx: Option<mpsc::UnboundedSender<String>>,
+    session_id: Option<String>,
 }
 
 pub(crate) struct PanicProvider {
@@ -28,11 +29,17 @@ impl MockProvider {
             responses: VecDeque::from(responses),
             received,
             live_tx: None,
+            session_id: None,
         }
     }
 
     pub(crate) fn ok(kind: ProviderKind, content: &str, received: Arc<Mutex<Vec<String>>>) -> Self {
         Self::with_responses(kind, vec![ok_response(content)], received)
+    }
+
+    pub(crate) fn with_session_id(mut self, sid: &str) -> Self {
+        self.session_id = Some(sid.to_string());
+        self
     }
 
     pub(crate) fn err(
@@ -66,6 +73,10 @@ impl Provider for MockProvider {
     }
 
     fn clear_history(&mut self) {}
+
+    fn session_id(&self) -> Option<&str> {
+        self.session_id.as_deref()
+    }
 
     fn set_live_log_sender(&mut self, tx: Option<mpsc::UnboundedSender<String>>) {
         self.live_tx = tx;

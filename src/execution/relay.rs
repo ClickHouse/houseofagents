@@ -4,7 +4,7 @@ use crate::execution::{
 };
 use crate::output::OutputManager;
 use crate::provider::Provider;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -25,6 +25,7 @@ pub async fn run_relay(
 ) -> Result<(), AppError> {
     let has_initial_last_output = initial_last_output.is_some();
     let mut last_output = initial_last_output.unwrap_or_default();
+    let mut logged_sessions: HashSet<(String, String)> = HashSet::new();
 
     // Pre-compute agent names/kinds for building messages without borrowing agents
     let agent_info: Vec<(String, crate::provider::ProviderKind)> = agents
@@ -93,6 +94,27 @@ pub async fn run_relay(
                 prompt_context.augment_prompt_for_agent(&base_message, receiver_is_cli)
             };
 
+            // Log session ID early if already known (Anthropic generates client-side)
+            if let Some(sid) = agents[i].1.session_id() {
+                let dedupe_key = (name.to_string(), sid.to_string());
+                if logged_sessions.insert(dedupe_key) {
+                    let _ = progress_tx.send(ProgressEvent::AgentLog {
+                        agent: name.clone(),
+                        kind: *kind,
+                        iteration,
+                        message: format!("Session ID: {sid}"),
+                    });
+                    if let Err(e) = output.append_session_entry(name, name, sid, None, None) {
+                        let _ = progress_tx.send(ProgressEvent::AgentLog {
+                            agent: name.clone(),
+                            kind: *kind,
+                            iteration,
+                            message: format!("Failed to write session entry: {e}"),
+                        });
+                    }
+                }
+            }
+
             // Use run_with_cancellation so cancel aborts the in-flight request
             let result = run_with_cancellation(
                 agents[i].1.as_mut(),
@@ -142,6 +164,26 @@ pub async fn run_relay(
                             message: format!("CLI {log}"),
                         });
                     }
+                    if let Some(sid) = agents[i].1.session_id() {
+                        let dedupe_key = (name.to_string(), sid.to_string());
+                        if logged_sessions.insert(dedupe_key) {
+                            let _ = progress_tx.send(ProgressEvent::AgentLog {
+                                agent: name.clone(),
+                                kind: *kind,
+                                iteration,
+                                message: format!("Session ID: {sid}"),
+                            });
+                            if let Err(e) = output.append_session_entry(name, name, sid, None, None)
+                            {
+                                let _ = progress_tx.send(ProgressEvent::AgentLog {
+                                    agent: name.clone(),
+                                    kind: *kind,
+                                    iteration,
+                                    message: format!("Failed to write session entry: {e}"),
+                                });
+                            }
+                        }
+                    }
                     let preview = resp.content.lines().take(3).collect::<Vec<_>>().join(" | ");
                     let _ = progress_tx.send(ProgressEvent::AgentLog {
                         agent: name.clone(),
@@ -182,6 +224,27 @@ pub async fn run_relay(
                     last_output = resp.content;
                 }
                 Err(e) => {
+                    if let Some(sid) = agents[i].1.session_id() {
+                        let dedupe_key = (name.to_string(), sid.to_string());
+                        if logged_sessions.insert(dedupe_key) {
+                            let _ = progress_tx.send(ProgressEvent::AgentLog {
+                                agent: name.clone(),
+                                kind: *kind,
+                                iteration,
+                                message: format!("Session ID: {sid}"),
+                            });
+                            if let Err(e) =
+                                output.append_session_entry(name, name, sid, None, None)
+                            {
+                                let _ = progress_tx.send(ProgressEvent::AgentLog {
+                                    agent: name.clone(),
+                                    kind: *kind,
+                                    iteration,
+                                    message: format!("Failed to write session entry: {e}"),
+                                });
+                            }
+                        }
+                    }
                     let err_str = e.to_string();
                     if let Err(log_err) =
                         output.append_error(&format!("{name} iter{iteration}: {err_str}"))
@@ -645,5 +708,43 @@ mod tests {
         assert!(b_msgs[0].contains("Original task: write a poem"));
         assert!(b_msgs[0].contains("Read the previous agent output from file"));
         assert!(b_msgs[0].contains("Claude_iter1.md"));
+    }
+
+    #[tokio::test]
+    async fn relay_emits_session_id_log_and_writes_sessions_file() {
+        let dir = tempdir().expect("tempdir");
+        let out = OutputManager::new(dir.path(), None).expect("out");
+        let recv = Arc::new(Mutex::new(Vec::new()));
+        let provider = MockProvider::ok(ProviderKind::Anthropic, "output", recv)
+            .with_session_id("test-session-123");
+        let agents = vec![named("Claude", ProviderKind::Anthropic, Box::new(provider))];
+        let (tx, rx) = mpsc::unbounded_channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        run_relay(
+            &context("p"),
+            agents,
+            1,
+            1,
+            None,
+            false,
+            true,
+            HashMap::new(),
+            &out,
+            tx,
+            cancel,
+        )
+        .await
+        .expect("run");
+
+        let events = collect_progress_events(rx);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            ProgressEvent::AgentLog { message, .. }
+            if message.contains("Session ID: test-session-123")
+        )));
+        let content = std::fs::read_to_string(out.run_dir().join("_sessions.toml")).expect("read");
+        assert!(content.contains("test-session-123"));
+        assert!(content.contains(r#"block = "Claude""#));
     }
 }

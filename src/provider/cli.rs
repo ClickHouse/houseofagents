@@ -507,6 +507,10 @@ impl Provider for CliProvider {
         }
     }
 
+    fn session_id(&self) -> Option<&str> {
+        self.session_id.as_deref()
+    }
+
     fn clear_history(&mut self) {
         self.history.clear();
         self.session_started = false;

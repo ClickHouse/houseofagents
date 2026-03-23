@@ -4,7 +4,7 @@ use crate::execution::{
 };
 use crate::output::OutputManager;
 use crate::provider::Provider;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -26,6 +26,7 @@ pub async fn run_swarm(
     cancel: Arc<AtomicBool>,
 ) -> Result<(), AppError> {
     let mut last_round_outputs = initial_last_round_outputs;
+    let logged_sessions = Arc::new(std::sync::Mutex::new(HashSet::<(String, String)>::new()));
 
     for offset in 0..iterations {
         let iteration = start_iteration + offset;
@@ -84,6 +85,7 @@ pub async fn run_swarm(
             let tx = progress_tx.clone();
             let cancel_flag = cancel.clone();
             let task_output = output.clone();
+            let task_logged = logged_sessions.clone();
             let iter = iteration;
 
             let handle = tokio::spawn(async move {
@@ -92,6 +94,34 @@ pub async fn run_swarm(
                 }
 
                 let kind = provider.kind();
+
+                // Log session ID early if already known (Anthropic generates client-side)
+                if let Some(sid) = provider.session_id() {
+                    let dedupe_key = (agent_name.clone(), sid.to_string());
+                    if task_logged.lock().expect("lock").insert(dedupe_key) {
+                        let _ = tx.send(ProgressEvent::AgentLog {
+                            agent: agent_name.clone(),
+                            kind,
+                            iteration: iter,
+                            message: format!("Session ID: {sid}"),
+                        });
+                        if let Err(e) = task_output.append_session_entry(
+                            &agent_name,
+                            &agent_name,
+                            sid,
+                            None,
+                            None,
+                        ) {
+                            let _ = tx.send(ProgressEvent::AgentLog {
+                                agent: agent_name.clone(),
+                                kind,
+                                iteration: iter,
+                                message: format!("Failed to write session entry: {e}"),
+                            });
+                        }
+                    }
+                }
+
                 let result = run_with_cancellation(
                     provider.as_mut(),
                     &message,
@@ -137,6 +167,31 @@ pub async fn run_swarm(
                                 message: format!("CLI {log}"),
                             });
                         }
+                        if let Some(sid) = provider.session_id() {
+                            let dedupe_key = (agent_name.clone(), sid.to_string());
+                            if task_logged.lock().expect("lock").insert(dedupe_key) {
+                                let _ = tx.send(ProgressEvent::AgentLog {
+                                    agent: agent_name.clone(),
+                                    kind,
+                                    iteration: iter,
+                                    message: format!("Session ID: {sid}"),
+                                });
+                                if let Err(e) = task_output.append_session_entry(
+                                    &agent_name,
+                                    &agent_name,
+                                    sid,
+                                    None,
+                                    None,
+                                ) {
+                                    let _ = tx.send(ProgressEvent::AgentLog {
+                                        agent: agent_name.clone(),
+                                        kind,
+                                        iteration: iter,
+                                        message: format!("Failed to write session entry: {e}"),
+                                    });
+                                }
+                            }
+                        }
                         let preview = resp.content.lines().take(3).collect::<Vec<_>>().join(" | ");
                         let _ = tx.send(ProgressEvent::AgentLog {
                             agent: agent_name.clone(),
@@ -178,6 +233,33 @@ pub async fn run_swarm(
                         )
                     }
                     Err(e) => {
+                        if let Some(sid) = provider.session_id() {
+                            let dedupe_key = (agent_name.clone(), sid.to_string());
+                            if task_logged.lock().expect("lock").insert(dedupe_key) {
+                                let _ = tx.send(ProgressEvent::AgentLog {
+                                    agent: agent_name.clone(),
+                                    kind,
+                                    iteration: iter,
+                                    message: format!("Session ID: {sid}"),
+                                });
+                                if let Err(e) = task_output.append_session_entry(
+                                    &agent_name,
+                                    &agent_name,
+                                    sid,
+                                    None,
+                                    None,
+                                ) {
+                                    let _ = tx.send(ProgressEvent::AgentLog {
+                                        agent: agent_name.clone(),
+                                        kind,
+                                        iteration: iter,
+                                        message: format!(
+                                            "Failed to write session entry: {e}"
+                                        ),
+                                    });
+                                }
+                            }
+                        }
                         let err_str = e.to_string();
                         let _ = task_output
                             .append_error(&format!("{agent_name} iter{iter}: {err_str}"));
@@ -720,5 +802,54 @@ mod tests {
         let log = std::fs::read_to_string(out.run_dir().join("_errors.log")).expect("log");
         assert!(log.contains("Claude iter1"));
         assert!(log.contains("swarm panic"));
+    }
+
+    #[tokio::test]
+    async fn swarm_emits_session_id_log_and_writes_sessions_file() {
+        let dir = tempdir().expect("tempdir");
+        let out = OutputManager::new(dir.path(), None).expect("out");
+        let recv_a = Arc::new(Mutex::new(Vec::new()));
+        let recv_b = Arc::new(Mutex::new(Vec::new()));
+        let provider_a = MockProvider::ok(ProviderKind::Anthropic, "a1", recv_a)
+            .with_session_id("swarm-sess-aaa");
+        let provider_b =
+            MockProvider::ok(ProviderKind::OpenAI, "b1", recv_b).with_session_id("swarm-sess-bbb");
+        let agents = vec![
+            named("Claude", ProviderKind::Anthropic, Box::new(provider_a)),
+            named("OpenAI", ProviderKind::OpenAI, Box::new(provider_b)),
+        ];
+        let (tx, rx) = mpsc::unbounded_channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        run_swarm(
+            &context("p"),
+            agents,
+            1,
+            1,
+            HashMap::new(),
+            true,
+            HashMap::new(),
+            &out,
+            tx,
+            cancel,
+        )
+        .await
+        .expect("run");
+
+        let events = collect_progress_events(rx);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            ProgressEvent::AgentLog { message, .. }
+            if message.contains("Session ID: swarm-sess-aaa")
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            ProgressEvent::AgentLog { message, .. }
+            if message.contains("Session ID: swarm-sess-bbb")
+        )));
+        let content = std::fs::read_to_string(out.run_dir().join("_sessions.toml")).expect("read");
+        assert!(content.contains("swarm-sess-aaa"));
+        assert!(content.contains("swarm-sess-bbb"));
+        assert_eq!(content.matches("[[sessions]]").count(), 2);
     }
 }
