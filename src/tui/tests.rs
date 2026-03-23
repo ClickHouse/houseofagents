@@ -102,7 +102,6 @@ fn test_agent(
         reasoning_effort: None,
         thinking_effort: thinking_effort.map(str::to_string),
         use_cli,
-        cli_print_mode: true,
         extra_cli_args: String::new(),
     }
 }

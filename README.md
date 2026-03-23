@@ -44,7 +44,6 @@ Each agent can run in API mode or CLI mode (`use_cli = true`). Mix and match fre
 - **Diagnostics** — optional post-run analysis pass that writes `errors.md`
 - **Config editor** — add/remove/rename agents, edit settings, timeouts, and models live with a popup (`e`)
 - **Model picker** — browse available models from the API directly inside the config editor (`l`)
-- **CLI print mode** — Anthropic agents in CLI mode can toggle between print (`-p`) and agent mode
 - **Cross-run memory** — SQLite-backed memory system that recalls relevant context from previous runs and extracts new memories post-run (decision, observation, summary, principle)
 
 ## Requirements
@@ -222,7 +221,6 @@ api_key = ""
 model = "claude-opus-4-6"
 thinking_effort = "high"
 use_cli = true
-cli_print_mode = true
 extra_cli_args = ""
 
 [[agents]]
@@ -275,7 +273,6 @@ extra_cli_args = ""
 | `api_key` | API key (required when `use_cli = false`, leave empty for CLI mode) |
 | `model` | Model identifier to use |
 | `use_cli` | Use local CLI binary instead of HTTP API |
-| `cli_print_mode` | Anthropic only: use print mode (`-p`) instead of agent mode (default: `true`) |
 | `extra_cli_args` | Shell-style extra CLI args parsed at runtime, for example `--sandbox workspace-write --profile "fast mode"` |
 | `reasoning_effort` | OpenAI effort setting — `low` / `medium` / `high` / `xhigh` |
 | `thinking_effort` | Anthropic & Gemini effort setting — `low` / `medium` / `high`; Anthropic CLI also supports `max` for `claude-opus-4-6` |
@@ -321,7 +318,6 @@ Anthropic `thinking_effort = "max"` is rejected in API mode. In CLI mode, House 
 | `r` | Rename agent |
 | `p` | Cycle provider (Anthropic / OpenAI / Gemini) |
 | `c` | Toggle CLI / API mode |
-| `b` | Toggle print / agent mode (Anthropic CLI) |
 | `a` | Edit API key |
 | `m` | Edit model |
 | `l` | Open model picker |

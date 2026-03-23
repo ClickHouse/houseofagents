@@ -3318,11 +3318,6 @@ pub(super) fn handle_edit_popup_key(app: &mut App, key: KeyEvent) {
         {
             cycle_reasoning(app);
         }
-        KeyCode::Char('b')
-            if !app.edit_popup.editing && app.edit_popup.section == EditPopupSection::Providers =>
-        {
-            toggle_cli_print_mode(app);
-        }
         KeyCode::Char('n')
             if !app.edit_popup.editing && app.edit_popup.section == EditPopupSection::Providers =>
         {
@@ -3788,19 +3783,6 @@ pub(super) fn toggle_cli_mode(app: &mut App) {
     set_section_config_override(app, config);
 }
 
-pub(super) fn toggle_cli_print_mode(app: &mut App) {
-    let kind = match selected_kind_for_edit(app) {
-        Some(k) => k,
-        None => return,
-    };
-    if kind != ProviderKind::Anthropic {
-        return;
-    }
-    let mut config = effective_section_config(app).unwrap_or_else(empty_provider_config);
-    config.cli_print_mode = !config.cli_print_mode;
-    set_section_config_override(app, config);
-}
-
 pub(super) fn add_new_agent(app: &mut App) {
     let existing: Vec<String> = app
         .config
@@ -3824,7 +3806,6 @@ pub(super) fn add_new_agent(app: &mut App) {
         reasoning_effort: None,
         thinking_effort: None,
         use_cli: false,
-        cli_print_mode: true,
         extra_cli_args: String::new(),
     });
     app.edit_popup.cursor = app.config.agents.len() - 1;
@@ -4165,7 +4146,6 @@ pub(super) fn empty_provider_config() -> ProviderConfig {
         reasoning_effort: None,
         thinking_effort: None,
         use_cli: false,
-        cli_print_mode: true,
         extra_cli_args: String::new(),
     }
 }
