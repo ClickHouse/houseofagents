@@ -93,6 +93,7 @@ impl Provider for MockProvider {
                 Ok(CompletionResponse {
                     content: "default".to_string(),
                     debug_logs: Vec::new(),
+                    output_file_written: false,
                 })
             })
         })
@@ -151,6 +152,7 @@ impl Provider for SuccessThenPanicProvider {
                 Ok(CompletionResponse {
                     content,
                     debug_logs: Vec::new(),
+                    output_file_written: false,
                 })
             } else {
                 panic!("{}", panic_msg);
@@ -163,6 +165,7 @@ pub(crate) fn ok_response(content: &str) -> Result<CompletionResponse, AppError>
     Ok(CompletionResponse {
         content: content.to_string(),
         debug_logs: vec!["dbg".to_string()],
+        output_file_written: false,
     })
 }
 

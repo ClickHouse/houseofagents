@@ -469,6 +469,7 @@ pub(crate) async fn build_file_consolidation_prompt(
     files: &[(String, std::path::PathBuf)],
     additional: &str,
     use_cli: bool,
+    file_output_mode: bool,
 ) -> Result<String, String> {
     let mut prompt = String::from("Consolidate these outputs into one final markdown answer.\n\n");
     let mut budget = PostRunPromptBudget::new();
@@ -493,9 +494,15 @@ pub(crate) async fn build_file_consolidation_prompt(
         }
     }
 
-    prompt.push_str(
-        "\nInstructions:\n- Resolve disagreements and keep the strongest points.\n- Return one high-quality markdown response.\n- Do not write files and do not ask for filesystem permissions.\n- The application will save your response to disk.\n",
-    );
+    if file_output_mode {
+        prompt.push_str(
+            "\nInstructions:\n- Resolve disagreements and keep the strongest points.\n- Return one high-quality markdown response.\n",
+        );
+    } else {
+        prompt.push_str(
+            "\nInstructions:\n- Resolve disagreements and keep the strongest points.\n- Return one high-quality markdown response.\n- Do not write files and do not ask for filesystem permissions.\n- The application will save your response to disk.\n",
+        );
+    }
     if !additional.is_empty() {
         prompt.push_str("\nAdditional instructions from user:\n");
         prompt.push_str(additional);
@@ -556,17 +563,24 @@ where
                 return Err("No iteration outputs found to consolidate".to_string());
             }
 
-            let prompt =
-                build_file_consolidation_prompt(&files, &request.additional, request.agent_use_cli)
-                    .await?;
+            let prompt = build_file_consolidation_prompt(
+                &files,
+                &request.additional,
+                request.agent_use_cli,
+                true,
+            )
+            .await?;
             let file_key = OutputManager::sanitize_session_name(&request.agent_name);
             let output_path = request.run_dir.join(format!("consolidated_{file_key}.md"));
             let mut provider = provider_factory();
+            provider.set_output_path(Some(output_path.clone()));
             let response = provider.send(&prompt).await.map_err(|e| e.to_string())?;
-            tokio::fs::write(&output_path, &response.content)
-                .await
-                .map(|_| output_path.display().to_string())
-                .map_err(|e| format!("Failed to write consolidation output: {e}"))
+            if !response.output_file_written {
+                tokio::fs::write(&output_path, &response.content)
+                    .await
+                    .map_err(|e| format!("Failed to write consolidation output: {e}"))?;
+            }
+            Ok(output_path.display().to_string())
         }
         ConsolidationTarget::PerRun => {
             if request.successful_runs.is_empty() {
@@ -586,13 +600,18 @@ where
                     &files,
                     &request.additional,
                     request.agent_use_cli,
+                    true,
                 )
                 .await?;
                 let mut provider = provider_factory();
+                let consol_path = run_path.join("consolidation.md");
+                provider.set_output_path(Some(consol_path.clone()));
                 let response = provider.send(&prompt).await.map_err(|e| e.to_string())?;
-                tokio::fs::write(run_path.join("consolidation.md"), response.content)
-                    .await
-                    .map_err(|e| format!("Failed to write per-run consolidation: {e}"))?;
+                if !response.output_file_written {
+                    tokio::fs::write(&consol_path, &response.content)
+                        .await
+                        .map_err(|e| format!("Failed to write per-run consolidation: {e}"))?;
+                }
             }
 
             Ok("Per-run consolidation completed".to_string())
@@ -650,7 +669,7 @@ where
                     });
                 }
 
-                let prompt = build_file_consolidation_prompt(&files, "", false).await?;
+                let prompt = build_file_consolidation_prompt(&files, "", false, false).await?;
                 run_inputs.push((run_id, prompt));
             }
 
@@ -662,11 +681,14 @@ where
             );
             let output_path = request.run_dir.join("cross_run_consolidation.md");
             let mut provider = provider_factory();
+            provider.set_output_path(Some(output_path.clone()));
             let response = provider.send(&prompt).await.map_err(|e| e.to_string())?;
-            tokio::fs::write(&output_path, &response.content)
-                .await
-                .map(|_| output_path.display().to_string())
-                .map_err(|e| format!("Failed to write cross-run consolidation: {e}"))
+            if !response.output_file_written {
+                tokio::fs::write(&output_path, &response.content)
+                    .await
+                    .map_err(|e| format!("Failed to write cross-run consolidation: {e}"))?;
+            }
+            Ok(output_path.display().to_string())
         }
     }
 }
@@ -766,6 +788,7 @@ pub(crate) fn build_diagnostic_prompt(
     report_files: &[std::path::PathBuf],
     app_errors: &[String],
     use_cli: bool,
+    file_output_mode: bool,
 ) -> Result<String, String> {
     let mut prompt = String::from(
         "Analyze all reports for OPERATIONAL errors only and produce a markdown report.\n",
@@ -785,8 +808,11 @@ pub(crate) fn build_diagnostic_prompt(
     prompt.push_str("- Logical errors, hallucinations, or wrong answers in the output\n");
     prompt.push_str("- Style, formatting, or completeness of the response text\n\n");
     prompt.push_str("Write only the diagnostic report content.\n");
-    prompt.push_str("Do not write files and do not ask for filesystem permissions.\n");
-    prompt.push_str("The application will save your response to errors.md.\n\n");
+    if !file_output_mode {
+        prompt.push_str("Do not write files and do not ask for filesystem permissions.\n");
+        prompt.push_str("The application will save your response to errors.md.\n");
+    }
+    prompt.push('\n');
     prompt.push_str(
         "Report structure:\n1) Summary\n2) Detected Issues\n3) Evidence\n4) Suggested Fixes\n\n",
     );
