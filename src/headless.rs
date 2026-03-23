@@ -2721,7 +2721,7 @@ async fn run_diagnostics_step(
     let prompt_result = tokio::task::spawn_blocking(move || {
         let report_files = post_run::collect_report_files(&run_dir_owned);
         let app_errors = post_run::collect_application_errors(&base_errors, &run_dir_owned);
-        post_run::build_diagnostic_prompt(&report_files, &app_errors, use_cli)
+        post_run::build_diagnostic_prompt(&report_files, &app_errors, use_cli, true)
     })
     .await
     .map_err(|e| format!("Diagnostic preparation failed: {e}"))?;
@@ -2745,19 +2745,25 @@ async fn run_diagnostics_step(
         cli_timeout_secs,
         vec![],
     );
+    // Claude CLI's --add-dir grants recursive subtree access, so collect_report_files()
+    // can read sub_*, finalization/, and run_* subdirectories within this root.
+    diag_provider.add_allowed_dir(run_dir.display().to_string());
 
     if !quiet {
         eprintln!("Running diagnostics...");
     }
 
+    let output_path = run_dir.join("errors.md");
+    diag_provider.set_output_path(Some(output_path.clone()));
     let response = diag_provider
         .send(&prompt)
         .await
         .map_err(|e| e.to_string())?;
-    let output_path = run_dir.join("errors.md");
-    tokio::fs::write(&output_path, &response.content)
-        .await
-        .map_err(|e| format!("Failed to write errors.md: {e}"))?;
+    if !response.output_file_written {
+        tokio::fs::write(&output_path, &response.content)
+            .await
+            .map_err(|e| format!("Failed to write errors.md: {e}"))?;
+    }
 
     result.diagnostics = Some(output_path.display().to_string());
     Ok(())

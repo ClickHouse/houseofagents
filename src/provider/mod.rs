@@ -9,6 +9,7 @@ use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 use tokio::sync::mpsc;
 
@@ -110,6 +111,7 @@ impl HttpProviderBase {
         CompletionResponse {
             content: self.history.last().unwrap().content.clone(),
             debug_logs: Vec::new(),
+            output_file_written: false,
         }
     }
 
@@ -188,9 +190,13 @@ pub enum Role {
     Assistant,
 }
 
+#[derive(Debug)]
 pub struct CompletionResponse {
     pub content: String,
     pub debug_logs: Vec<String>,
+    /// True when the provider wrote the response directly to the output file.
+    /// Callers should skip their own file write when this is set.
+    pub output_file_written: bool,
 }
 
 pub trait Provider: Send {
@@ -210,6 +216,9 @@ pub trait Provider: Send {
     fn session_id(&self) -> Option<&str> {
         None
     }
+    /// Set the output file path for this send. CLI providers instruct the model
+    /// to write its response directly to this file. No-op for API providers.
+    fn set_output_path(&mut self, _path: Option<PathBuf>) {}
 }
 
 /// Prune message history by byte budget — remove oldest messages until total fits.

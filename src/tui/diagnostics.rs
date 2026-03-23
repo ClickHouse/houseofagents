@@ -51,7 +51,7 @@ pub(super) fn maybe_start_diagnostics(app: &mut App) {
             return;
         }
     };
-    let provider = provider::create_provider(
+    let mut provider = provider::create_provider(
         diagnostic_kind,
         &pconfig,
         client,
@@ -61,6 +61,9 @@ pub(super) fn maybe_start_diagnostics(app: &mut App) {
         app.effective_cli_timeout_seconds().max(1),
         vec![],
     );
+    // Claude CLI's --add-dir grants recursive subtree access, so collect_report_files()
+    // can read sub_*, finalization/, and run_* subdirectories within this root.
+    provider.add_allowed_dir(run_dir.display().to_string());
 
     app.record_progress(ProgressEvent::AgentLog {
         agent: diag_agent_name,
@@ -76,22 +79,30 @@ pub(super) fn maybe_start_diagnostics(app: &mut App) {
     app.running.diagnostic_rx = Some(rx);
 
     tokio::spawn(async move {
-        let mut provider = provider;
         let prompt_result = tokio::task::spawn_blocking(move || {
             let report_files = post_run::collect_report_files(&run_dir);
             let app_errors = post_run::collect_application_errors(&base_errors, &run_dir);
-            post_run::build_diagnostic_prompt(&report_files, &app_errors, pconfig.use_cli)
+            post_run::build_diagnostic_prompt(&report_files, &app_errors, pconfig.use_cli, true)
         })
         .await;
 
         let result = match prompt_result {
-            Ok(Ok(prompt)) => match provider.send(&prompt).await {
-                Ok(resp) => match tokio::fs::write(&output_path, &resp.content).await {
-                    Ok(()) => Ok(output_path.display().to_string()),
-                    Err(e) => Err(format!("Failed to write errors.md: {e}")),
-                },
-                Err(e) => Err(e.to_string()),
-            },
+            Ok(Ok(prompt)) => {
+                provider.set_output_path(Some(output_path.clone()));
+                match provider.send(&prompt).await {
+                    Ok(resp) => {
+                        if !resp.output_file_written {
+                            match tokio::fs::write(&output_path, &resp.content).await {
+                                Ok(()) => Ok(output_path.display().to_string()),
+                                Err(e) => Err(format!("Failed to write errors.md: {e}")),
+                            }
+                        } else {
+                            Ok(output_path.display().to_string())
+                        }
+                    }
+                    Err(e) => Err(e.to_string()),
+                }
+            }
             Ok(Err(error)) => Err(error),
             Err(e) => Err(format!("Diagnostic preparation task failed: {e}")),
         };

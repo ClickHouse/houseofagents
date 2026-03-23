@@ -44,6 +44,7 @@ pub struct CliProvider {
     max_history_bytes: usize,
     history: Vec<Message>,
     live_log_tx: Option<mpsc::UnboundedSender<String>>,
+    output_path: Option<PathBuf>,
 }
 
 impl CliProvider {
@@ -78,6 +79,7 @@ impl CliProvider {
             max_history_bytes,
             history: Vec::new(),
             live_log_tx: None,
+            output_path: None,
         }
     }
 
@@ -529,10 +531,30 @@ impl Provider for CliProvider {
         self.live_log_tx = tx;
     }
 
+    fn set_output_path(&mut self, path: Option<PathBuf>) {
+        self.output_path = path;
+    }
+
     fn send(&mut self, message: &str) -> SendFuture<'_> {
         let message = message.to_string();
         Box::pin(async move {
             let message = &message;
+            let output_path = self.output_path.take();
+
+            if output_path.is_some() && self.kind == ProviderKind::Anthropic {
+                if let Ok(extra_args) = self.parse_extra_cli_args() {
+                    if extra_args
+                        .iter()
+                        .any(|a| a == "-p" || a == "--system-prompt")
+                    {
+                        return Err(AppError::Provider {
+                            provider: self.provider_name().into(),
+                            message: "extra_cli_args contains -p or --system-prompt which conflicts with output_path file-write mode".into(),
+                        });
+                    }
+                }
+            }
+
             if let Err(message) = validate_effort_config(
                 self.kind,
                 true,
@@ -559,7 +581,10 @@ impl Provider for CliProvider {
                 self.build_prompt_from_history()
             };
 
-            if self.kind == ProviderKind::Anthropic && self.cli_print_mode && !self.session_started
+            if self.kind == ProviderKind::Anthropic
+                && output_path.is_none()
+                && self.cli_print_mode
+                && !self.session_started
             {
                 prompt = format!(
                 "IMPORTANT: Do NOT write any files. Return everything in your output.\n\n{prompt}"
@@ -568,12 +593,18 @@ impl Provider for CliProvider {
 
             let bin = self.bin_name();
             let mut session_retried = false;
-            let content = 'cli: loop {
+            let (content, output_file_was_written) = 'cli: loop {
                 let mut codex_output_path: Option<PathBuf> = None;
                 let mut args: Vec<String> = match self.kind {
                     ProviderKind::Anthropic => {
                         let mut args = Vec::new();
-                        if self.cli_print_mode {
+                        if let Some(ref path) = output_path {
+                            args.push("--system-prompt".to_string());
+                            args.push(format!(
+                                "Write your complete final response ONLY to the file: {}. Do not create any other files.",
+                                path.display()
+                            ));
+                        } else if self.cli_print_mode {
                             args.push("-p".to_string());
                             args.push("--system-prompt".to_string());
                             args.push("Never use TodoWrite.".to_string());
@@ -632,6 +663,24 @@ impl Provider for CliProvider {
                 }
                 self.push_command_debug(&mut debug_logs, bin, &args);
                 self.emit_live_log(format!("start {} (timeout {}s)", bin, self.timeout_seconds));
+
+                if self.kind == ProviderKind::Anthropic {
+                    if let Some(ref path) = output_path {
+                        match fs::remove_file(path).await {
+                            Ok(()) => {}
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                            Err(e) => {
+                                let msg = format!(
+                                    "failed to remove stale output file {}: {e} — aborting to prevent reading old content",
+                                    path.display()
+                                );
+                                debug_logs.push(msg.clone());
+                                self.reset_after_send_error();
+                                return Err(Self::provider_error_with_debug(bin, msg, &debug_logs));
+                            }
+                        }
+                    }
+                }
 
                 let mut child = match Command::new(bin)
                     .args(&args)
@@ -864,6 +913,7 @@ impl Provider for CliProvider {
                     }
                 }
 
+                let mut output_file_was_written = false;
                 let content = if self.kind == ProviderKind::OpenAI {
                     if let Some(path) = codex_output_path.as_ref() {
                         match fs::read_to_string(path).await {
@@ -887,10 +937,58 @@ impl Provider for CliProvider {
                     } else {
                         stdout_text
                     }
+                } else if self.kind == ProviderKind::Anthropic {
+                    if let Some(ref path) = output_path {
+                        match fs::read_to_string(path).await {
+                            Ok(text) if !text.trim().is_empty() => {
+                                debug_logs.push(format!(
+                                    "output file read ({} chars): {}",
+                                    text.chars().count(),
+                                    path.display()
+                                ));
+                                output_file_was_written = true;
+                                text
+                            }
+                            Ok(_) => {
+                                debug_logs.push(format!(
+                                    "output file empty, falling back to stdout: {}",
+                                    path.display()
+                                ));
+                                let _ = fs::remove_file(path).await;
+                                stdout_text
+                            }
+                            Err(_) => {
+                                debug_logs.push(format!(
+                                    "output file not found, falling back to stdout: {}",
+                                    path.display()
+                                ));
+                                stdout_text
+                            }
+                        }
+                    } else {
+                        stdout_text
+                    }
                 } else {
                     stdout_text
                 };
-                break content;
+                // Guard: if output_path was set and both file and stdout are empty,
+                // treat as an error rather than silently producing an empty artifact.
+                if self.kind == ProviderKind::Anthropic
+                    && output_path.is_some()
+                    && !output_file_was_written
+                    && content.trim().is_empty()
+                {
+                    debug_logs.push(
+                        "output file not written and stdout empty — no response captured".into(),
+                    );
+                    self.reset_after_send_error();
+                    return Err(Self::provider_error_with_debug(
+                        bin,
+                        "CLI produced no output: model did not write to the target file and stdout was empty".into(),
+                        &debug_logs,
+                    ));
+                }
+                break (content, output_file_was_written);
             }; // end of 'cli retry loop
 
             self.history.push(Message {
@@ -904,6 +1002,7 @@ impl Provider for CliProvider {
             Ok(CompletionResponse {
                 content,
                 debug_logs,
+                output_file_written: output_file_was_written,
             })
         })
     }
@@ -916,6 +1015,7 @@ mod tests {
     };
     use crate::provider::ProviderKind;
     use serde_json::json;
+    use std::path::PathBuf;
     use tokio::io::AsyncWriteExt;
     use tokio::sync::mpsc;
     use tokio::time::{sleep, Duration};
@@ -1139,5 +1239,53 @@ not json
             4096,
         );
         assert_eq!(provider.max_history_bytes, 4096);
+    }
+
+    #[tokio::test]
+    async fn anthropic_output_path_rejects_print_flag_in_extra_args() {
+        use crate::provider::Provider;
+        let mut provider = CliProvider::new(
+            ProviderKind::Anthropic,
+            String::new(),
+            None,
+            None,
+            "-p".to_string(),
+            true,
+            Vec::new(),
+            30,
+            50,
+            0,
+        );
+        provider.set_output_path(Some(PathBuf::from("/tmp/test_output.md")));
+        let result = provider.send("test").await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("conflicts with output_path"));
+    }
+
+    #[tokio::test]
+    async fn anthropic_output_path_rejects_system_prompt_in_extra_args() {
+        use crate::provider::Provider;
+        let mut provider = CliProvider::new(
+            ProviderKind::Anthropic,
+            String::new(),
+            None,
+            None,
+            "--system-prompt 'custom'".to_string(),
+            true,
+            Vec::new(),
+            30,
+            50,
+            0,
+        );
+        provider.set_output_path(Some(PathBuf::from("/tmp/test_output.md")));
+        let result = provider.send("test").await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("conflicts with output_path"));
     }
 }

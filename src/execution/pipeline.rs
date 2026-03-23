@@ -108,12 +108,12 @@ pub(crate) fn build_runtime_table(def: &PipelineDefinition) -> RuntimeReplicaTab
                 let filename_stem = if multi_replica {
                     format!("sub_{}_pipeline_r{}", block_name_key, ri + 1)
                 } else {
-                    format!("sub_{}_pipeline", block_name_key)
+                    format!("sub_{block_name_key}_pipeline")
                 };
                 let session_key = if multi_replica {
                     format!("__sub_{}_r{}", block_name_key, ri + 1)
                 } else {
-                    format!("__sub_{}", block_name_key)
+                    format!("__sub_{block_name_key}")
                 };
                 entries.push(RuntimeReplicaInfo {
                     runtime_id: next_id,
@@ -2682,7 +2682,7 @@ async fn run_pipeline_with_provider_factory(
                                     replica_index + 1
                                 ))
                             } else {
-                                output.run_dir().join(format!("sub_{}", sub_name_key))
+                                output.run_dir().join(format!("sub_{sub_name_key}"))
                             };
                             let parent_run_dir = output.run_dir().to_path_buf();
                             let parent_filename = loop_replica_filename(
@@ -3185,6 +3185,7 @@ async fn run_pipeline_with_provider_factory(
                         let task_handle = tasks.spawn(async move {
                             let _permit = sem_clone.acquire().await.expect("semaphore closed");
                             let mut guard = provider_arc.lock().await;
+                            guard.set_output_path(Some(task_output.run_dir().join(&task_filename)));
 
                             let (live_tx, mut live_rx) = mpsc::unbounded_channel::<String>();
                             guard.set_live_log_sender(Some(live_tx));
@@ -3343,23 +3344,7 @@ async fn run_pipeline_with_provider_factory(
                                             message: log.clone(),
                                         });
                                     }
-                                    let path = task_output.run_dir().join(&task_filename);
-                                    if let Err(e) = tokio::fs::write(&path, &resp.content).await {
-                                        let error = format!("Failed to write output: {e}");
-                                        let _ = task_output.append_error(&format!(
-                                            "runtime {rid} {task_agent_name}: {error}"
-                                        ));
-                                        let _ = ptx.send(ProgressEvent::BlockError {
-                                            block_id: rid,
-                                            agent_name: task_agent_name,
-                                            label: task_label,
-                                            iteration,
-                                            loop_pass: task_loop_pass,
-                                            error: error.clone(),
-                                            details: Some(error.clone()),
-                                        });
-                                        (rid, Err(error))
-                                    } else {
+                                    if resp.output_file_written {
                                         let _ = ptx.send(ProgressEvent::BlockFinished {
                                             block_id: rid,
                                             agent_name: task_agent_name,
@@ -3368,6 +3353,33 @@ async fn run_pipeline_with_provider_factory(
                                             loop_pass: task_loop_pass,
                                         });
                                         (rid, Ok(resp.content))
+                                    } else {
+                                        let path = task_output.run_dir().join(&task_filename);
+                                        if let Err(e) = tokio::fs::write(&path, &resp.content).await {
+                                            let error = format!("Failed to write output: {e}");
+                                            let _ = task_output.append_error(&format!(
+                                                "runtime {rid} {task_agent_name}: {error}"
+                                            ));
+                                            let _ = ptx.send(ProgressEvent::BlockError {
+                                                block_id: rid,
+                                                agent_name: task_agent_name,
+                                                label: task_label,
+                                                iteration,
+                                                loop_pass: task_loop_pass,
+                                                error: error.clone(),
+                                                details: Some(error.clone()),
+                                            });
+                                            (rid, Err(error))
+                                        } else {
+                                            let _ = ptx.send(ProgressEvent::BlockFinished {
+                                                block_id: rid,
+                                                agent_name: task_agent_name,
+                                                label: task_label,
+                                                iteration,
+                                                loop_pass: task_loop_pass,
+                                            });
+                                            (rid, Ok(resp.content))
+                                        }
                                     }
                                 }
                                 Some(Err(e)) => {
@@ -5045,6 +5057,8 @@ pub(crate) async fn run_pipeline_finalization(
                     };
 
                     let mut provider = provider_factory(*kind, cfg);
+                    let fin_filename = format!("{}.md", entry.filename_stem);
+                    provider.set_output_path(Some(fin_dir.join(&fin_filename)));
                     let rid = entry.runtime_id;
                     let agent_name = entry.agent.clone();
                     let label = entry.display_label.clone();
@@ -5088,21 +5102,7 @@ pub(crate) async fn run_pipeline_finalization(
 
                     match result {
                         Some(Ok(resp)) => {
-                            // Write output file
-                            let filename = format!("{}.md", entry.filename_stem);
-                            let path = fin_dir.join(&filename);
-                            if let Err(e) = tokio::fs::write(&path, &resp.content).await {
-                                let _ = progress_tx.send(ProgressEvent::BlockError {
-                                    block_id: rid,
-                                    agent_name: agent_name.clone(),
-                                    label: label.clone(),
-                                    iteration: 1,
-                                    loop_pass: 0,
-                                    error: format!("Failed to write output: {e}"),
-                                    details: None,
-                                });
-                                block_error_count += 1;
-                            } else {
+                            if resp.output_file_written {
                                 let _ = progress_tx.send(ProgressEvent::BlockFinished {
                                     block_id: rid,
                                     agent_name: agent_name.clone(),
@@ -5111,6 +5111,30 @@ pub(crate) async fn run_pipeline_finalization(
                                     loop_pass: 0,
                                 });
                                 block_output_list.push((entry.display_label.clone(), resp.content));
+                            } else {
+                                let path = fin_dir.join(&fin_filename);
+                                if let Err(e) = tokio::fs::write(&path, &resp.content).await {
+                                    let _ = progress_tx.send(ProgressEvent::BlockError {
+                                        block_id: rid,
+                                        agent_name: agent_name.clone(),
+                                        label: label.clone(),
+                                        iteration: 1,
+                                        loop_pass: 0,
+                                        error: format!("Failed to write output: {e}"),
+                                        details: None,
+                                    });
+                                    block_error_count += 1;
+                                } else {
+                                    let _ = progress_tx.send(ProgressEvent::BlockFinished {
+                                        block_id: rid,
+                                        agent_name: agent_name.clone(),
+                                        label,
+                                        iteration: 1,
+                                        loop_pass: 0,
+                                    });
+                                    block_output_list
+                                        .push((entry.display_label.clone(), resp.content));
+                                }
                             }
                         }
                         Some(Err(e)) => {
@@ -5342,6 +5366,8 @@ pub(crate) async fn run_pipeline_finalization(
                 };
 
                 let mut provider = provider_factory(*kind, cfg);
+                let fin_filename = format!("{}.md", entry.filename_stem);
+                provider.set_output_path(Some(fin_dir.join(&fin_filename)));
                 let rid = entry.runtime_id;
                 let agent_name = entry.agent.clone();
                 let label = entry.display_label.clone();
@@ -5385,20 +5411,7 @@ pub(crate) async fn run_pipeline_finalization(
 
                 match result {
                     Some(Ok(resp)) => {
-                        let filename = format!("{}.md", entry.filename_stem);
-                        let path = fin_dir.join(&filename);
-                        if let Err(e) = tokio::fs::write(&path, &resp.content).await {
-                            let _ = progress_tx.send(ProgressEvent::BlockError {
-                                block_id: rid,
-                                agent_name: agent_name.clone(),
-                                label: label.clone(),
-                                iteration: 1,
-                                loop_pass: 0,
-                                error: format!("Failed to write output: {e}"),
-                                details: None,
-                            });
-                            block_error_count += 1;
-                        } else {
+                        if resp.output_file_written {
                             let _ = progress_tx.send(ProgressEvent::BlockFinished {
                                 block_id: rid,
                                 agent_name: agent_name.clone(),
@@ -5407,6 +5420,29 @@ pub(crate) async fn run_pipeline_finalization(
                                 loop_pass: 0,
                             });
                             block_output_list.push((entry.display_label.clone(), resp.content));
+                        } else {
+                            let path = fin_dir.join(&fin_filename);
+                            if let Err(e) = tokio::fs::write(&path, &resp.content).await {
+                                let _ = progress_tx.send(ProgressEvent::BlockError {
+                                    block_id: rid,
+                                    agent_name: agent_name.clone(),
+                                    label: label.clone(),
+                                    iteration: 1,
+                                    loop_pass: 0,
+                                    error: format!("Failed to write output: {e}"),
+                                    details: None,
+                                });
+                                block_error_count += 1;
+                            } else {
+                                let _ = progress_tx.send(ProgressEvent::BlockFinished {
+                                    block_id: rid,
+                                    agent_name: agent_name.clone(),
+                                    label,
+                                    iteration: 1,
+                                    loop_pass: 0,
+                                });
+                                block_output_list.push((entry.display_label.clone(), resp.content));
+                            }
                         }
                     }
                     Some(Err(e)) => {
@@ -6189,6 +6225,7 @@ to = 1
                     Ok(CompletionResponse {
                         content: "ok".to_string(),
                         debug_logs: Vec::new(),
+                        output_file_written: false,
                     })
                 })
             }
@@ -6624,6 +6661,7 @@ keep_across_loop_passes = false
                         Ok(crate::provider::CompletionResponse {
                             content: "response".to_string(),
                             debug_logs: Vec::new(),
+                            output_file_written: false,
                         })
                     })
             })
@@ -10508,7 +10546,10 @@ position = [0, 0]
             let info = &rt.entries[rid as usize];
             assert_eq!(info.source_block_id, 2);
             assert_eq!(info.replica_index, i as u32);
-            assert_eq!(info.filename_stem, format!("sub_Sub_2_b2_pipeline_r{}", i + 1));
+            assert_eq!(
+                info.filename_stem,
+                format!("sub_Sub_2_b2_pipeline_r{}", i + 1)
+            );
         }
     }
 

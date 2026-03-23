@@ -95,6 +95,10 @@ pub async fn run_swarm(
 
                 let kind = provider.kind();
 
+                let sanitized = OutputManager::sanitize_session_name(&agent_name);
+                let task_filename = format!("{sanitized}_iter{iter}.md");
+                provider.set_output_path(Some(task_output.run_dir().join(&task_filename)));
+
                 // Log session ID early if already known (Anthropic generates client-side)
                 if let Some(sid) = provider.session_id() {
                     let dedupe_key = (agent_name.clone(), sid.to_string());
@@ -203,22 +207,24 @@ pub async fn run_swarm(
                                 truncate_chars(&preview, 80)
                             ),
                         });
-                        let sanitized = OutputManager::sanitize_session_name(&agent_name);
-                        let filename = format!("{sanitized}_iter{iter}.md");
-                        let path = task_output.run_dir().join(&filename);
-                        if let Err(e) = tokio::fs::write(&path, &resp.content).await {
-                            let err =
-                                format!("Failed to write output file {}: {e}", path.display());
-                            let _ = task_output
-                                .append_error(&format!("{agent_name} iter{iter}: {err}"));
-                            let _ = tx.send(ProgressEvent::AgentError {
-                                agent: agent_name.clone(),
-                                kind,
-                                iteration: iter,
-                                error: err.clone(),
-                                details: Some(err),
-                            });
-                            return (i, agent_name, provider, None);
+                        if !resp.output_file_written {
+                            let sanitized = OutputManager::sanitize_session_name(&agent_name);
+                            let filename = format!("{sanitized}_iter{iter}.md");
+                            let path = task_output.run_dir().join(&filename);
+                            if let Err(e) = tokio::fs::write(&path, &resp.content).await {
+                                let err =
+                                    format!("Failed to write output file {}: {e}", path.display());
+                                let _ = task_output
+                                    .append_error(&format!("{agent_name} iter{iter}: {err}"));
+                                let _ = tx.send(ProgressEvent::AgentError {
+                                    agent: agent_name.clone(),
+                                    kind,
+                                    iteration: iter,
+                                    error: err.clone(),
+                                    details: Some(err),
+                                });
+                                return (i, agent_name, provider, None);
+                            }
                         }
                         let _ = tx.send(ProgressEvent::AgentFinished {
                             agent: agent_name.clone(),
@@ -253,9 +259,7 @@ pub async fn run_swarm(
                                         agent: agent_name.clone(),
                                         kind,
                                         iteration: iter,
-                                        message: format!(
-                                            "Failed to write session entry: {e}"
-                                        ),
+                                        message: format!("Failed to write session entry: {e}"),
                                     });
                                 }
                             }

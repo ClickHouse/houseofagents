@@ -125,6 +125,7 @@ impl Provider for HistoryEchoProvider {
             Ok(CompletionResponse {
                 content: format!("call {}", self.calls),
                 debug_logs: Vec::new(),
+                output_file_written: false,
             })
         })
     }
@@ -1017,7 +1018,7 @@ fn build_diagnostic_prompt_cli_mode() {
     let report = dir.path().join("anthropic_iter1.md");
     fs::write(&report, "hidden content").unwrap();
 
-    let prompt = build_diagnostic_prompt(&[report], &[], true).expect("prompt");
+    let prompt = build_diagnostic_prompt(&[report], &[], true, false).expect("prompt");
     assert!(prompt.contains("Read each listed file from disk"));
     assert!(!prompt.contains("hidden content"));
 }
@@ -1028,7 +1029,7 @@ fn build_diagnostic_prompt_api_mode() {
     let report = dir.path().join("anthropic_iter1.md");
     fs::write(&report, "file body").unwrap();
 
-    let prompt = build_diagnostic_prompt(&[report], &[], false).expect("prompt");
+    let prompt = build_diagnostic_prompt(&[report], &[], false, false).expect("prompt");
     assert!(prompt.contains("=== BEGIN anthropic_iter1.md ==="));
     assert!(prompt.contains("file body"));
     assert!(prompt.contains("=== END anthropic_iter1.md ==="));
@@ -1036,7 +1037,7 @@ fn build_diagnostic_prompt_api_mode() {
 
 #[test]
 fn build_diagnostic_prompt_no_report_files() {
-    let prompt = build_diagnostic_prompt(&[], &[], false).expect("prompt");
+    let prompt = build_diagnostic_prompt(&[], &[], false, false).expect("prompt");
     assert!(prompt.contains("Reports to analyze:\n- none"));
     assert!(!prompt.contains("Report contents:"));
 }
@@ -1044,7 +1045,7 @@ fn build_diagnostic_prompt_no_report_files() {
 #[test]
 fn build_diagnostic_prompt_unreadable_file_in_api_mode() {
     let missing = PathBuf::from("/tmp/does-not-exist-for-houseofagents-tests.md");
-    let err = build_diagnostic_prompt(&[missing], &[], false).expect_err("should fail");
+    let err = build_diagnostic_prompt(&[missing], &[], false, false).expect_err("should fail");
     assert!(err.contains("Failed to inspect"));
 }
 
@@ -1058,7 +1059,7 @@ fn build_diagnostic_prompt_rejects_oversized_inline_input() {
     )
     .unwrap();
 
-    let err = build_diagnostic_prompt(&[report], &[], false).expect_err("should reject");
+    let err = build_diagnostic_prompt(&[report], &[], false, false).expect_err("should reject");
     assert!(err.contains("too large"));
 }
 
@@ -1072,7 +1073,7 @@ fn build_diagnostic_prompt_cli_mode_does_not_budget_file_contents() {
     )
     .unwrap();
 
-    let prompt = build_diagnostic_prompt(&[report], &[], true).expect("prompt");
+    let prompt = build_diagnostic_prompt(&[report], &[], true, false).expect("prompt");
     assert!(prompt.contains("Read each listed file from disk"));
 }
 
@@ -1131,7 +1132,7 @@ async fn build_file_consolidation_prompt_rejects_oversized_inline_input() {
     )
     .unwrap();
 
-    let err = build_file_consolidation_prompt(&[("Claude".to_string(), report)], "", false)
+    let err = build_file_consolidation_prompt(&[("Claude".to_string(), report)], "", false, false)
         .await
         .expect_err("should reject");
     assert!(err.contains("too large"));
@@ -1147,10 +1148,30 @@ async fn build_file_consolidation_prompt_cli_mode_does_not_budget_file_contents(
     )
     .unwrap();
 
-    let prompt = build_file_consolidation_prompt(&[("Claude".to_string(), report)], "", true)
+    let prompt =
+        build_file_consolidation_prompt(&[("Claude".to_string(), report)], "", true, false)
+            .await
+            .expect("prompt");
+    assert!(prompt.contains("Files to read:"));
+}
+
+#[test]
+fn build_diagnostic_prompt_file_output_mode_omits_no_write_instruction() {
+    let prompt = build_diagnostic_prompt(&[], &[], false, true).expect("prompt");
+    assert!(!prompt.contains("Do not write files"));
+    assert!(!prompt.contains("The application will save your response"));
+}
+
+#[tokio::test]
+async fn build_file_consolidation_prompt_file_output_mode_omits_no_write_instruction() {
+    let dir = tempdir().unwrap();
+    let report = dir.path().join("test.md");
+    fs::write(&report, "content").unwrap();
+    let prompt = build_file_consolidation_prompt(&[("Agent".to_string(), report)], "", false, true)
         .await
         .expect("prompt");
-    assert!(prompt.contains("Files to read:"));
+    assert!(!prompt.contains("Do not write files"));
+    assert!(!prompt.contains("The application will save your response"));
 }
 
 #[test]

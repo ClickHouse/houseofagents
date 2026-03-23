@@ -115,6 +115,13 @@ pub async fn run_relay(
                 }
             }
 
+            // Set output path so CLI providers can write directly to disk
+            let sanitized = OutputManager::sanitize_session_name(name);
+            let output_file_path = output
+                .run_dir()
+                .join(format!("{sanitized}_iter{iteration}.md"));
+            agents[i].1.set_output_path(Some(output_file_path));
+
             // Use run_with_cancellation so cancel aborts the in-flight request
             let result = run_with_cancellation(
                 agents[i].1.as_mut(),
@@ -195,26 +202,29 @@ pub async fn run_relay(
                             truncate_chars(&preview, 80)
                         ),
                     });
-                    if let Err(e) = output.write_agent_output(name, iteration, &resp.content) {
-                        let err_str =
-                            format!("Failed to write output file for {name} iter{iteration}: {e}");
-                        if let Err(log_err) = output.append_error(&err_str) {
-                            let _ = progress_tx.send(ProgressEvent::AgentLog {
+                    if !resp.output_file_written {
+                        if let Err(e) = output.write_agent_output(name, iteration, &resp.content) {
+                            let err_str = format!(
+                                "Failed to write output file for {name} iter{iteration}: {e}"
+                            );
+                            if let Err(log_err) = output.append_error(&err_str) {
+                                let _ = progress_tx.send(ProgressEvent::AgentLog {
+                                    agent: name.clone(),
+                                    kind: *kind,
+                                    iteration,
+                                    message: format!("Failed to append error log: {log_err}"),
+                                });
+                            }
+                            let _ = progress_tx.send(ProgressEvent::AgentError {
                                 agent: name.clone(),
                                 kind: *kind,
                                 iteration,
-                                message: format!("Failed to append error log: {log_err}"),
+                                error: err_str.clone(),
+                                details: Some(err_str),
                             });
+                            let _ = progress_tx.send(ProgressEvent::AllDone);
+                            return Ok(());
                         }
-                        let _ = progress_tx.send(ProgressEvent::AgentError {
-                            agent: name.clone(),
-                            kind: *kind,
-                            iteration,
-                            error: err_str.clone(),
-                            details: Some(err_str),
-                        });
-                        let _ = progress_tx.send(ProgressEvent::AllDone);
-                        return Ok(());
                     }
                     let _ = progress_tx.send(ProgressEvent::AgentFinished {
                         agent: name.clone(),
@@ -233,8 +243,7 @@ pub async fn run_relay(
                                 iteration,
                                 message: format!("Session ID: {sid}"),
                             });
-                            if let Err(e) =
-                                output.append_session_entry(name, name, sid, None, None)
+                            if let Err(e) = output.append_session_entry(name, name, sid, None, None)
                             {
                                 let _ = progress_tx.send(ProgressEvent::AgentLog {
                                     agent: name.clone(),
