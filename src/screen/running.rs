@@ -13,6 +13,7 @@ fn is_notable_log(message: &str) -> bool {
     message.contains("consolidating reports")
         || message.contains("analyzing reports for errors")
         || message.contains("Diagnostic report saved to")
+        || message.starts_with("Session ID: ")
 }
 
 fn format_duration(d: Duration) -> String {

@@ -433,6 +433,7 @@ output_dir/
       errors.md                    # Optional: diagnostics report
       _memories.json               # Optional: extracted memories from this run
       _errors.log                  # Application-level error log
+      _sessions.toml               # CLI provider session ID mapping (block/agent → session ID)
     swift-falcon/                  # auto-generated name (no session provided)
       ...
 ```
@@ -459,6 +460,7 @@ output_dir/
       Fixer_b5_Claude_r2_item1.md          # scatter: replica 2, item 1 (pass 0)
       Fixer_b5_Claude_r1_item2_loop1.md    # scatter: replica 1, item 2 (loop pass 1)
       _errors.log
+      _sessions.toml                      # CLI provider session ID mapping
 ```
 
 Sub-pipeline blocks create a `sub_{block_id}/` subdirectory containing the inner pipeline's outputs and finalization:

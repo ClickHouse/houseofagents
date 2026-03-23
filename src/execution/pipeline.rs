@@ -2278,6 +2278,11 @@ async fn run_pipeline_with_provider_factory(
         }
     }
 
+    let session_announced: Arc<std::sync::Mutex<HashSet<String>>> =
+        Arc::new(std::sync::Mutex::new(HashSet::new()));
+    let session_written: Arc<std::sync::Mutex<HashSet<(u32, String)>>> =
+        Arc::new(std::sync::Mutex::new(HashSet::new()));
+
     // Build adjacency structures with replica-weighted in-degree (regular connections only)
     let graph = RegularGraph::from_def(def);
     let block_map: HashMap<BlockId, &PipelineBlock> =
@@ -3154,6 +3159,11 @@ async fn run_pipeline_with_provider_factory(
                         let message_clone = message;
                         let sem_clone = concurrency_sem.clone();
                         let task_loop_pass = current_loop_pass;
+                        let task_session_announced = session_announced.clone();
+                        let task_session_written = session_written.clone();
+                        let task_multi_replica = block.replicas > 1;
+                        let task_replica_index = info.replica_index;
+                        let task_block_id = info.source_block_id;
                         let task_handle = tasks.spawn(async move {
                             let _permit = sem_clone.acquire().await.expect("semaphore closed");
                             let mut guard = provider_arc.lock().await;
@@ -3178,6 +3188,52 @@ async fn run_pipeline_with_provider_factory(
                                 }
                             });
 
+                            // Log session ID early if already known (Anthropic generates client-side)
+                            if let Some(sid) = guard.session_id() {
+                                let sid_str = sid.to_string();
+                                if task_session_announced
+                                    .lock()
+                                    .expect("lock")
+                                    .insert(sid_str.clone())
+                                {
+                                    let _ = ptx.send(ProgressEvent::BlockLog {
+                                        block_id: rid,
+                                        agent_name: task_agent_name.clone(),
+                                        iteration,
+                                        loop_pass: task_loop_pass,
+                                        message: format!("Session ID: {sid_str}"),
+                                    });
+                                }
+                                if task_session_written
+                                    .lock()
+                                    .expect("lock")
+                                    .insert((rid, sid_str.clone()))
+                                {
+                                    let replica_field = if task_multi_replica {
+                                        Some(task_replica_index + 1)
+                                    } else {
+                                        None
+                                    };
+                                    if let Err(e) = task_output.append_session_entry(
+                                        &task_label,
+                                        &task_agent_name,
+                                        &sid_str,
+                                        replica_field,
+                                        Some(task_block_id),
+                                    ) {
+                                        let _ = ptx.send(ProgressEvent::BlockLog {
+                                            block_id: rid,
+                                            agent_name: task_agent_name.clone(),
+                                            iteration,
+                                            loop_pass: task_loop_pass,
+                                            message: format!(
+                                                "Failed to write session entry: {e}"
+                                            ),
+                                        });
+                                    }
+                                }
+                            }
+
                             let result = tokio::select! {
                                 res = crate::execution::send_with_streaming(
                                     &mut **guard,
@@ -3201,13 +3257,65 @@ async fn run_pipeline_with_provider_factory(
                             };
 
                             guard.set_live_log_sender(None);
+                            let provider_session_id = guard.session_id().map(|s| s.to_string());
                             let cancelled = result.is_none();
                             drop(guard);
                             finish_live_log_forwarder(live_forward, cancelled).await;
 
+                            // Log session ID to TUI and write to _sessions.toml (deduped)
+                            let log_session = |sid: &str| {
+                                if task_session_announced
+                                    .lock()
+                                    .expect("lock")
+                                    .insert(sid.to_string())
+                                {
+                                    let _ = ptx.send(ProgressEvent::BlockLog {
+                                        block_id: rid,
+                                        agent_name: task_agent_name.clone(),
+                                        iteration,
+                                        loop_pass: task_loop_pass,
+                                        message: format!("Session ID: {sid}"),
+                                    });
+                                }
+                                if task_session_written
+                                    .lock()
+                                    .expect("lock")
+                                    .insert((rid, sid.to_string()))
+                                {
+                                    let replica_field = if task_multi_replica {
+                                        Some(task_replica_index + 1)
+                                    } else {
+                                        None
+                                    };
+                                    if let Err(e) = task_output.append_session_entry(
+                                        &task_label,
+                                        &task_agent_name,
+                                        sid,
+                                        replica_field,
+                                        Some(task_block_id),
+                                    ) {
+                                        let _ = ptx.send(ProgressEvent::BlockLog {
+                                            block_id: rid,
+                                            agent_name: task_agent_name.clone(),
+                                            iteration,
+                                            loop_pass: task_loop_pass,
+                                            message: format!(
+                                                "Failed to write session entry: {e}"
+                                            ),
+                                        });
+                                    }
+                                }
+                            };
                             match result {
-                                None => (rid, Err("Cancelled".to_string())),
+                                None => {
+                                    // Don't log session for cancelled tasks — session may
+                                    // never have been established server-side.
+                                    (rid, Err("Cancelled".to_string()))
+                                }
                                 Some(Ok(resp)) => {
+                                    if let Some(ref sid) = provider_session_id {
+                                        log_session(sid);
+                                    }
                                     for log in &resp.debug_logs {
                                         let _ = ptx.send(ProgressEvent::BlockLog {
                                             block_id: rid,
@@ -3245,6 +3353,9 @@ async fn run_pipeline_with_provider_factory(
                                     }
                                 }
                                 Some(Err(e)) => {
+                                    if let Some(ref sid) = provider_session_id {
+                                        log_session(sid);
+                                    }
                                     let error = e.to_string();
                                     let _ = task_output.append_error(&format!(
                                         "runtime {rid} {task_agent_name}: {error}"
@@ -10894,6 +11005,73 @@ position = [0, 0]
                 .iter()
                 .map(|c| &c[..c.len().min(200)])
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn pipeline_session_id_logged_and_written_to_sessions_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = OutputManager::new(dir.path(), Some("pipeline-session")).unwrap();
+        let def = def_with(vec![block(1, 0, 0), block(2, 1, 0)], vec![conn(1, 2)]);
+        let agent_configs = HashMap::from([(
+            "Claude".to_string(),
+            (
+                ProviderKind::Anthropic,
+                ProviderConfig {
+                    api_key: String::new(),
+                    model: "test".to_string(),
+                    reasoning_effort: None,
+                    thinking_effort: None,
+                    use_cli: false,
+                    cli_print_mode: true,
+                    extra_cli_args: String::new(),
+                },
+                false,
+            ),
+        )]);
+        let context = PromptRuntimeContext::new(def.initial_prompt.clone(), false);
+        let (tx, rx) = mpsc::unbounded_channel();
+
+        run_pipeline_with_provider_factory(
+            &def,
+            0,
+            agent_configs,
+            &context,
+            &output,
+            tx,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(|_kind, _cfg| {
+                let recv = Arc::new(Mutex::new(Vec::new()));
+                Box::new(
+                    MockProvider::ok(ProviderKind::Anthropic, "ok", recv)
+                        .with_session_id("pipe-sess-abc"),
+                ) as Box<dyn crate::provider::Provider>
+            }),
+        )
+        .await
+        .expect("run");
+
+        let events = collect_progress_events(rx);
+        // Session ID should appear as a BlockLog at least once
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                ProgressEvent::BlockLog { message, .. }
+                if message.contains("Session ID: pipe-sess-abc")
+            )),
+            "expected session ID log event"
+        );
+
+        let content = std::fs::read_to_string(output.run_dir().join("_sessions.toml"))
+            .expect("read _sessions.toml");
+        // Both blocks should have entries
+        let count = content.matches("[[sessions]]").count();
+        assert_eq!(count, 2, "both blocks should have entries");
+        assert!(content.contains("pipe-sess-abc"));
+        // Pipeline entries should include block_id
+        assert!(
+            content.contains("block_id = "),
+            "pipeline session entries should include block_id"
         );
     }
 }
