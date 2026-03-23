@@ -89,6 +89,15 @@ pub(crate) fn build_runtime_table(def: &PipelineDefinition) -> RuntimeReplicaTab
         if block.is_sub_pipeline() {
             let blabel = block_label(block);
             let multi_replica = block.replicas > 1;
+            let block_name_key = if block.name.trim().is_empty() {
+                format!("b{}", block.id)
+            } else {
+                format!(
+                    "{}_b{}",
+                    OutputManager::sanitize_session_name(&block.name),
+                    block.id
+                )
+            };
             let mut runtime_ids = Vec::new();
             for ri in 0..block.replicas {
                 let display_label = if multi_replica {
@@ -97,14 +106,14 @@ pub(crate) fn build_runtime_table(def: &PipelineDefinition) -> RuntimeReplicaTab
                     format!("{blabel} [sub-pipeline]")
                 };
                 let filename_stem = if multi_replica {
-                    format!("sub_b{}_pipeline_r{}", block.id, ri + 1)
+                    format!("sub_{}_pipeline_r{}", block_name_key, ri + 1)
                 } else {
-                    format!("sub_b{}_pipeline", block.id)
+                    format!("sub_{}_pipeline", block_name_key)
                 };
                 let session_key = if multi_replica {
-                    format!("__sub_{}_r{}", block.id, ri + 1)
+                    format!("__sub_{}_r{}", block_name_key, ri + 1)
                 } else {
-                    format!("__sub_{}", block.id)
+                    format!("__sub_{}", block_name_key)
                 };
                 entries.push(RuntimeReplicaInfo {
                     runtime_id: next_id,
@@ -2657,14 +2666,23 @@ async fn run_pipeline_with_provider_factory(
                             }
 
                             // Per-replica sub-run directory
+                            let sub_name_key = if block.name.trim().is_empty() {
+                                format!("b{}", block.id)
+                            } else {
+                                format!(
+                                    "{}_b{}",
+                                    OutputManager::sanitize_session_name(&block.name),
+                                    block.id
+                                )
+                            };
                             let sub_run_dir = if block.replicas > 1 {
                                 output.run_dir().join(format!(
                                     "sub_{}_r{}",
-                                    block.id,
+                                    sub_name_key,
                                     replica_index + 1
                                 ))
                             } else {
-                                output.run_dir().join(format!("sub_{}", block.id))
+                                output.run_dir().join(format!("sub_{}", sub_name_key))
                             };
                             let parent_run_dir = output.run_dir().to_path_buf();
                             let parent_filename = loop_replica_filename(
@@ -9500,7 +9518,7 @@ position = [0, 0]
 
         // HIGH fix: parent-level output file must be written for downstream/feed consumers
         let run_dir = output.run_dir();
-        let expected_parent_file = run_dir.join("sub_b1_pipeline.md");
+        let expected_parent_file = run_dir.join("sub_Sub_1_b1_pipeline.md");
         assert!(
             expected_parent_file.exists(),
             "Parent-level output file {expected_parent_file:?} must be written",
@@ -9696,8 +9714,8 @@ position = [0, 0]
         );
 
         let run_dir = output.run_dir();
-        let pass0_file = run_dir.join("sub_b1_pipeline.md");
-        let pass1_file = run_dir.join("sub_b1_pipeline_loop1.md");
+        let pass0_file = run_dir.join("sub_Sub_1_b1_pipeline.md");
+        let pass1_file = run_dir.join("sub_Sub_1_b1_pipeline_loop1.md");
 
         assert!(
             pass0_file.exists(),
@@ -9770,7 +9788,7 @@ position = [0, 0]
         );
 
         // The inner pipeline writes _errors.log inside the sub-run directory
-        let sub_errors_log = output.run_dir().join("sub_1").join("_errors.log");
+        let sub_errors_log = output.run_dir().join("sub_Sub_1_b1").join("_errors.log");
         assert!(
             sub_errors_log.exists(),
             "_errors.log must exist in sub-pipeline run dir {sub_errors_log:?}",
@@ -10490,7 +10508,7 @@ position = [0, 0]
             let info = &rt.entries[rid as usize];
             assert_eq!(info.source_block_id, 2);
             assert_eq!(info.replica_index, i as u32);
-            assert_eq!(info.filename_stem, format!("sub_b2_pipeline_r{}", i + 1));
+            assert_eq!(info.filename_stem, format!("sub_Sub_2_b2_pipeline_r{}", i + 1));
         }
     }
 
@@ -10524,11 +10542,11 @@ position = [0, 0]
         let rids = rt.logical_to_runtime.get(&2).unwrap();
         assert_eq!(
             loop_replica_filename(&rt.entries[rids[0] as usize], 0),
-            "sub_b2_pipeline_r1.md"
+            "sub_Sub_2_b2_pipeline_r1.md"
         );
         assert_eq!(
             loop_replica_filename(&rt.entries[rids[1] as usize], 2),
-            "sub_b2_pipeline_r2_loop2.md"
+            "sub_Sub_2_b2_pipeline_r2_loop2.md"
         );
     }
 
