@@ -182,7 +182,7 @@ fn draw_edit_popup(f: &mut Frame, app: &App) {
 
     let mut header_lines = vec![
         Line::from(Span::styled(
-            "j/k: navigate  Tab: section  [o]: output dir  [s]: save  Esc: keep for session  [n]: new  [Del]: remove  [p]: provider  [r]: rename  [d]: diagnostic  [c]: CLI/API  [b]: print/agent  [a]: key  [m]: model  [l]: list  [t]: effort  [x]: extra CLI",
+            "j/k: navigate  Tab: section  [o]: output dir  [s]: save  Esc: keep for session  [n]: new  [Del]: remove  [p]: provider  [r]: rename  [d]: diagnostic  [c]: CLI/API  [a]: key  [m]: model  [l]: list  [t]: effort  [x]: extra CLI",
             Style::default().fg(Color::DarkGray),
         )),
         Line::from(""),
@@ -317,25 +317,12 @@ fn draw_edit_popup(f: &mut Frame, app: &App) {
                     name_spans.push(Span::styled(" [diag]", Style::default().fg(Color::Green)));
                 }
                 body_lines.push(Line::from(name_spans));
-                let cli_print_mode = config.map(|c| c.cli_print_mode).unwrap_or(true);
                 if is_selected && !app.edit_popup.editing {
                     body_lines.push(Line::from(vec![
                         Span::raw("  Mode:     "),
                         Span::styled(mode_text, mode_style),
                         Span::styled("  [c]", Style::default().fg(Color::DarkGray)),
                     ]));
-                    if provider == ProviderKind::Anthropic && use_cli {
-                        let (cm_text, cm_style) = if cli_print_mode {
-                            ("print (-p)", Style::default())
-                        } else {
-                            ("agent", Style::default().fg(Color::Green))
-                        };
-                        body_lines.push(Line::from(vec![
-                            Span::raw("  CLI Mode: "),
-                            Span::styled(cm_text, cm_style),
-                            Span::styled("  [b]", Style::default().fg(Color::DarkGray)),
-                        ]));
-                    }
                     let key_style = if use_cli {
                         Style::default().fg(Color::DarkGray)
                     } else {

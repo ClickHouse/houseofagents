@@ -205,7 +205,6 @@ mod tests {
             reasoning_effort: None,
             thinking_effort: None,
             use_cli: false,
-            cli_print_mode: true,
             extra_cli_args: String::new(),
         }];
         let mut cli_available = HashMap::new();
@@ -224,7 +223,6 @@ mod tests {
             reasoning_effort: None,
             thinking_effort: None,
             use_cli: false,
-            cli_print_mode: true,
             extra_cli_args: String::new(),
         }];
         let mut overrides = HashMap::new();
@@ -246,7 +244,6 @@ mod tests {
             reasoning_effort: None,
             thinking_effort: None,
             use_cli: true,
-            cli_print_mode: true,
             extra_cli_args: String::new(),
         };
         let err = validate_agent_runtime(&cli_available, "Claude", &agent).unwrap_err();
@@ -264,7 +261,6 @@ mod tests {
             reasoning_effort: None,
             thinking_effort: None,
             use_cli: false,
-            cli_print_mode: true,
             extra_cli_args: String::new(),
         };
         let err = validate_agent_runtime(&cli_available, "Claude", &agent).unwrap_err();

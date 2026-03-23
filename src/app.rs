@@ -1697,7 +1697,6 @@ mod tests {
             reasoning_effort: Some("medium".to_string()),
             thinking_effort: Some("medium".to_string()),
             use_cli,
-            cli_print_mode: true,
             extra_cli_args: String::new(),
         }
     }

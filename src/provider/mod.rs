@@ -283,7 +283,6 @@ pub fn create_provider(
             config.reasoning_effort.clone(),
             config.thinking_effort.clone(),
             config.extra_cli_args.clone(),
-            config.cli_print_mode,
             add_dirs,
             cli_timeout_seconds,
             max_history_messages,
@@ -370,7 +369,6 @@ mod tests {
             reasoning_effort: Some("medium".to_string()),
             thinking_effort: Some("low".to_string()),
             use_cli,
-            cli_print_mode: true,
             extra_cli_args: "--x".to_string(),
         }
     }

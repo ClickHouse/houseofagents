@@ -109,9 +109,6 @@ pub struct AgentConfig {
     /// Use CLI tool instead of API for this provider
     #[serde(default)]
     pub use_cli: bool,
-    /// Use print mode (-p) instead of agent mode for Anthropic CLI
-    #[serde(default = "default_true")]
-    pub cli_print_mode: bool,
     /// Extra CLI arguments parsed with shell-style quoting at runtime
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub extra_cli_args: String,
@@ -128,7 +125,6 @@ impl AgentConfig {
             reasoning_effort: pc.reasoning_effort.clone(),
             thinking_effort: pc.thinking_effort.clone(),
             use_cli: pc.use_cli,
-            cli_print_mode: pc.cli_print_mode,
             extra_cli_args: pc.extra_cli_args.clone(),
         }
     }
@@ -141,7 +137,6 @@ impl AgentConfig {
             reasoning_effort: self.reasoning_effort.clone(),
             thinking_effort: self.thinking_effort.clone(),
             use_cli: self.use_cli,
-            cli_print_mode: self.cli_print_mode,
             extra_cli_args: self.extra_cli_args.clone(),
         }
     }
@@ -160,9 +155,6 @@ pub struct ProviderConfig {
     /// Use CLI tool instead of API for this provider
     #[serde(default)]
     pub use_cli: bool,
-    /// Use print mode (-p) instead of agent mode for Anthropic CLI
-    #[serde(default = "default_true")]
-    pub cli_print_mode: bool,
     /// Extra CLI arguments parsed with shell-style quoting at runtime
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub extra_cli_args: String,
@@ -401,7 +393,6 @@ api_key = ""
 model = "claude-opus-4-6"
 thinking_effort = "high"
 use_cli = true
-cli_print_mode = true
 extra_cli_args = ""
 
 [[agents]]
@@ -463,7 +454,6 @@ mod tests {
             reasoning_effort: None,
             thinking_effort: None,
             use_cli: false,
-            cli_print_mode: true,
             extra_cli_args: String::new(),
         }
     }
@@ -656,7 +646,6 @@ model = "gpt-5"
             reasoning_effort: Some("high".to_string()),
             thinking_effort: None,
             use_cli: true,
-            cli_print_mode: true,
             extra_cli_args: "--x".to_string(),
         };
         let ac = AgentConfig::from_provider_config("Test".to_string(), ProviderKind::OpenAI, &pc);
