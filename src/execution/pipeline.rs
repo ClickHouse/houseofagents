@@ -350,6 +350,7 @@ async fn evaluate_loop_break(
     current_pass: u32,
     total_passes: u32,
     sub_dag_blocks: &HashSet<BlockId>,
+    loop_from: BlockId,
     rt: &RuntimeReplicaTable,
     output: &crate::output::OutputManager,
     agent_configs: &PipelineAgentConfigs,
@@ -376,14 +377,20 @@ async fn evaluate_loop_break(
         break_condition
     };
 
-    // Budget: 64KB total, minus fixed prompt overhead and clamped condition length
-    const TOTAL_BUDGET: usize = 64 * 1024;
+    // Budget: 512KB total, minus fixed prompt overhead and clamped condition length
+    const TOTAL_BUDGET: usize = 512 * 1024;
     let fixed_overhead = 250 + clamped_condition.len(); // prompt template + condition
     let history_budget = TOTAL_BUDGET.saturating_sub(fixed_overhead);
 
-    // Sort block IDs for deterministic iteration
+    // Sort block IDs for deterministic iteration, but place loop_from first
+    // so the feedback source (whose output the break decision hinges on) is
+    // always included before the budget runs out.
     let mut sorted_blocks: Vec<BlockId> = sub_dag_blocks.iter().copied().collect();
     sorted_blocks.sort_unstable();
+    if let Some(pos) = sorted_blocks.iter().position(|&b| b == loop_from) {
+        sorted_blocks.remove(pos);
+        sorted_blocks.insert(0, loop_from);
+    }
 
     // Collect pass history from disk (newest first for budget priority)
     let mut entries: Vec<String> = Vec::new();
@@ -3865,6 +3872,7 @@ async fn run_pipeline_with_provider_factory(
                                                 pass,
                                                 total,
                                                 &blocks,
+                                                loop_from,
                                                 &rt,
                                                 output,
                                                 &agent_configs,
