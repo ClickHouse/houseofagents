@@ -2050,17 +2050,21 @@ fn config_save_success_merges_memory_overrides() {
     let mut app = test_app();
     app.session_memory_max_recall = Some(42);
     app.session_memory_disable_extraction = Some(true);
+    app.session_memory_max_summary_recall = Some(5);
     // Simulate: the async task merged overrides into a config clone and saved it
     let mut saved = app.config.clone();
     saved.memory.max_recall = 42;
     saved.memory.disable_extraction = true;
+    saved.memory.max_summary_recall = 5;
     handle_config_save_result(&mut app, Ok(saved));
     // Config replaced with the saved version
     assert_eq!(app.config.memory.max_recall, 42);
     assert!(app.config.memory.disable_extraction);
+    assert_eq!(app.config.memory.max_summary_recall, 5);
     // Session overrides cleared
     assert!(app.session_memory_max_recall.is_none());
     assert!(app.session_memory_disable_extraction.is_none());
+    assert!(app.session_memory_max_summary_recall.is_none());
 }
 
 #[test]
@@ -2068,15 +2072,19 @@ fn config_save_failure_preserves_config() {
     let mut app = test_app();
     let original_max_recall = app.config.memory.max_recall;
     let original_ttl = app.config.memory.observation_ttl_days;
+    let original_max_summary = app.config.memory.max_summary_recall;
     app.session_memory_max_recall = Some(99);
     app.session_memory_observation_ttl_days = Some(7);
+    app.session_memory_max_summary_recall = Some(3);
     handle_config_save_result(&mut app, Err("write error".into()));
     // Config unchanged
     assert_eq!(app.config.memory.max_recall, original_max_recall);
     assert_eq!(app.config.memory.observation_ttl_days, original_ttl);
+    assert_eq!(app.config.memory.max_summary_recall, original_max_summary);
     // Session overrides still intact
     assert_eq!(app.session_memory_max_recall, Some(99));
     assert_eq!(app.session_memory_observation_ttl_days, Some(7));
+    assert_eq!(app.session_memory_max_summary_recall, Some(3));
 }
 
 #[test]

@@ -16,6 +16,8 @@ pub struct MemoryConfig {
     pub max_recall: usize,
     #[serde(default = "default_max_recall_bytes")]
     pub max_recall_bytes: usize,
+    #[serde(default = "default_max_summary_recall")]
+    pub max_summary_recall: usize,
     #[serde(default)]
     pub extraction_agent: String,
     #[serde(default)]
@@ -36,6 +38,7 @@ impl Default for MemoryConfig {
             project_id: String::new(),
             max_recall: default_max_recall(),
             max_recall_bytes: default_max_recall_bytes(),
+            max_summary_recall: default_max_summary_recall(),
             extraction_agent: String::new(),
             disable_extraction: false,
             observation_ttl_days: default_observation_ttl_days(),
@@ -46,11 +49,15 @@ impl Default for MemoryConfig {
 }
 
 fn default_max_recall() -> usize {
-    20
+    10
 }
 
 fn default_max_recall_bytes() -> usize {
-    16384
+    8192
+}
+
+fn default_max_summary_recall() -> usize {
+    2
 }
 
 fn default_observation_ttl_days() -> u32 {
@@ -363,8 +370,9 @@ max_history_bytes = 102400
 # enabled = true
 # db_path = ""                  # empty = {output_dir}/memory.db
 # project_id = ""               # empty = auto-detect from git remote / cwd
-# max_recall = 20               # max memories injected per run
-# max_recall_bytes = 16384      # max total bytes of recalled memory context
+# max_recall = 10               # max memories injected per run
+# max_recall_bytes = 8192       # max total bytes of recalled memory context
+# max_summary_recall = 2        # max summary-kind memories per recall (0=unlimited)
 # extraction_agent = ""         # empty = first participating agent, then first configured
                                 # Tip: stronger models produce higher-quality memories
 # disable_extraction = false    # set true to skip post-run extraction
@@ -632,6 +640,33 @@ model = "gpt-5"
             .push(sample_agent("Claude 1", ProviderKind::Anthropic));
         let err = cfg.validate_agents().expect_err("should reject");
         assert!(err.to_string().contains("duplicate filenames"));
+    }
+
+    #[test]
+    fn deserialize_memory_defaults_when_fields_missing() {
+        // Backward-compat: a config TOML from before max_summary_recall existed
+        // should deserialize with the correct default (2).
+        let body = r#"
+output_dir = "/tmp/hoa"
+
+[memory]
+enabled = true
+
+[[agents]]
+name = "Claude"
+provider = "anthropic"
+api_key = "key"
+model = "claude-3"
+"#;
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, body).expect("write");
+        let cfg = AppConfig::load_with_override(path.to_str()).expect("parse");
+        assert!(cfg.memory.enabled);
+        assert_eq!(cfg.memory.max_recall, 10);
+        assert_eq!(cfg.memory.max_recall_bytes, 8192);
+        assert_eq!(cfg.memory.max_summary_recall, 2);
+        assert_eq!(cfg.memory.observation_ttl_days, 120);
     }
 
     #[test]

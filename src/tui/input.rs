@@ -3640,6 +3640,9 @@ pub(super) fn save_config_globally(app: &mut App) {
     if let Some(v) = app.session_memory_max_recall_bytes {
         config_to_save.memory.max_recall_bytes = v;
     }
+    if let Some(v) = app.session_memory_max_summary_recall {
+        config_to_save.memory.max_summary_recall = v;
+    }
     if let Some(v) = app.session_memory_observation_ttl_days {
         config_to_save.memory.observation_ttl_days = v;
     }
@@ -3701,6 +3704,7 @@ pub(super) fn handle_config_save_result(app: &mut App, result: Result<AppConfig,
             app.session_memory_enabled = None;
             app.session_memory_max_recall = None;
             app.session_memory_max_recall_bytes = None;
+            app.session_memory_max_summary_recall = None;
             app.session_memory_observation_ttl_days = None;
             app.session_memory_summary_ttl_days = None;
             app.session_memory_extraction_agent = None;
@@ -3967,12 +3971,13 @@ pub(super) fn set_timeout_override_from_buffer(app: &mut App) -> Result<(), Stri
 pub(crate) const MEM_ENABLED: usize = 0;
 pub(crate) const MEM_MAX_RECALL: usize = 1;
 pub(crate) const MEM_MAX_RECALL_BYTES: usize = 2;
-pub(crate) const MEM_OBSERVATION_TTL: usize = 3;
-pub(crate) const MEM_SUMMARY_TTL: usize = 4;
-pub(crate) const MEM_STALE_PERMANENT_DAYS: usize = 5;
-pub(crate) const MEM_EXTRACTION_AGENT: usize = 6;
-pub(crate) const MEM_DISABLE_EXTRACTION: usize = 7;
-pub(crate) const MEM_FIELD_COUNT: usize = 8;
+pub(crate) const MEM_MAX_SUMMARY_RECALL: usize = 3;
+pub(crate) const MEM_OBSERVATION_TTL: usize = 4;
+pub(crate) const MEM_SUMMARY_TTL: usize = 5;
+pub(crate) const MEM_STALE_PERMANENT_DAYS: usize = 6;
+pub(crate) const MEM_EXTRACTION_AGENT: usize = 7;
+pub(crate) const MEM_DISABLE_EXTRACTION: usize = 8;
+pub(crate) const MEM_FIELD_COUNT: usize = 9;
 
 // Compile-time guard: if you add a new MEM_* field, bump MEM_FIELD_COUNT too.
 const _: () = assert!(MEM_DISABLE_EXTRACTION + 1 == MEM_FIELD_COUNT);
@@ -4032,6 +4037,7 @@ pub(super) fn begin_memory_edit(app: &mut App) {
     app.edit_popup.edit_buffer = match app.edit_popup.memory_cursor {
         MEM_MAX_RECALL => app.effective_memory_max_recall().to_string(),
         MEM_MAX_RECALL_BYTES => app.effective_memory_max_recall_bytes().to_string(),
+        MEM_MAX_SUMMARY_RECALL => app.effective_memory_max_summary_recall().to_string(),
         MEM_OBSERVATION_TTL => app.effective_memory_observation_ttl_days().to_string(),
         MEM_SUMMARY_TTL => app.effective_memory_summary_ttl_days().to_string(),
         MEM_STALE_PERMANENT_DAYS => app.effective_memory_stale_permanent_days().to_string(),
@@ -4061,6 +4067,12 @@ pub(super) fn set_memory_override_from_buffer(app: &mut App) -> Result<(), Strin
                 return Err("Max recall bytes must be at least 1".into());
             }
             app.session_memory_max_recall_bytes = Some(v);
+        }
+        MEM_MAX_SUMMARY_RECALL => {
+            let v = raw
+                .parse::<usize>()
+                .map_err(|_| "Max summary recall must be a non-negative integer".to_string())?;
+            app.session_memory_max_summary_recall = Some(v);
         }
         MEM_OBSERVATION_TTL => {
             let v = raw

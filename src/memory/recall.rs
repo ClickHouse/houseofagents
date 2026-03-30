@@ -1,5 +1,6 @@
 use super::store::MemoryStore;
 use super::types::{Memory, RecalledSet};
+use crate::execution::pipeline::PipelineDefinition;
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
@@ -32,21 +33,188 @@ pub fn extract_keywords(prompt: &str) -> Vec<String> {
     words
 }
 
+/// Extract recall keywords from a pipeline definition by merging keywords
+/// from the initial prompt with keywords from all block/finalization prompts.
+///
+/// Uses seek-based round-robin merge: each section (initial_prompt + each block
+/// prompt) produces a keyword list sorted by length descending. A cursor per
+/// section advances round-robin, emitting one keyword per section per round,
+/// skipping duplicates. A final bonus pass backfills any remaining short terms
+/// (≤6 chars) from sections that still have unused keywords, also round-robin.
+///
+/// The result is truncated to 20 terms total (same as extract_keywords).
+pub(crate) fn extract_pipeline_keywords(pipeline_def: &PipelineDefinition) -> Vec<String> {
+    // Collect per-section keyword lists (each already sorted longest-first, deduped)
+    let mut sections: Vec<Vec<String>> = Vec::new();
+
+    // Section 0: initial_prompt
+    let ip_kws = extract_keywords(&pipeline_def.initial_prompt);
+    if !ip_kws.is_empty() {
+        sections.push(ip_kws);
+    }
+
+    // Execution blocks
+    for block in &pipeline_def.blocks {
+        if !block.prompt.is_empty() {
+            let kws = extract_keywords(&block.prompt);
+            if !kws.is_empty() {
+                sections.push(kws);
+            }
+        }
+        // Recurse into sub-pipeline blocks
+        if let Some(ref sub) = block.sub_pipeline {
+            if !sub.initial_prompt.is_empty() {
+                let kws = extract_keywords(&sub.initial_prompt);
+                if !kws.is_empty() {
+                    sections.push(kws);
+                }
+            }
+            for sb in &sub.blocks {
+                if !sb.prompt.is_empty() {
+                    let kws = extract_keywords(&sb.prompt);
+                    if !kws.is_empty() {
+                        sections.push(kws);
+                    }
+                }
+            }
+            for fb in &sub.finalization_blocks {
+                if !fb.prompt.is_empty() {
+                    let kws = extract_keywords(&fb.prompt);
+                    if !kws.is_empty() {
+                        sections.push(kws);
+                    }
+                }
+            }
+            // Sub-pipeline loop connections (same structure as top-level)
+            for lc in &sub.loop_connections {
+                if !lc.prompt.is_empty() {
+                    let kws = extract_keywords(&lc.prompt);
+                    if !kws.is_empty() {
+                        sections.push(kws);
+                    }
+                }
+                if !lc.break_condition.is_empty() {
+                    let kws = extract_keywords(&lc.break_condition);
+                    if !kws.is_empty() {
+                        sections.push(kws);
+                    }
+                }
+            }
+        }
+    }
+
+    // Finalization blocks
+    for block in &pipeline_def.finalization_blocks {
+        if !block.prompt.is_empty() {
+            let kws = extract_keywords(&block.prompt);
+            if !kws.is_empty() {
+                sections.push(kws);
+            }
+        }
+    }
+
+    // Loop connection prompts and break conditions
+    for lc in &pipeline_def.loop_connections {
+        if !lc.prompt.is_empty() {
+            let kws = extract_keywords(&lc.prompt);
+            if !kws.is_empty() {
+                sections.push(kws);
+            }
+        }
+        if !lc.break_condition.is_empty() {
+            let kws = extract_keywords(&lc.break_condition);
+            if !kws.is_empty() {
+                sections.push(kws);
+            }
+        }
+    }
+
+    if sections.is_empty() {
+        return Vec::new();
+    }
+
+    const MAX_TERMS: usize = 20;
+    let mut result: Vec<String> = Vec::with_capacity(MAX_TERMS);
+    let mut seen = HashSet::new();
+
+    // Seek-based cursors: one per section
+    let mut cursors: Vec<usize> = vec![0; sections.len()];
+
+    // Main round-robin pass
+    loop {
+        let mut any_advanced = false;
+        for (i, cursor) in cursors.iter_mut().enumerate() {
+            if result.len() >= MAX_TERMS {
+                break;
+            }
+            // Seek forward to the next unseen keyword
+            while *cursor < sections[i].len() {
+                let kw = &sections[i][*cursor];
+                *cursor += 1;
+                if seen.insert(kw.clone()) {
+                    result.push(kw.clone());
+                    any_advanced = true;
+                    break;
+                }
+            }
+        }
+        if result.len() >= MAX_TERMS || !any_advanced {
+            break;
+        }
+    }
+
+    // Bonus pass: backfill short terms (≤6 chars) round-robin
+    // This ensures short but specific terms from later sections aren't starved
+    if result.len() < MAX_TERMS {
+        loop {
+            let mut any_advanced = false;
+            for (i, cursor) in cursors.iter_mut().enumerate() {
+                if result.len() >= MAX_TERMS {
+                    break;
+                }
+                while *cursor < sections[i].len() {
+                    let kw = &sections[i][*cursor];
+                    *cursor += 1;
+                    if kw.len() <= 6 && seen.insert(kw.clone()) {
+                        result.push(kw.clone());
+                        any_advanced = true;
+                        break;
+                    }
+                }
+            }
+            if result.len() >= MAX_TERMS || !any_advanced {
+                break;
+            }
+        }
+    }
+
+    result
+}
+
 pub fn recall_for_prompt(
     store: &MemoryStore,
     project_id: &str,
     raw_prompt: &str,
     max: usize,
     max_bytes: usize,
+    max_summary: usize,
+    recall_terms: Option<&[String]>,
 ) -> Result<RecalledSet, String> {
-    let terms = extract_keywords(raw_prompt);
+    let own_terms;
+    let terms = match recall_terms {
+        Some(t) if !t.is_empty() => t,
+        _ => {
+            own_terms = extract_keywords(raw_prompt);
+            &own_terms
+        }
+    };
     if terms.is_empty() {
         return Ok(RecalledSet {
             memories: vec![],
             total_bytes: 0,
         });
     }
-    store.recall(project_id, &terms, max, max_bytes)
+    store.recall(project_id, terms, max, max_bytes, max_summary)
 }
 
 pub fn format_memory_context(recalled: &RecalledSet) -> String {
@@ -315,8 +483,313 @@ mod tests {
             "What database should we use for PostgreSQL migration?",
             15,
             8192,
+            0,
+            None,
         )
         .unwrap();
         assert!(!result.memories.is_empty());
+    }
+
+    fn make_block(id: u32, name: &str, prompt: &str) -> crate::execution::pipeline::PipelineBlock {
+        crate::execution::pipeline::PipelineBlock {
+            id,
+            name: name.into(),
+            agents: vec!["c".into()],
+            prompt: prompt.into(),
+            position: (0, 0),
+            profiles: vec![],
+            session_id: None,
+            replicas: 1,
+            sub_pipeline: None,
+        }
+    }
+
+    fn make_empty_block(
+        id: u32,
+        name: &str,
+        sub: Option<PipelineDefinition>,
+    ) -> crate::execution::pipeline::PipelineBlock {
+        crate::execution::pipeline::PipelineBlock {
+            id,
+            name: name.into(),
+            agents: vec![],
+            prompt: String::new(),
+            position: (0, 0),
+            profiles: vec![],
+            session_id: None,
+            replicas: 1,
+            sub_pipeline: sub,
+        }
+    }
+
+    #[test]
+    fn extract_pipeline_keywords_round_robin() {
+        let def = PipelineDefinition {
+            initial_prompt: "Analyze database performance optimization".into(),
+            blocks: vec![make_block(
+                1,
+                "Worker",
+                "Review caching strategy and latency metrics",
+            )],
+            ..Default::default()
+        };
+        let terms = extract_pipeline_keywords(&def);
+        // Should contain terms from BOTH sections, not just initial_prompt
+        assert!(terms.contains(&"optimization".to_string()));
+        assert!(terms.contains(&"caching".to_string()));
+        // Both should appear in top terms
+        let opt_idx = terms.iter().position(|t| t == "optimization").unwrap();
+        let cache_idx = terms.iter().position(|t| t == "caching").unwrap();
+        assert!(opt_idx < 20);
+        assert!(cache_idx < 20);
+    }
+
+    #[test]
+    fn extract_pipeline_keywords_shared_leaders_uses_seek() {
+        // Both sections share "parallelization" (17 chars) as longest term
+        let def = PipelineDefinition {
+            initial_prompt: "parallelization strategy for workers".into(),
+            blocks: vec![make_block(1, "W", "parallelization throughput measurement")],
+            ..Default::default()
+        };
+        let terms = extract_pipeline_keywords(&def);
+        // "parallelization" appears once (deduped)
+        assert_eq!(terms.iter().filter(|t| *t == "parallelization").count(), 1);
+        // Section B's cursor seeks past the duplicate to "throughput"
+        assert!(terms.contains(&"throughput".to_string()));
+        // Section A contributes "strategy"
+        assert!(terms.contains(&"strategy".to_string()));
+    }
+
+    #[test]
+    fn extract_pipeline_keywords_bonus_pass_is_fair() {
+        // Section A: 1 long term + many short terms
+        let def = PipelineDefinition {
+            initial_prompt: "infrastructure abc def ghi jkl mno pqr stu vwx".into(),
+            blocks: vec![make_block(1, "W", "optimization xyz uvw")],
+            ..Default::default()
+        };
+        let terms = extract_pipeline_keywords(&def);
+        // Section B's short terms should not be starved by Section A's many short terms
+        let b_shorts: Vec<&str> = vec!["xyz", "uvw"];
+        let has_b_short = terms.iter().any(|t| b_shorts.contains(&t.as_str()));
+        assert!(
+            has_b_short,
+            "Section B's short terms should appear in bonus pass"
+        );
+    }
+
+    #[test]
+    fn enriched_recall_finds_block_prompt_memories() {
+        use crate::config::MemoryConfig;
+        use crate::memory::types::ExtractedMemory;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let store = MemoryStore::open(&dir.path().join("test.db")).unwrap();
+        let cfg = MemoryConfig::default();
+        // Insert a memory about "caching" — term NOT in initial_prompt
+        store
+            .insert(
+                "proj1",
+                &ExtractedMemory {
+                    kind: MemoryKind::Decision,
+                    content: "Use Redis for caching layer".into(),
+                    reasoning: "Low latency needed".into(),
+                    tags: vec!["caching".into()],
+                },
+                "run1",
+                "Claude",
+                &cfg,
+            )
+            .unwrap();
+
+        // Pipeline: initial_prompt has zero overlap with "caching"
+        let def = PipelineDefinition {
+            initial_prompt: "Analyze production infrastructure".into(),
+            blocks: vec![make_block(1, "W", "Review caching strategy")],
+            ..Default::default()
+        };
+
+        let terms = extract_pipeline_keywords(&def);
+        let result = recall_for_prompt(
+            &store,
+            "proj1",
+            &def.initial_prompt,
+            10,
+            8192,
+            0,
+            Some(&terms),
+        )
+        .unwrap();
+        // Should find the caching memory because block prompt contributed "caching"
+        assert!(!result.memories.is_empty());
+        assert!(result.memories[0].content.contains("caching"));
+    }
+
+    #[test]
+    fn extract_pipeline_keywords_includes_sub_pipelines() {
+        let sub = PipelineDefinition {
+            initial_prompt: "Validate kubernetes manifests".into(),
+            blocks: vec![make_block(100, "Inner", "Check helm chart configuration")],
+            ..Default::default()
+        };
+        let def = PipelineDefinition {
+            initial_prompt: "Orchestrate deployment".into(),
+            blocks: vec![make_empty_block(1, "Sub", Some(sub))],
+            ..Default::default()
+        };
+        let terms = extract_pipeline_keywords(&def);
+        assert!(terms.contains(&"kubernetes".to_string()));
+        assert!(terms.contains(&"helm".to_string()));
+        assert!(terms.contains(&"configuration".to_string()));
+    }
+
+    #[test]
+    fn extract_pipeline_keywords_includes_loop_prompts() {
+        use crate::execution::pipeline::{LoopConnection, PipelineConnection};
+
+        let def = PipelineDefinition {
+            initial_prompt: "Review code quality".into(),
+            blocks: vec![
+                make_block(1, "A", "Analyze coverage"),
+                make_block(2, "B", "Check results"),
+            ],
+            connections: vec![PipelineConnection::new(1, 2)],
+            loop_connections: vec![LoopConnection {
+                from: 2,
+                to: 1,
+                count: 3,
+                prompt: "Refine mutation testing analysis".into(),
+                break_condition: "convergence achieved".into(),
+                break_agent: String::new(),
+            }],
+            ..Default::default()
+        };
+        let terms = extract_pipeline_keywords(&def);
+        assert!(terms.contains(&"mutation".to_string()));
+        assert!(terms.contains(&"convergence".to_string()));
+    }
+
+    #[test]
+    fn extract_pipeline_keywords_includes_sub_pipeline_loop_prompts() {
+        use crate::execution::pipeline::LoopConnection;
+
+        let sub = PipelineDefinition {
+            initial_prompt: "Inner task description".into(),
+            blocks: vec![
+                make_block(10, "Planner", "Create implementation plan"),
+                make_block(11, "Critic", "Review proposed changes"),
+            ],
+            connections: vec![crate::execution::pipeline::PipelineConnection::new(10, 11)],
+            loop_connections: vec![LoopConnection {
+                from: 11,
+                to: 10,
+                count: 5,
+                prompt: "Refine serialization strategy".into(),
+                break_condition: "stabilization reached".into(),
+                break_agent: String::new(),
+            }],
+            ..Default::default()
+        };
+        let def = PipelineDefinition {
+            initial_prompt: "Orchestrate planning".into(),
+            blocks: vec![make_empty_block(1, "Sub", Some(sub))],
+            ..Default::default()
+        };
+        let terms = extract_pipeline_keywords(&def);
+        // Keywords from sub-pipeline loop prompt should appear
+        assert!(terms.contains(&"serialization".to_string()));
+        // Keywords from sub-pipeline loop break_condition should appear
+        assert!(terms.contains(&"stabilization".to_string()));
+        // Keywords from sub-pipeline block prompts should also appear
+        assert!(terms.contains(&"implementation".to_string()));
+    }
+
+    #[test]
+    fn extract_pipeline_keywords_empty_pipeline() {
+        let def = PipelineDefinition::default();
+        let terms = extract_pipeline_keywords(&def);
+        assert!(terms.is_empty());
+    }
+
+    #[test]
+    fn recall_for_prompt_empty_terms_falls_back_to_prompt() {
+        use crate::config::MemoryConfig;
+        use crate::memory::types::ExtractedMemory;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let store = MemoryStore::open(&dir.path().join("test.db")).unwrap();
+        let cfg = MemoryConfig::default();
+        store
+            .insert(
+                "proj1",
+                &ExtractedMemory {
+                    kind: MemoryKind::Decision,
+                    content: "Use Redis for caching layer".into(),
+                    reasoning: "Low latency needed".into(),
+                    tags: vec!["caching".into()],
+                },
+                "run1",
+                "Claude",
+                &cfg,
+            )
+            .unwrap();
+
+        // Empty slice should fall back to prompt-based extraction
+        let empty: Vec<String> = vec![];
+        let result = recall_for_prompt(
+            &store,
+            "proj1",
+            "What caching layer should we use?",
+            10,
+            8192,
+            0,
+            Some(&empty),
+        )
+        .unwrap();
+        assert!(!result.memories.is_empty());
+        assert!(result.memories[0].content.contains("caching"));
+    }
+
+    #[test]
+    fn recall_for_prompt_with_explicit_terms() {
+        use crate::config::MemoryConfig;
+        use crate::memory::types::ExtractedMemory;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let store = MemoryStore::open(&dir.path().join("test.db")).unwrap();
+        let cfg = MemoryConfig::default();
+        store
+            .insert(
+                "proj1",
+                &ExtractedMemory {
+                    kind: MemoryKind::Decision,
+                    content: "Use Redis for caching layer".into(),
+                    reasoning: "Low latency needed".into(),
+                    tags: vec!["caching".into()],
+                },
+                "run1",
+                "Claude",
+                &cfg,
+            )
+            .unwrap();
+
+        // When recall_terms is provided, it should use those instead of extracting from prompt
+        let terms = vec!["caching".to_string()];
+        let result = recall_for_prompt(
+            &store,
+            "proj1",
+            "irrelevant prompt text",
+            10,
+            8192,
+            0,
+            Some(&terms),
+        )
+        .unwrap();
+        assert!(!result.memories.is_empty());
+        assert!(result.memories[0].content.contains("caching"));
     }
 }

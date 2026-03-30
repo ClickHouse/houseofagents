@@ -61,6 +61,7 @@ fn inject_memory_recall_headless(
     store: &Option<crate::memory::store::MemoryStore>,
     project_id: &str,
     prompt_context: &mut PromptRuntimeContext,
+    pipeline_def: Option<&crate::execution::pipeline::PipelineDefinition>,
 ) -> Vec<i64> {
     if !config.memory.enabled {
         return vec![];
@@ -68,12 +69,19 @@ fn inject_memory_recall_headless(
     let Some(ref store) = store else {
         return vec![];
     };
+
+    let pipeline_terms = pipeline_def
+        .map(crate::memory::recall::extract_pipeline_keywords)
+        .filter(|t| !t.is_empty());
+
     if let Ok(recalled) = crate::memory::recall::recall_for_prompt(
         store,
         project_id,
         prompt_context.raw_prompt(),
         config.memory.max_recall,
         config.memory.max_recall_bytes,
+        config.memory.max_summary_recall,
+        pipeline_terms.as_deref(),
     ) {
         let ids: Vec<i64> = recalled.memories.iter().map(|m| m.id).collect();
         prompt_context.set_memory_context(crate::memory::recall::format_memory_context(&recalled));
@@ -1455,8 +1463,13 @@ async fn run_single_standard(
 
     let mut prompt_context =
         PromptRuntimeContext::new(prompt.clone(), config.diagnostic_provider.is_some());
-    let recalled_ids =
-        inject_memory_recall_headless(config, memory_store, memory_project_id, &mut prompt_context);
+    let recalled_ids = inject_memory_recall_headless(
+        config,
+        memory_store,
+        memory_project_id,
+        &mut prompt_context,
+        None,
+    );
     let output = OutputManager::new(&output_dir, args.session_name.as_deref())
         .map_err(|e| format!("Failed to create output directory: {e}"))?;
     let run_dir = output.run_dir().display().to_string();
@@ -1640,8 +1653,13 @@ async fn run_single_pipeline(
         pipeline_def.initial_prompt.clone(),
         config.diagnostic_provider.is_some(),
     );
-    let recalled_ids =
-        inject_memory_recall_headless(config, memory_store, memory_project_id, &mut prompt_context);
+    let recalled_ids = inject_memory_recall_headless(
+        config,
+        memory_store,
+        memory_project_id,
+        &mut prompt_context,
+        Some(&pipeline_def),
+    );
 
     let rt = pipeline_mod::build_runtime_table(&pipeline_def);
     let loop_extra = pipeline_mod::loop_extra_tasks(&pipeline_def);
@@ -1872,8 +1890,13 @@ async fn run_batch_standard(
 
     let mut prompt_context =
         PromptRuntimeContext::new(prompt.clone(), config.diagnostic_provider.is_some());
-    let recalled_ids =
-        inject_memory_recall_headless(config, memory_store, memory_project_id, &mut prompt_context);
+    let recalled_ids = inject_memory_recall_headless(
+        config,
+        memory_store,
+        memory_project_id,
+        &mut prompt_context,
+        None,
+    );
     let output_dir = config.resolved_output_dir();
     let batch_root = OutputManager::new_batch_parent(&output_dir, args.session_name.as_deref())
         .map_err(|e| format!("Failed to create batch directory: {e}"))?;
@@ -2222,8 +2245,13 @@ async fn run_batch_pipeline(
             pipeline_def.initial_prompt.clone(),
             config.diagnostic_provider.is_some(),
         );
-        let recalled_ids =
-            inject_memory_recall_headless(config, memory_store, memory_project_id, &mut tmp_ctx);
+        let recalled_ids = inject_memory_recall_headless(
+            config,
+            memory_store,
+            memory_project_id,
+            &mut tmp_ctx,
+            Some(&pipeline_def),
+        );
         commit_memory_recall_headless(memory_store, &recalled_ids);
         tmp_ctx.memory_context().map(|s| s.to_string())
     };

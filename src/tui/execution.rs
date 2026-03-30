@@ -26,12 +26,26 @@ fn inject_memory_recall(app: &mut App, prompt_context: &mut PromptRuntimeContext
     let Some(ref store) = app.memory.store else {
         return vec![];
     };
+    // For pipeline mode, extract enriched keywords from all block prompts
+    let pipeline_terms = if app.selected_mode == crate::execution::ExecutionMode::Pipeline {
+        let terms = crate::memory::recall::extract_pipeline_keywords(&app.pipeline.pipeline_def);
+        if terms.is_empty() {
+            None
+        } else {
+            Some(terms)
+        }
+    } else {
+        None
+    };
+
     if let Ok(recalled) = crate::memory::recall::recall_for_prompt(
         store,
         &app.memory.project_id,
         prompt_context.raw_prompt(),
         app.effective_memory_max_recall(),
         app.effective_memory_max_recall_bytes(),
+        app.effective_memory_max_summary_recall(),
+        pipeline_terms.as_deref(),
     ) {
         app.memory.last_recalled_count = recalled.memories.len();
         let ids: Vec<i64> = recalled.memories.iter().map(|m| m.id).collect();
