@@ -198,6 +198,7 @@ pub struct App {
     pub(crate) session_memory_enabled: Option<bool>,
     pub(crate) session_memory_max_recall: Option<usize>,
     pub(crate) session_memory_max_recall_bytes: Option<usize>,
+    pub(crate) session_memory_max_summary_recall: Option<usize>,
     pub(crate) session_memory_observation_ttl_days: Option<u32>,
     pub(crate) session_memory_summary_ttl_days: Option<u32>,
     pub(crate) session_memory_extraction_agent: Option<String>,
@@ -674,6 +675,7 @@ impl App {
             session_memory_enabled: None,
             session_memory_max_recall: None,
             session_memory_max_recall_bytes: None,
+            session_memory_max_summary_recall: None,
             session_memory_observation_ttl_days: None,
             session_memory_summary_ttl_days: None,
             session_memory_extraction_agent: None,
@@ -758,6 +760,11 @@ impl App {
             .unwrap_or(self.config.memory.max_recall_bytes)
     }
 
+    pub fn effective_memory_max_summary_recall(&self) -> usize {
+        self.session_memory_max_summary_recall
+            .unwrap_or(self.config.memory.max_summary_recall)
+    }
+
     pub fn effective_memory_observation_ttl_days(&self) -> u32 {
         self.session_memory_observation_ttl_days
             .unwrap_or(self.config.memory.observation_ttl_days)
@@ -810,6 +817,7 @@ impl App {
             project_id: self.config.memory.project_id.clone(),
             max_recall: self.effective_memory_max_recall(),
             max_recall_bytes: self.effective_memory_max_recall_bytes(),
+            max_summary_recall: self.effective_memory_max_summary_recall(),
             extraction_agent: self.effective_memory_extraction_agent().to_string(),
             disable_extraction: self.effective_memory_disable_extraction(),
             observation_ttl_days: self.effective_memory_observation_ttl_days(),
@@ -2056,8 +2064,9 @@ mod tests {
     fn effective_memory_values_use_global_defaults() {
         let app = app_with_known_cli();
         assert!(!app.effective_memory_enabled());
-        assert_eq!(app.effective_memory_max_recall(), 20);
-        assert_eq!(app.effective_memory_max_recall_bytes(), 16384);
+        assert_eq!(app.effective_memory_max_recall(), 10);
+        assert_eq!(app.effective_memory_max_recall_bytes(), 8192);
+        assert_eq!(app.effective_memory_max_summary_recall(), 2);
         assert_eq!(app.effective_memory_observation_ttl_days(), 120);
         assert_eq!(app.effective_memory_summary_ttl_days(), 180);
         assert_eq!(app.effective_memory_extraction_agent(), "");
@@ -2070,6 +2079,7 @@ mod tests {
         app.session_memory_enabled = Some(false);
         app.session_memory_max_recall = Some(5);
         app.session_memory_max_recall_bytes = Some(2048);
+        app.session_memory_max_summary_recall = Some(1);
         app.session_memory_observation_ttl_days = Some(30);
         app.session_memory_summary_ttl_days = Some(60);
         app.session_memory_extraction_agent = Some("Claude".into());
@@ -2077,6 +2087,7 @@ mod tests {
         assert!(!app.effective_memory_enabled());
         assert_eq!(app.effective_memory_max_recall(), 5);
         assert_eq!(app.effective_memory_max_recall_bytes(), 2048);
+        assert_eq!(app.effective_memory_max_summary_recall(), 1);
         assert_eq!(app.effective_memory_observation_ttl_days(), 30);
         assert_eq!(app.effective_memory_summary_ttl_days(), 60);
         assert_eq!(app.effective_memory_extraction_agent(), "Claude");
@@ -2092,7 +2103,8 @@ mod tests {
         assert_eq!(cfg.max_recall, 3);
         assert_eq!(cfg.observation_ttl_days, 10);
         // Non-overridden fields should come from config defaults
-        assert_eq!(cfg.max_recall_bytes, 16384);
+        assert_eq!(cfg.max_recall_bytes, 8192);
+        assert_eq!(cfg.max_summary_recall, 2);
         assert_eq!(cfg.summary_ttl_days, 180);
     }
 

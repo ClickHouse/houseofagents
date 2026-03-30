@@ -132,6 +132,7 @@ pub fn home_help_lines() -> &'static [Line<'static>] {
             Line::from(""),
             Line::from("  Memory settings are configurable in the config popup"),
             Line::from("  (press e on home screen, then Tab to the Memory tab)."),
+            Line::from("  Max Summary Recall limits how many summary-kind memories are injected (0 = unlimited)."),
             Line::from("  Stronger extraction models produce higher-quality memories."),
             Line::from(vec![
                 Span::styled("  Space", Style::default().fg(Color::Yellow)),

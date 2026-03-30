@@ -258,11 +258,12 @@ extra_cli_args = ""
 
 | Field | Description |
 |-------|-------------|
-| `enabled` | Enable cross-run memory (`true` by default) |
+| `enabled` | Enable cross-run memory (`false` by default) |
 | `db_path` | Custom SQLite database path (default: `{output_dir}/memory.db`) |
 | `project_id` | Override automatic project detection (default: derived from git remote or cwd) |
-| `max_recall` | Max memories to recall per run (default: 20) |
-| `max_recall_bytes` | Byte budget for recalled memory context (default: 16384) |
+| `max_recall` | Max memories to recall per run (default: 10) |
+| `max_recall_bytes` | Byte budget for recalled memory context (default: 8192) |
+| `max_summary_recall` | Max summary-kind memories per recall, 0 = unlimited (default: 2) |
 | `extraction_agent` | Agent to use for post-run memory extraction (default: first participating agent, then first configured). Stronger models produce higher-quality memories. |
 | `disable_extraction` | Disable post-run memory extraction (default: false) |
 | `observation_ttl_days` | Days before observations expire (default: 120) |

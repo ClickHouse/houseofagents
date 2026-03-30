@@ -5,6 +5,59 @@ use rusqlite::Connection;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+/// A memory paired with its FTS5 composite score.
+/// The score field preserves the SQL ranking value as a hook for future reranking.
+/// Currently unused beyond the SQL ORDER BY, but avoids re-querying if we later
+/// add post-FTS scoring passes.
+#[derive(Debug)]
+pub(crate) struct ScoredMemory {
+    pub(crate) memory: Memory,
+    pub(crate) _score: f64,
+}
+
+/// Apply byte-budget and count limits to pre-sorted candidates.
+/// Pure function — no I/O, no locks. Safe to call outside the SQLite mutex.
+pub(crate) fn apply_budget(
+    candidates: Vec<ScoredMemory>,
+    max: usize,
+    max_bytes: usize,
+    max_summary: usize,
+) -> RecalledSet {
+    if max == 0 {
+        return RecalledSet {
+            memories: vec![],
+            total_bytes: 0,
+        };
+    }
+    const PER_ENTRY_OVERHEAD: usize = 40;
+    let mut memories = Vec::new();
+    let mut total_bytes = 0usize;
+    let mut summary_count = 0usize;
+    for sm in candidates {
+        if sm.memory.kind == MemoryKind::Summary && max_summary > 0 && summary_count >= max_summary
+        {
+            continue;
+        }
+        let raw = sm.memory.content.len() + sm.memory.reasoning.len();
+        let mem_bytes = raw + raw / 10 + PER_ENTRY_OVERHEAD;
+        if total_bytes + mem_bytes > max_bytes {
+            continue;
+        }
+        total_bytes += mem_bytes;
+        if sm.memory.kind == MemoryKind::Summary {
+            summary_count += 1;
+        }
+        memories.push(sm.memory);
+        if memories.len() >= max {
+            break;
+        }
+    }
+    RecalledSet {
+        memories,
+        total_bytes,
+    }
+}
+
 /// Sanitize a single segment (no hyphens) for FTS5.
 /// Short segments (<5 chars) use exact quoted matching only.
 /// Longer segments also add a prefix wildcard for broader recall.
@@ -432,22 +485,32 @@ impl MemoryStore {
         terms: &[String],
         max: usize,
         max_bytes: usize,
+        max_summary: usize,
     ) -> Result<RecalledSet, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
         if terms.is_empty() {
             return Ok(RecalledSet {
                 memories: vec![],
                 total_bytes: 0,
             });
         }
+        let candidates = self.recall_candidates(project_id, terms, max)?;
+        Ok(apply_budget(candidates, max, max_bytes, max_summary))
+    }
+
+    /// Execute the FTS5 query and return scored candidates.
+    /// Runs inside the SQLite mutex — caller must not hold other locks.
+    fn recall_candidates(
+        &self,
+        project_id: &str,
+        terms: &[String],
+        max: usize,
+    ) -> Result<Vec<ScoredMemory>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
 
         // Build FTS5 query: OR-join terms (sanitized for FTS5 safety)
         let escaped: Vec<String> = terms.iter().filter_map(|t| escape_fts5_term(t)).collect();
         if escaped.is_empty() {
-            return Ok(RecalledSet {
-                memories: vec![],
-                total_bytes: 0,
-            });
+            return Ok(Vec::new());
         }
         let fts_query = escaped.join(" OR ");
 
@@ -464,24 +527,25 @@ impl MemoryStore {
                 "SELECT m.id, m.project_id, m.kind, m.content, m.reasoning, m.source_run,
                         m.source_agent, m.evidence_count, m.tags, m.created_at,
                         m.expires_at, m.updated_at, m.recall_count, m.last_recalled_at,
-                        m.archived
-                 FROM memories m
-                 JOIN memories_fts ON memories_fts.rowid = m.id
-                 WHERE memories_fts MATCH ?1 AND m.project_id = ?2
-                   AND m.archived = 0
-                   AND (m.expires_at IS NULL OR m.expires_at > ?4)
-                 ORDER BY bm25(memories_fts) * CASE m.kind
-                            WHEN 'principle'   THEN 1.5
-                            WHEN 'decision'    THEN 1.3
+                        m.archived,
+                        bm25(memories_fts) * CASE m.kind
+                            WHEN 'principle'   THEN 2.0
+                            WHEN 'decision'    THEN 1.5
                             WHEN 'observation' THEN 1.0
-                            WHEN 'summary'     THEN 0.8
+                            WHEN 'summary'     THEN 0.4
                             ELSE 1.0
                           END
                           - 0.01 * MIN(m.recall_count, 100)
                           + CASE WHEN m.kind IN ('observation', 'summary')
                                  THEN 0.001 * MAX(0, julianday('now') - julianday(m.updated_at))
                                  ELSE 0.0
-                            END
+                            END AS composite_score
+                 FROM memories m
+                 JOIN memories_fts ON memories_fts.rowid = m.id
+                 WHERE memories_fts MATCH ?1 AND m.project_id = ?2
+                   AND m.archived = 0
+                   AND (m.expires_at IS NULL OR m.expires_at > ?4)
+                 ORDER BY composite_score
                  LIMIT ?3",
             )
             .map_err(|e| format!("FTS query prepare failed: {e}"))?;
@@ -489,59 +553,43 @@ impl MemoryStore {
         let now = chrono::Utc::now().to_rfc3339();
         let rows = stmt
             .query_map(
-                rusqlite::params![fts_query, project_id, max * 3, now],
+                // TODO: max*5 is a heuristic. If the FTS5 index is heavily
+                // dominated by summaries, the top rows could mostly be summaries,
+                // causing apply_budget() to cap them and return fewer than `max`
+                // results. The 0.4 SQL weight makes this unlikely in practice.
+                // If real-world starvation is observed, switch to iterative
+                // fetching or a two-pass query that excludes already-capped kinds.
+                rusqlite::params![fts_query, project_id, max * 5, now],
                 |row| {
                     let kind_str: String = row.get(2)?;
                     let kind = kind_str
                         .parse::<MemoryKind>()
                         .unwrap_or(MemoryKind::Observation);
-                    Ok(Memory {
-                        id: row.get(0)?,
-                        project_id: row.get(1)?,
-                        kind,
-                        content: row.get(3)?,
-                        reasoning: row.get(4)?,
-                        source_run: row.get(5)?,
-                        source_agent: row.get(6)?,
-                        evidence_count: row.get(7)?,
-                        tags: row.get(8)?,
-                        created_at: row.get(9)?,
-                        expires_at: row.get(10)?,
-                        updated_at: row.get(11)?,
-                        recall_count: row.get(12)?,
-                        last_recalled_at: row.get(13)?,
-                        archived: row.get::<_, i64>(14)? != 0,
+                    Ok(ScoredMemory {
+                        memory: Memory {
+                            id: row.get(0)?,
+                            project_id: row.get(1)?,
+                            kind,
+                            content: row.get(3)?,
+                            reasoning: row.get(4)?,
+                            source_run: row.get(5)?,
+                            source_agent: row.get(6)?,
+                            evidence_count: row.get(7)?,
+                            tags: row.get(8)?,
+                            created_at: row.get(9)?,
+                            expires_at: row.get(10)?,
+                            updated_at: row.get(11)?,
+                            recall_count: row.get(12)?,
+                            last_recalled_at: row.get(13)?,
+                            archived: row.get::<_, i64>(14)? != 0,
+                        },
+                        _score: row.get(15)?,
                     })
                 },
             )
             .map_err(|e| format!("FTS query failed: {e}"))?;
 
-        let scored: Vec<Memory> = rows.flatten().collect();
-
-        // Truncate to max count and max_bytes, skipping oversized entries
-        // so that one large memory doesn't suppress all smaller ones.
-        // Per-entry overhead accounts for formatting in recall::format_memory_entry:
-        // [KIND] prefix (~12), reasoning prefix (~15), newlines (~4), XML escaping (~10%).
-        const PER_ENTRY_OVERHEAD: usize = 40;
-        let mut memories = Vec::new();
-        let mut total_bytes = 0usize;
-        for mem in scored {
-            let raw = mem.content.len() + mem.reasoning.len();
-            let mem_bytes = raw + raw / 10 + PER_ENTRY_OVERHEAD;
-            if total_bytes + mem_bytes > max_bytes {
-                continue; // skip this one, try smaller ones
-            }
-            total_bytes += mem_bytes;
-            memories.push(mem);
-            if memories.len() >= max {
-                break;
-            }
-        }
-
-        Ok(RecalledSet {
-            memories,
-            total_bytes,
-        })
+        Ok(rows.flatten().collect())
     }
 
     pub fn list(
@@ -1032,7 +1080,13 @@ mod tests {
             .unwrap();
 
         let result = store
-            .recall("proj1", &["PostgreSQL".into(), "database".into()], 10, 8192)
+            .recall(
+                "proj1",
+                &["PostgreSQL".into(), "database".into()],
+                10,
+                8192,
+                0,
+            )
             .unwrap();
         assert!(!result.memories.is_empty());
         assert_eq!(
@@ -1416,7 +1470,7 @@ mod tests {
             .unwrap();
         // "databases" should match "database" via Porter stemming
         let result = store
-            .recall("proj1", &["databases".into()], 10, 8192)
+            .recall("proj1", &["databases".into()], 10, 8192, 0)
             .unwrap();
         assert!(!result.memories.is_empty());
     }
@@ -1694,14 +1748,14 @@ mod tests {
 
         // Query with hyphenated term — should match both "session" and "based"
         let result = store
-            .recall("proj1", &["session-based".to_string()], 10, 4096)
+            .recall("proj1", &["session-based".to_string()], 10, 4096, 0)
             .unwrap();
         assert_eq!(result.memories.len(), 1);
         assert_eq!(result.memories[0].id, id);
 
         // Query with just one segment should also match
         let result2 = store
-            .recall("proj1", &["session".to_string()], 10, 4096)
+            .recall("proj1", &["session".to_string()], 10, 4096, 0)
             .unwrap();
         assert_eq!(result2.memories.len(), 1);
     }
@@ -1832,7 +1886,13 @@ mod tests {
         store.archive_stale_permanent(365).unwrap();
         // Recall should not find it
         let recalled = store
-            .recall("proj1", &["pooling".into(), "database".into()], 10, 16384)
+            .recall(
+                "proj1",
+                &["pooling".into(), "database".into()],
+                10,
+                16384,
+                0,
+            )
             .unwrap();
         assert!(recalled.memories.is_empty());
     }
@@ -2178,5 +2238,230 @@ mod tests {
     fn fts5_term_all_empty_segments() {
         // "---" splits into all empty strings
         assert_eq!(escape_fts5_term("---"), None);
+    }
+
+    #[test]
+    fn summary_cap_limits_recalled_summaries() {
+        let dir = tempdir().unwrap();
+        let store = MemoryStore::open(&dir.path().join("test.db")).unwrap();
+        let cfg = test_config();
+        // Insert 5 Summary memories
+        for i in 0..5 {
+            store
+                .insert(
+                    "proj1",
+                    &ExtractedMemory {
+                        kind: MemoryKind::Summary,
+                        content: format!("Summary about database topic {i}"),
+                        reasoning: format!("Run {i} summary"),
+                        tags: vec!["database".into()],
+                    },
+                    &format!("run{i}"),
+                    "Claude",
+                    &cfg,
+                )
+                .unwrap();
+        }
+        // With max_summary=2, only 2 summaries returned
+        let result = store
+            .recall("proj1", &["database".into()], 10, 16384, 2)
+            .unwrap();
+        let summary_count = result
+            .memories
+            .iter()
+            .filter(|m| m.kind == MemoryKind::Summary)
+            .count();
+        assert_eq!(summary_count, 2);
+
+        // With max_summary=0 (unlimited), all 5 returned
+        let result = store
+            .recall("proj1", &["database".into()], 10, 16384, 0)
+            .unwrap();
+        let summary_count = result
+            .memories
+            .iter()
+            .filter(|m| m.kind == MemoryKind::Summary)
+            .count();
+        assert_eq!(summary_count, 5);
+    }
+
+    #[test]
+    fn apply_budget_is_pure() {
+        let candidates = vec![
+            scored(1, MemoryKind::Decision, "Use PostgreSQL", -5.0),
+            scored(2, MemoryKind::Summary, "Run summary", -2.0),
+        ];
+        // Both fit within budget
+        let result = apply_budget(candidates, 10, 8192, 1);
+        assert_eq!(result.memories.len(), 2);
+        assert_eq!(result.memories[0].kind, MemoryKind::Decision);
+        assert_eq!(result.memories[1].kind, MemoryKind::Summary);
+    }
+
+    #[test]
+    fn apply_budget_respects_summary_cap() {
+        let candidates: Vec<ScoredMemory> = (0..5)
+            .map(|i| {
+                scored(
+                    i,
+                    MemoryKind::Summary,
+                    &format!("Summary {i}"),
+                    -(5.0 - i as f64),
+                )
+            })
+            .collect();
+        // Cap at 2 summaries
+        let result = apply_budget(candidates, 10, 16384, 2);
+        assert_eq!(result.memories.len(), 2);
+    }
+
+    /// Helper to build a ScoredMemory with minimal boilerplate.
+    fn scored(id: i64, kind: MemoryKind, content: &str, score: f64) -> ScoredMemory {
+        ScoredMemory {
+            memory: Memory {
+                id,
+                project_id: "p".into(),
+                kind,
+                content: content.into(),
+                reasoning: String::new(),
+                source_run: "r".into(),
+                source_agent: "a".into(),
+                evidence_count: 1,
+                tags: String::new(),
+                created_at: String::new(),
+                expires_at: None,
+                updated_at: String::new(),
+                recall_count: 0,
+                last_recalled_at: None,
+                archived: false,
+            },
+            _score: score,
+        }
+    }
+
+    #[test]
+    fn apply_budget_mixed_kinds_summary_cap_and_non_summary_fill() {
+        // Simulate: 3 summaries interleaved with 3 decisions.
+        // Summary cap = 1, so only 1 summary should pass; the rest should be decisions.
+        let candidates = vec![
+            scored(
+                1,
+                MemoryKind::Summary,
+                "Summary alpha about databases",
+                -6.0,
+            ),
+            scored(2, MemoryKind::Decision, "Decision one about caching", -5.5),
+            scored(3, MemoryKind::Summary, "Summary beta about databases", -5.0),
+            scored(4, MemoryKind::Decision, "Decision two about auth", -4.5),
+            scored(
+                5,
+                MemoryKind::Summary,
+                "Summary gamma about databases",
+                -4.0,
+            ),
+            scored(6, MemoryKind::Principle, "Principle about validation", -3.0),
+        ];
+        let result = apply_budget(candidates, 10, 16384, 1);
+        // Should get: 1 summary + 2 decisions + 1 principle = 4 total
+        assert_eq!(result.memories.len(), 4);
+        let summary_count = result
+            .memories
+            .iter()
+            .filter(|m| m.kind == MemoryKind::Summary)
+            .count();
+        assert_eq!(summary_count, 1);
+        assert_eq!(result.memories[0].id, 1); // first summary passes
+        assert_eq!(result.memories[1].id, 2); // decision passes
+        assert_eq!(result.memories[2].id, 4); // second decision passes (summary 3 skipped)
+        assert_eq!(result.memories[3].id, 6); // principle passes (summary 5 skipped)
+    }
+
+    #[test]
+    fn recall_mixed_kinds_summary_cap_end_to_end() {
+        // End-to-end test: insert mixed kinds into SQLite, recall through
+        // the full path (FTS5 query → apply_budget) with a summary cap.
+        let dir = tempdir().unwrap();
+        let store = MemoryStore::open(&dir.path().join("test.db")).unwrap();
+        let cfg = test_config();
+        // 4 summaries + 2 decisions + 1 principle, all mentioning "caching"
+        for i in 0..4 {
+            store
+                .insert(
+                    "proj1",
+                    &ExtractedMemory {
+                        kind: MemoryKind::Summary,
+                        content: format!("Summary about caching strategy variant {i}"),
+                        reasoning: format!("Run {i} summary"),
+                        tags: vec!["caching".into()],
+                    },
+                    &format!("run_s{i}"),
+                    "Claude",
+                    &cfg,
+                )
+                .unwrap();
+        }
+        for i in 0..2 {
+            store
+                .insert(
+                    "proj1",
+                    &ExtractedMemory {
+                        kind: MemoryKind::Decision,
+                        content: format!("Decision about caching layer design {i}"),
+                        reasoning: format!("Decision {i}"),
+                        tags: vec!["caching".into()],
+                    },
+                    &format!("run_d{i}"),
+                    "Claude",
+                    &cfg,
+                )
+                .unwrap();
+        }
+        store
+            .insert(
+                "proj1",
+                &ExtractedMemory {
+                    kind: MemoryKind::Principle,
+                    content: "Principle about caching invalidation patterns".into(),
+                    reasoning: "Core principle".into(),
+                    tags: vec!["caching".into()],
+                },
+                "run_p0",
+                "Claude",
+                &cfg,
+            )
+            .unwrap();
+
+        // max_summary=1: expect at most 1 summary, rest filled with decisions+principle
+        let result = store
+            .recall("proj1", &["caching".into()], 10, 16384, 1)
+            .unwrap();
+        let summary_count = result
+            .memories
+            .iter()
+            .filter(|m| m.kind == MemoryKind::Summary)
+            .count();
+        assert!(
+            summary_count <= 1,
+            "expected at most 1 summary, got {summary_count}"
+        );
+        // Should get all non-summary memories (2 decisions + 1 principle = 3) plus up to 1 summary
+        assert!(
+            result.memories.len() >= 4,
+            "expected at least 4 results (3 non-summary + 1 summary), got {}",
+            result.memories.len()
+        );
+    }
+
+    #[test]
+    fn apply_budget_max_zero_returns_empty() {
+        // Suggestion 3.1: when max=0, should return empty (guard clause)
+        let candidates = vec![scored(
+            1,
+            MemoryKind::Decision,
+            "Use PostgreSQL for persistence",
+            -5.0,
+        )];
+        let result = apply_budget(candidates, 0, 8192, 0);
+        assert!(result.memories.is_empty());
     }
 }

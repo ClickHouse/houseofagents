@@ -19,7 +19,9 @@ pub fn build_extraction_prompt(
          - A memory should be useful to an agent that has never seen this run.\n\
          - Be specific about *what* and *why*, not *where* (file paths) or *when* (timestamps).\n\
          - Extract 3-8 memories per run. Fewer high-quality memories beat many low-quality ones.\n\
-         - Use 1-3 lowercase domain tags per memory (e.g., \"database\", \"auth\", \"perf\").\n\n\
+         - Use 1-3 lowercase domain tags per memory. Prefer project module names \
+(e.g., \"provider\", \"pipeline\", \"execution\", \"config\") or domain concepts \
+(e.g., \"database\", \"auth\", \"perf\") that a future recall query would naturally contain.\n\n\
          Examples of GOOD memories:\n\
          - decision: \"Use connection pooling with max 20 connections for PostgreSQL\" reasoning: \"Single connections caused timeouts under load\"\n\
          - observation: \"The Gemini API returns 429 errors above 60 requests/minute\" reasoning: \"Discovered during load testing\"\n\

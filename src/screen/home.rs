@@ -526,6 +526,12 @@ fn draw_edit_popup(f: &mut Frame, app: &App) {
                     has_override: app.session_memory_max_recall_bytes.is_some(),
                 },
                 MemoryRow::Value {
+                    label: "Max Summary Recall",
+                    description: "Maximum summary-kind memories per recall (0 = unlimited).",
+                    value: app.effective_memory_max_summary_recall().to_string(),
+                    has_override: app.session_memory_max_summary_recall.is_some(),
+                },
+                MemoryRow::Value {
                     label: "Observation TTL",
                     description: "Days before observation memories expire.",
                     value: format!("{} days", app.effective_memory_observation_ttl_days()),
@@ -649,7 +655,8 @@ fn draw_edit_popup(f: &mut Frame, app: &App) {
                     let unit_hint = match app.edit_popup.memory_cursor {
                         1 => " (count)",    // MEM_MAX_RECALL
                         2 => " (bytes)",    // MEM_MAX_RECALL_BYTES
-                        3..=5 => " (days)", // MEM_OBSERVATION_TTL | MEM_SUMMARY_TTL | MEM_STALE_PERMANENT_DAYS
+                        3 => " (count)",    // MEM_MAX_SUMMARY_RECALL
+                        4..=6 => " (days)", // MEM_OBSERVATION_TTL | MEM_SUMMARY_TTL | MEM_STALE_PERMANENT_DAYS
                         _ => "",
                     };
                     selected_line_start = body_lines.len();
