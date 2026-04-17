@@ -191,6 +191,25 @@ pub(crate) fn extract_pipeline_keywords(pipeline_def: &PipelineDefinition) -> Ve
     result
 }
 
+/// Compute recall terms for a given execution mode.
+/// Reused by prompt-time recall and extraction-time recall to keep both
+/// paths aligned.
+pub(crate) fn compute_recall_terms(
+    mode: crate::execution::ExecutionMode,
+    prompt_text: &str,
+    pipeline_def: Option<&PipelineDefinition>,
+) -> Vec<String> {
+    if mode == crate::execution::ExecutionMode::Pipeline {
+        if let Some(def) = pipeline_def {
+            let terms = extract_pipeline_keywords(def);
+            if !terms.is_empty() {
+                return terms;
+            }
+        }
+    }
+    extract_keywords(prompt_text)
+}
+
 pub fn recall_for_prompt(
     store: &MemoryStore,
     project_id: &str,
@@ -257,6 +276,24 @@ fn format_memory_entry(out: &mut String, mem: &Memory) {
     ));
     if !mem.reasoning.is_empty() {
         out.push_str(&format!("  Reasoning: {}\n", escape_xml(&mem.reasoning)));
+    }
+    if mem.evidence_count > 1 {
+        out.push_str(&format!("  (Reinforced {} times)\n", mem.evidence_count));
+    }
+    out.push('\n');
+}
+
+/// Format a memory entry as plain text (no XML escaping).
+/// Used by extraction prompts where content fidelity matters more
+/// than XML safety.
+pub(crate) fn format_memory_entry_plain(out: &mut String, mem: &Memory) {
+    out.push_str(&format!(
+        "[{}] {}\n",
+        mem.kind.as_str().to_uppercase(),
+        &mem.content
+    ));
+    if !mem.reasoning.is_empty() {
+        out.push_str(&format!("  Reasoning: {}\n", &mem.reasoning));
     }
     if mem.evidence_count > 1 {
         out.push_str(&format!("  (Reinforced {} times)\n", mem.evidence_count));
@@ -791,5 +828,88 @@ mod tests {
         .unwrap();
         assert!(!result.memories.is_empty());
         assert!(result.memories[0].content.contains("caching"));
+    }
+
+    #[test]
+    fn format_memory_entry_plain_preserves_special_chars() {
+        let mem = Memory {
+            id: 1,
+            project_id: "p".into(),
+            kind: MemoryKind::Decision,
+            content: "Use Vec<String> & HashMap<K, V>".into(),
+            reasoning: "Because <generics> are useful".into(),
+            source_run: "r".into(),
+            source_agent: "a".into(),
+            evidence_count: 2,
+            tags: String::new(),
+            created_at: String::new(),
+            expires_at: None,
+            updated_at: String::new(),
+            recall_count: 0,
+            last_recalled_at: None,
+            archived: false,
+        };
+        let mut out = String::new();
+        format_memory_entry_plain(&mut out, &mem);
+        // Raw characters preserved — no XML escaping
+        assert!(out.contains("Vec<String>"));
+        assert!(out.contains("& HashMap<K, V>"));
+        assert!(out.contains("<generics>"));
+        assert!(out.contains("Reinforced 2 times"));
+        // Negative: no XML entities
+        assert!(!out.contains("&lt;"));
+        assert!(!out.contains("&amp;"));
+    }
+
+    #[test]
+    fn compute_recall_terms_relay_uses_prompt() {
+        let terms = compute_recall_terms(
+            crate::execution::ExecutionMode::Relay,
+            "Review database performance optimization",
+            None,
+        );
+        assert!(terms.contains(&"optimization".to_string()));
+        assert!(terms.contains(&"performance".to_string()));
+        assert!(terms.contains(&"database".to_string()));
+    }
+
+    #[test]
+    fn compute_recall_terms_swarm_uses_prompt() {
+        let terms = compute_recall_terms(
+            crate::execution::ExecutionMode::Swarm,
+            "Analyze caching infrastructure throughput",
+            None,
+        );
+        assert!(terms.contains(&"infrastructure".to_string()));
+        assert!(terms.contains(&"caching".to_string()));
+    }
+
+    #[test]
+    fn compute_recall_terms_pipeline_with_def_uses_enriched() {
+        let def = PipelineDefinition {
+            initial_prompt: "Analyze production infrastructure".into(),
+            blocks: vec![make_block(1, "W", "Review caching strategy")],
+            ..Default::default()
+        };
+        let terms = compute_recall_terms(
+            crate::execution::ExecutionMode::Pipeline,
+            &def.initial_prompt,
+            Some(&def),
+        );
+        // Should have terms from block prompts (enriched)
+        assert!(terms.contains(&"caching".to_string()));
+        assert!(terms.contains(&"infrastructure".to_string()));
+    }
+
+    #[test]
+    fn compute_recall_terms_pipeline_no_def_falls_back() {
+        let terms = compute_recall_terms(
+            crate::execution::ExecutionMode::Pipeline,
+            "Review database performance optimization",
+            None,
+        );
+        // Falls back to prompt-based extraction
+        assert!(terms.contains(&"optimization".to_string()));
+        assert!(terms.contains(&"performance".to_string()));
     }
 }

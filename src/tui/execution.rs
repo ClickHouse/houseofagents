@@ -27,15 +27,19 @@ fn inject_memory_recall(app: &mut App, prompt_context: &mut PromptRuntimeContext
         return vec![];
     };
     // For pipeline mode, extract enriched keywords from all block prompts
-    let pipeline_terms = if app.selected_mode == crate::execution::ExecutionMode::Pipeline {
-        let terms = crate::memory::recall::extract_pipeline_keywords(&app.pipeline.pipeline_def);
-        if terms.is_empty() {
-            None
+    let recall_terms = crate::memory::recall::compute_recall_terms(
+        app.selected_mode,
+        prompt_context.raw_prompt(),
+        if app.selected_mode == crate::execution::ExecutionMode::Pipeline {
+            Some(&app.pipeline.pipeline_def)
         } else {
-            Some(terms)
-        }
-    } else {
+            None
+        },
+    );
+    let pipeline_terms = if recall_terms.is_empty() {
         None
+    } else {
+        Some(recall_terms)
     };
 
     if let Ok(recalled) = crate::memory::recall::recall_for_prompt(
@@ -1957,6 +1961,26 @@ pub(super) fn maybe_start_memory_extraction(app: &mut App) {
         return;
     }
 
+    // Compute extraction recall terms from in-memory state
+    let extraction_terms = crate::memory::recall::compute_recall_terms(
+        mode,
+        &app.prompt.prompt_text,
+        if mode == ExecutionMode::Pipeline {
+            Some(&app.pipeline.pipeline_def)
+        } else {
+            None
+        },
+    );
+
+    // Recall existing memories for dedup context
+    let existing_memories = crate::memory::extraction::recall_for_extraction(
+        store,
+        &app.memory.project_id,
+        &extraction_terms,
+        app.effective_memory_max_recall(),
+        app.effective_memory_max_summary_recall(),
+    );
+
     let Some(agent_name) = crate::app::resolve_extraction_agent(
         app.effective_memory_extraction_agent(),
         &agents,
@@ -1984,6 +2008,7 @@ pub(super) fn maybe_start_memory_extraction(app: &mut App) {
         &files,
         mem_cfg.observation_ttl_days,
         mem_cfg.summary_ttl_days,
+        &existing_memories,
     ) {
         Ok(result) => result,
         Err(e) => {

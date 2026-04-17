@@ -531,6 +531,11 @@ pub(crate) const POST_RUN_SYNTHESIS_MAX_INPUT_BYTES: u64 = 200 * 1024;
 pub(crate) const CROSS_RUN_MAX_INPUT_BYTES: u64 = POST_RUN_SYNTHESIS_MAX_INPUT_BYTES;
 pub(crate) const EXTRACTION_MAX_INPUT_BYTES: u64 = 100 * 1024;
 
+/// Maximum bytes for the "existing memories" section inside extraction prompts.
+/// Shared between the recall site (to cap how much is fetched) and the
+/// prompt-builder (to deduct from the file budget).
+pub(crate) const EXTRACTION_MEMORY_MAX_BYTES: usize = 16_384;
+
 /// Maximum bytes to read from a single result file for `--print-result`.
 pub(crate) const PRINT_RESULT_MAX_FILE_BYTES: u64 = 512 * 1024;
 

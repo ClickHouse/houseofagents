@@ -70,9 +70,20 @@ fn inject_memory_recall_headless(
         return vec![];
     };
 
-    let pipeline_terms = pipeline_def
-        .map(crate::memory::recall::extract_pipeline_keywords)
-        .filter(|t| !t.is_empty());
+    let recall_terms = crate::memory::recall::compute_recall_terms(
+        if pipeline_def.is_some() {
+            crate::execution::ExecutionMode::Pipeline
+        } else {
+            crate::execution::ExecutionMode::Relay
+        },
+        prompt_context.raw_prompt(),
+        pipeline_def,
+    );
+    let pipeline_terms = if recall_terms.is_empty() {
+        None
+    } else {
+        Some(recall_terms)
+    };
 
     if let Ok(recalled) = crate::memory::recall::recall_for_prompt(
         store,
@@ -1387,6 +1398,7 @@ struct RunSummary {
     failed_runs: Vec<u32>,
     base_errors: Vec<String>,
     pipeline_has_finalization: bool,
+    extraction_recall_terms: Vec<String>,
 }
 
 struct PostRunResult {
@@ -1594,6 +1606,9 @@ async fn run_single_standard(
         failed_runs: if failed { vec![1] } else { vec![] },
         base_errors: logger.drain_errors(),
         pipeline_has_finalization: false,
+        extraction_recall_terms: crate::memory::recall::compute_recall_terms(
+            args.mode, &prompt, None,
+        ),
     })
 }
 
@@ -1638,6 +1653,13 @@ async fn run_single_pipeline(
             return Err(err);
         }
     }
+
+    // Compute extraction recall terms before pipeline_def is consumed
+    let extraction_recall_terms = crate::memory::recall::compute_recall_terms(
+        ExecutionMode::Pipeline,
+        &pipeline_def.initial_prompt,
+        Some(&pipeline_def),
+    );
 
     let agent_configs =
         rs::build_pipeline_agent_configs(&pipeline_def, &config.agents, &session_overrides);
@@ -1855,6 +1877,7 @@ async fn run_single_pipeline(
         failed_runs: if failed { vec![1] } else { vec![] },
         base_errors: logger.drain_errors(),
         pipeline_has_finalization: has_finalization,
+        extraction_recall_terms,
     })
 }
 
@@ -1878,6 +1901,10 @@ async fn run_batch_standard(
     } else {
         args.agents.clone()
     };
+
+    // Compute extraction recall terms before prompt is consumed
+    let extraction_recall_terms =
+        crate::memory::recall::compute_recall_terms(args.mode, &prompt, None);
 
     let resolved = rs::resolve_selected_agent_configs(
         &agent_names,
@@ -2143,6 +2170,7 @@ async fn run_batch_standard(
         failed_runs,
         base_errors: logger.drain_errors(),
         pipeline_has_finalization: false,
+        extraction_recall_terms,
     })
 }
 
@@ -2226,6 +2254,12 @@ async fn run_batch_pipeline(
             .map_err(|e| format!("Failed to serialize pipeline: {e}"))?,
     );
     let has_finalization = pipeline_def.has_finalization();
+    // Compute extraction recall terms before pipeline_def is wrapped in Arc
+    let extraction_recall_terms = crate::memory::recall::compute_recall_terms(
+        ExecutionMode::Pipeline,
+        &pipeline_def.initial_prompt,
+        Some(&pipeline_def),
+    );
     let pipeline_def = Arc::new(pipeline_def);
     let batch_root_dir = batch_root.run_dir().to_path_buf();
     let pipeline_path_clone = args.pipeline_path.clone();
@@ -2565,6 +2599,7 @@ async fn run_batch_pipeline(
         failed_runs,
         base_errors: logger.drain_errors(),
         pipeline_has_finalization: has_finalization,
+        extraction_recall_terms,
     })
 }
 
@@ -3239,10 +3274,20 @@ async fn run_memory_extraction(
         return Ok(0);
     }
 
+    // Recall existing memories for dedup context
+    let existing_memories = crate::memory::extraction::recall_for_extraction(
+        store,
+        project_id,
+        &summary.extraction_recall_terms,
+        config.memory.max_recall,
+        config.memory.max_summary_recall,
+    );
+
     let (prompt, skipped) = crate::memory::extraction::build_extraction_prompt(
         &files,
         config.memory.observation_ttl_days,
         config.memory.summary_ttl_days,
+        &existing_memories,
     )?;
     if skipped > 0 {
         if let Ok(output) = OutputManager::from_existing(run_dir.to_path_buf()) {
