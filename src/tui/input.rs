@@ -3744,6 +3744,10 @@ pub(super) fn cycle_reasoning(app: &mut App) {
                 _ => None,
             };
         }
+        ProviderKind::OpenCode => {
+            // OpenCode delegates to the underlying model; effort is not
+            // directly configurable via the CLI, so this is a no-op.
+        }
     }
     set_section_config_override(app, config);
 }
@@ -3765,6 +3769,13 @@ pub(super) fn toggle_cli_mode(app: &mut App) {
         Some(k) => k,
         None => return,
     };
+
+    // OpenCode is CLI-only — toggling to API mode is not supported.
+    if kind == ProviderKind::OpenCode {
+        app.error_modal = Some("OpenCode is CLI-only and cannot switch to API mode".into());
+        return;
+    }
+
     let cli_installed = app.cli_available.get(&kind).copied().unwrap_or(false);
     let mut config = effective_section_config(app).unwrap_or_else(empty_provider_config);
 
@@ -3844,19 +3855,31 @@ pub(super) fn cycle_agent_provider(app: &mut App) {
         agent.provider = match old_kind {
             ProviderKind::Anthropic => ProviderKind::OpenAI,
             ProviderKind::OpenAI => ProviderKind::Gemini,
-            ProviderKind::Gemini => ProviderKind::Anthropic,
+            ProviderKind::Gemini => ProviderKind::OpenCode,
+            ProviderKind::OpenCode => ProviderKind::Anthropic,
         };
         // Clear provider-specific effort
         match old_kind {
             ProviderKind::OpenAI => agent.reasoning_effort = None,
-            ProviderKind::Anthropic | ProviderKind::Gemini => agent.thinking_effort = None,
+            ProviderKind::Anthropic | ProviderKind::Gemini | ProviderKind::OpenCode => {
+                agent.thinking_effort = None;
+            }
+        }
+        // OpenCode is CLI-only; force use_cli when switching to it
+        if agent.provider == ProviderKind::OpenCode {
+            agent.use_cli = true;
         }
         let name = agent.name.clone();
         if let Some(ov) = app.session_overrides.get_mut(&name) {
             ov.provider = agent.provider;
             match old_kind {
                 ProviderKind::OpenAI => ov.reasoning_effort = None,
-                ProviderKind::Anthropic | ProviderKind::Gemini => ov.thinking_effort = None,
+                ProviderKind::Anthropic | ProviderKind::Gemini | ProviderKind::OpenCode => {
+                    ov.thinking_effort = None;
+                }
+            }
+            if ov.provider == ProviderKind::OpenCode {
+                ov.use_cli = true;
             }
         }
     }

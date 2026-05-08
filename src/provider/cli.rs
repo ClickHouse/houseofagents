@@ -97,6 +97,7 @@ impl CliProvider {
             ProviderKind::Anthropic => "claude",
             ProviderKind::OpenAI => "codex",
             ProviderKind::Gemini => "gemini",
+            ProviderKind::OpenCode => "opencode",
         }
     }
 
@@ -168,7 +169,7 @@ impl CliProvider {
         match self.kind {
             ProviderKind::Anthropic => true,
             ProviderKind::OpenAI => self.session_id.is_some(),
-            ProviderKind::Gemini => false,
+            ProviderKind::Gemini | ProviderKind::OpenCode => false,
         }
     }
 
@@ -489,6 +490,7 @@ impl CliProvider {
             ProviderKind::Anthropic => "Anthropic",
             ProviderKind::OpenAI => "OpenAI",
             ProviderKind::Gemini => "Gemini",
+            ProviderKind::OpenCode => "OpenCode",
         }
     }
 
@@ -516,7 +518,7 @@ impl CliProvider {
                 self.session_id = None;
                 self.session_started = false;
             }
-            ProviderKind::Gemini => {}
+            ProviderKind::Gemini | ProviderKind::OpenCode => {}
         }
     }
 }
@@ -546,7 +548,7 @@ impl Provider for CliProvider {
             ProviderKind::OpenAI => {
                 self.session_id = None;
             }
-            ProviderKind::Gemini => {}
+            ProviderKind::Gemini | ProviderKind::OpenCode => {}
         }
     }
 
@@ -599,6 +601,17 @@ impl Provider for CliProvider {
                             });
                         }
                     }
+                    ProviderKind::OpenCode => {
+                        if extra_args
+                            .iter()
+                            .any(|a| a == "--format" || a == "--dir" || a.starts_with("--model"))
+                        {
+                            return Err(AppError::Provider {
+                                provider: self.provider_name().into(),
+                                message: "extra_cli_args contains --format, --dir, or --model which conflicts with internal OpenCode CLI flags".into(),
+                            });
+                        }
+                    }
                 }
             }
 
@@ -627,7 +640,9 @@ impl Provider for CliProvider {
                 self.build_prompt_from_history()
             };
 
-            if (self.kind == ProviderKind::Anthropic || self.kind == ProviderKind::OpenAI)
+            if (self.kind == ProviderKind::Anthropic
+                || self.kind == ProviderKind::OpenAI
+                || self.kind == ProviderKind::OpenCode)
                 && output_path.is_none()
                 && !self.session_started
             {
@@ -636,7 +651,10 @@ impl Provider for CliProvider {
             );
             }
 
-            if self.kind == ProviderKind::Gemini || self.kind == ProviderKind::OpenAI {
+            if self.kind == ProviderKind::Gemini
+                || self.kind == ProviderKind::OpenAI
+                || self.kind == ProviderKind::OpenCode
+            {
                 if let Some(ref path) = output_path {
                     prompt = format!(
                         "IMPORTANT: Write your complete final response ONLY to the file: {}. Do not create any other files.\n\n{prompt}",
@@ -710,6 +728,18 @@ impl Provider for CliProvider {
                         "--output-format".to_string(),
                         "text".to_string(),
                     ],
+                    ProviderKind::OpenCode => {
+                        let mut args = vec!["run".to_string()];
+                        if let Ok(cwd) = std::env::current_dir() {
+                            args.push("--dir".to_string());
+                            args.push(cwd.display().to_string());
+                        }
+                        // OpenCode only supports "default" or "json" — not "text".
+                        args.push("--format".to_string());
+                        args.push("default".to_string());
+                        args.push("--dangerously-skip-permissions".to_string());
+                        args
+                    }
                 };
 
                 if self.kind != ProviderKind::OpenAI && !self.model.is_empty() {
@@ -725,6 +755,12 @@ impl Provider for CliProvider {
                         }
                     }
                 }
+                // OpenCode takes the prompt as a positional argument after "run",
+                // not via stdin. Append it as the final argument.
+                if self.kind == ProviderKind::OpenCode {
+                    args.push(prompt.clone());
+                }
+
                 self.push_command_debug(&mut debug_logs, bin, &args);
                 self.emit_live_log(format!("start {} (timeout {}s)", bin, self.timeout_seconds));
 
@@ -802,18 +838,24 @@ impl Provider for CliProvider {
                         .await
                 });
 
-                // Write prompt via stdin
+                // Write prompt via stdin (OpenCode takes the prompt as a positional
+                // arg, so just close stdin immediately for it).
                 if let Some(mut stdin) = child.stdin.take() {
-                    debug_logs.push(format!("stdin chars: {}", prompt.chars().count()));
-                    if let Err(e) = stdin.write_all(prompt.as_bytes()).await {
-                        self.history.pop();
-                        return Err(Self::provider_error_with_debug(
-                            bin,
-                            format!("Failed to write stdin: {e}"),
-                            &debug_logs,
-                        ));
+                    if self.kind == ProviderKind::OpenCode {
+                        debug_logs.push("stdin closed (prompt passed as arg)".into());
+                        // Drop stdin to close it immediately
+                    } else {
+                        debug_logs.push(format!("stdin chars: {}", prompt.chars().count()));
+                        if let Err(e) = stdin.write_all(prompt.as_bytes()).await {
+                            self.history.pop();
+                            return Err(Self::provider_error_with_debug(
+                                bin,
+                                format!("Failed to write stdin: {e}"),
+                                &debug_logs,
+                            ));
+                        }
+                        // Drop stdin to close it, signaling EOF
                     }
-                    // Drop stdin to close it, signaling EOF
                 }
 
                 let status = match tokio::time::timeout(
@@ -1782,5 +1824,232 @@ exit 1
             .parse()
             .unwrap();
         assert_eq!(count, 1, "non-transient error should not trigger retry");
+    }
+
+    // -- OpenCode provider tests --
+
+    fn opencode_provider() -> CliProvider {
+        CliProvider::new(
+            ProviderKind::OpenCode,
+            "anthropic/claude-sonnet-4-5".to_string(),
+            None,
+            None,
+            String::new(),
+            Vec::new(),
+            30,
+            50,
+            0,
+        )
+    }
+
+    #[test]
+    fn opencode_bin_name() {
+        let provider = opencode_provider();
+        assert_eq!(provider.bin_name(), "opencode");
+    }
+
+    #[test]
+    fn opencode_does_not_use_native_session() {
+        let provider = opencode_provider();
+        assert!(!provider.uses_native_session());
+    }
+
+    #[test]
+    fn opencode_session_id_is_none() {
+        let provider = opencode_provider();
+        assert!(provider.session_id.is_none());
+        assert!(!provider.session_started);
+    }
+
+    #[test]
+    fn opencode_provider_name() {
+        let provider = opencode_provider();
+        assert_eq!(provider.provider_name(), "OpenCode");
+    }
+
+    #[test]
+    fn opencode_clear_history_does_not_create_session() {
+        use crate::provider::Provider;
+        let mut provider = opencode_provider();
+        provider.history.push(crate::provider::Message {
+            role: crate::provider::Role::User,
+            content: "test".into(),
+        });
+        provider.clear_history();
+        assert!(provider.history.is_empty());
+        assert!(provider.session_id.is_none());
+        assert!(!provider.session_started);
+    }
+
+    #[test]
+    fn opencode_reset_after_send_error_is_noop_for_session() {
+        let mut provider = opencode_provider();
+        provider.history.push(crate::provider::Message {
+            role: crate::provider::Role::User,
+            content: "test".into(),
+        });
+        provider.reset_after_send_error();
+        // Session state should remain unchanged (None/false)
+        assert!(provider.session_id.is_none());
+        assert!(!provider.session_started);
+        // History should have the user message popped
+        assert!(provider.history.is_empty());
+    }
+
+    #[tokio::test]
+    async fn opencode_rejects_format_flag_in_extra_args() {
+        use crate::provider::Provider;
+        let mut provider = CliProvider::new(
+            ProviderKind::OpenCode,
+            String::new(),
+            None,
+            None,
+            "--format json".to_string(),
+            Vec::new(),
+            30,
+            50,
+            0,
+        );
+        let result = provider.send("test").await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("conflicts with internal OpenCode CLI flags"));
+    }
+
+    #[tokio::test]
+    async fn opencode_rejects_dir_flag_in_extra_args() {
+        use crate::provider::Provider;
+        let mut provider = CliProvider::new(
+            ProviderKind::OpenCode,
+            String::new(),
+            None,
+            None,
+            "--dir /tmp".to_string(),
+            Vec::new(),
+            30,
+            50,
+            0,
+        );
+        let result = provider.send("test").await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("conflicts with internal OpenCode CLI flags"));
+    }
+
+    #[tokio::test]
+    async fn opencode_rejects_model_flag_in_extra_args() {
+        use crate::provider::Provider;
+        let mut provider = CliProvider::new(
+            ProviderKind::OpenCode,
+            String::new(),
+            None,
+            None,
+            "--model openai/gpt-4o".to_string(),
+            Vec::new(),
+            30,
+            50,
+            0,
+        );
+        let result = provider.send("test").await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("conflicts with internal OpenCode CLI flags"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn opencode_sends_prompt_as_positional_arg_not_stdin() {
+        use crate::provider::Provider;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        // Script that prints its last positional argument and ignores stdin.
+        // If the prompt arrives via stdin instead of args, this will print
+        // nothing and the assertion will fail.
+        let script = r#"#!/bin/sh
+# Print the last positional argument to stdout
+eval echo "\${$#}"
+"#;
+        let script_path = dir.path().join("opencode");
+        std::fs::write(&script_path, script).unwrap();
+        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut provider = CliProvider::new(
+            ProviderKind::OpenCode,
+            String::new(),
+            None,
+            None,
+            String::new(),
+            Vec::new(),
+            30,
+            50,
+            0,
+        );
+        provider.test_bin_path = Some(script_path.to_string_lossy().into_owned());
+
+        let result = provider.send("hello from positional").await;
+        let resp = result.expect("should succeed");
+        assert!(
+            resp.content.contains("hello from positional"),
+            "prompt should arrive as a positional arg, got: {:?}",
+            resp.content
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn opencode_arg_construction_includes_required_flags() {
+        use crate::provider::Provider;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        // Script that prints all arguments (one per line) to stdout.
+        let script = r#"#!/bin/sh
+for arg in "$@"; do
+    echo "$arg"
+done
+"#;
+        let script_path = dir.path().join("opencode");
+        std::fs::write(&script_path, script).unwrap();
+        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut provider = CliProvider::new(
+            ProviderKind::OpenCode,
+            "anthropic/claude-sonnet-4-5".to_string(),
+            None,
+            None,
+            String::new(),
+            Vec::new(),
+            30,
+            50,
+            0,
+        );
+        provider.test_bin_path = Some(script_path.to_string_lossy().into_owned());
+
+        let result = provider.send("test prompt").await;
+        let resp = result.expect("should succeed");
+        let lines: Vec<&str> = resp.content.lines().collect();
+
+        assert_eq!(lines[0], "run", "first arg should be 'run'");
+        assert!(lines.contains(&"--format"), "should contain --format flag");
+        assert!(
+            lines.contains(&"default"),
+            "format value should be 'default'"
+        );
+        assert!(
+            lines.contains(&"--dangerously-skip-permissions"),
+            "should contain --dangerously-skip-permissions"
+        );
+        assert!(lines.contains(&"--model"), "should contain --model flag");
+        assert!(
+            lines.contains(&"anthropic/claude-sonnet-4-5"),
+            "should contain the model value"
+        );
     }
 }

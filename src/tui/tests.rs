@@ -225,6 +225,50 @@ fn validate_agent_runtime_allows_anthropic_xhigh_in_cli_mode() {
 }
 
 #[test]
+fn toggle_cli_mode_rejects_opencode() {
+    let mut app = test_app();
+    app.config.agents.push(test_agent(
+        "OC",
+        ProviderKind::OpenCode,
+        "anthropic/claude-sonnet-4-5",
+        true,
+        None,
+    ));
+    app.edit_popup.cursor = 0;
+    app.edit_popup.section = crate::app::EditPopupSection::Providers;
+    toggle_cli_mode(&mut app);
+    assert!(
+        app.error_modal.as_ref().unwrap().contains("CLI-only"),
+        "should show CLI-only error, got: {:?}",
+        app.error_modal
+    );
+}
+
+#[test]
+fn cycle_agent_provider_forces_cli_for_opencode() {
+    let mut app = test_app();
+    app.config.agents.push(test_agent(
+        "Test",
+        ProviderKind::Gemini,
+        "gemini-2.5-pro",
+        false,
+        None,
+    ));
+    app.edit_popup.cursor = 0;
+    app.edit_popup.section = crate::app::EditPopupSection::Providers;
+    // Cycling from Gemini should land on OpenCode
+    cycle_agent_provider(&mut app);
+    assert_eq!(app.config.agents[0].provider, ProviderKind::OpenCode);
+    assert!(
+        app.config.agents[0].use_cli,
+        "OpenCode must always have use_cli = true"
+    );
+    // Cycling again should land on Anthropic
+    cycle_agent_provider(&mut app);
+    assert_eq!(app.config.agents[0].provider, ProviderKind::Anthropic);
+}
+
+#[test]
 fn handle_execution_task_result_uses_selected_provider_kind() {
     let (tx, mut rx) = mpsc::unbounded_channel();
 

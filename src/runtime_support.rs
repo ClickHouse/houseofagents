@@ -39,6 +39,7 @@ pub(crate) fn detect_cli_availability() -> HashMap<ProviderKind, bool> {
     cli_available.insert(ProviderKind::Anthropic, detect_cli("claude"));
     cli_available.insert(ProviderKind::OpenAI, detect_cli("codex"));
     cli_available.insert(ProviderKind::Gemini, detect_cli("gemini"));
+    cli_available.insert(ProviderKind::OpenCode, detect_cli("opencode"));
     cli_available
 }
 

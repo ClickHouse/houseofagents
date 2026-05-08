@@ -257,6 +257,7 @@ impl AppConfig {
             ProviderKind::Anthropic,
             ProviderKind::OpenAI,
             ProviderKind::Gemini,
+            ProviderKind::OpenCode,
         ];
         for kind in &order {
             let key = kind.config_key();
@@ -407,6 +408,14 @@ provider = "gemini"
 api_key = ""
 model = "gemini-2.5-pro"
 thinking_effort = "medium"
+use_cli = true
+extra_cli_args = ""
+
+[[agents]]
+name = "OpenCode"
+provider = "opencode"
+api_key = ""
+model = "anthropic/claude-sonnet-4-5"
 use_cli = true
 extra_cli_args = ""
 "#;
@@ -688,5 +697,56 @@ model = "claude-3"
         assert_eq!(pc2.reasoning_effort, Some("high".to_string()));
         assert!(pc2.use_cli);
         assert_eq!(pc2.extra_cli_args, "--x");
+    }
+
+    #[test]
+    fn opencode_agent_config_round_trip() {
+        let body = r#"
+output_dir = "/tmp/hoa"
+
+[[agents]]
+name = "OpenCode"
+provider = "opencode"
+api_key = ""
+model = "anthropic/claude-sonnet-4-5"
+use_cli = true
+extra_cli_args = "--thinking"
+"#;
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, body).expect("write");
+        let cfg = AppConfig::load_with_override(path.to_str()).expect("load");
+        assert_eq!(cfg.agents.len(), 1);
+        assert_eq!(cfg.agents[0].name, "OpenCode");
+        assert_eq!(cfg.agents[0].provider, ProviderKind::OpenCode);
+        assert_eq!(cfg.agents[0].model, "anthropic/claude-sonnet-4-5");
+        assert!(cfg.agents[0].use_cli);
+        assert!(cfg.agents[0].api_key.is_empty());
+        assert_eq!(cfg.agents[0].extra_cli_args, "--thinking");
+
+        // Save and reload
+        cfg.save_with_override(path.to_str()).expect("save");
+        let reloaded = AppConfig::load_with_override(path.to_str()).expect("reload");
+        assert_eq!(reloaded.agents[0].provider, ProviderKind::OpenCode);
+        assert_eq!(reloaded.agents[0].model, "anthropic/claude-sonnet-4-5");
+        assert!(reloaded.agents[0].use_cli);
+    }
+
+    #[test]
+    fn config_template_contains_opencode_agent() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        AppConfig::write_template_with_override(path.to_str(), false).expect("write");
+        let body = std::fs::read_to_string(&path).expect("read");
+        assert!(body.contains("provider = \"opencode\""));
+        assert!(body.contains("name = \"OpenCode\""));
+        // Verify the template can be loaded successfully
+        let cfg = AppConfig::load_with_override(path.to_str()).expect("load");
+        let oc = cfg
+            .agents
+            .iter()
+            .find(|a| a.provider == ProviderKind::OpenCode);
+        assert!(oc.is_some(), "template should include an OpenCode agent");
+        assert!(oc.unwrap().use_cli);
     }
 }

@@ -294,6 +294,7 @@ fn draw_edit_popup(f: &mut Frame, app: &App) {
                 let effort_title = match provider {
                     ProviderKind::OpenAI => "Reasoning",
                     ProviderKind::Anthropic | ProviderKind::Gemini => "Thinking",
+                    ProviderKind::OpenCode => "Effort",
                 };
 
                 let is_selected = i == selected_cursor;

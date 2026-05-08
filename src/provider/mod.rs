@@ -136,6 +136,7 @@ pub enum ProviderKind {
     Anthropic,
     OpenAI,
     Gemini,
+    OpenCode,
 }
 
 impl ProviderKind {
@@ -144,6 +145,7 @@ impl ProviderKind {
             ProviderKind::Anthropic => "Claude",
             ProviderKind::OpenAI => "OpenAI",
             ProviderKind::Gemini => "Gemini",
+            ProviderKind::OpenCode => "OpenCode",
         }
     }
 
@@ -152,6 +154,7 @@ impl ProviderKind {
             ProviderKind::Anthropic => "anthropic",
             ProviderKind::OpenAI => "openai",
             ProviderKind::Gemini => "gemini",
+            ProviderKind::OpenCode => "opencode",
         }
     }
 
@@ -160,6 +163,7 @@ impl ProviderKind {
             ProviderKind::Anthropic,
             ProviderKind::OpenAI,
             ProviderKind::Gemini,
+            ProviderKind::OpenCode,
         ]
     }
 
@@ -292,6 +296,9 @@ pub fn create_provider(
     let effort = match kind {
         ProviderKind::Anthropic | ProviderKind::Gemini => config.thinking_effort.clone(),
         ProviderKind::OpenAI => config.reasoning_effort.clone(),
+        // OpenCode is CLI-only; this branch is unreachable but we handle it
+        // gracefully by falling back to thinking_effort.
+        ProviderKind::OpenCode => config.thinking_effort.clone(),
     };
     let base = HttpProviderBase {
         api_key: config.api_key.clone(),
@@ -307,6 +314,10 @@ pub fn create_provider(
         ProviderKind::Anthropic => Box::new(anthropic::AnthropicProvider::new(base)),
         ProviderKind::OpenAI => Box::new(openai::OpenAIProvider::new(base)),
         ProviderKind::Gemini => Box::new(gemini::GeminiProvider::new(base)),
+        // OpenCode is CLI-only; if we somehow reach here, fall back to Anthropic
+        // as a safe default. In practice create_provider always routes OpenCode
+        // through the CliProvider branch above.
+        ProviderKind::OpenCode => Box::new(anthropic::AnthropicProvider::new(base)),
     }
 }
 
@@ -327,7 +338,7 @@ pub fn validate_effort_config(
                 }
             }
         }
-        ProviderKind::OpenAI | ProviderKind::Gemini => {}
+        ProviderKind::OpenAI | ProviderKind::Gemini | ProviderKind::OpenCode => {}
     }
     Ok(())
 }
@@ -358,6 +369,9 @@ pub async fn list_models(
         ProviderKind::Anthropic => anthropic::list_models(api_key, client).await,
         ProviderKind::OpenAI => openai::list_models(api_key, client).await,
         ProviderKind::Gemini => gemini::list_models(api_key, client).await,
+        ProviderKind::OpenCode => {
+            Err("OpenCode is CLI-only. Set model via config (e.g. \"anthropic/claude-sonnet-4-5\"). Run `opencode models` to list available models.".into())
+        }
     }
 }
 
@@ -382,6 +396,7 @@ mod tests {
         assert_eq!(ProviderKind::Anthropic.display_name(), "Claude");
         assert_eq!(ProviderKind::OpenAI.display_name(), "OpenAI");
         assert_eq!(ProviderKind::Gemini.display_name(), "Gemini");
+        assert_eq!(ProviderKind::OpenCode.display_name(), "OpenCode");
     }
 
     #[test]
@@ -389,15 +404,17 @@ mod tests {
         assert_eq!(ProviderKind::Anthropic.config_key(), "anthropic");
         assert_eq!(ProviderKind::OpenAI.config_key(), "openai");
         assert_eq!(ProviderKind::Gemini.config_key(), "gemini");
+        assert_eq!(ProviderKind::OpenCode.config_key(), "opencode");
     }
 
     #[test]
-    fn provider_kind_all_has_three_unique() {
+    fn provider_kind_all_has_four_unique() {
         let all = ProviderKind::all();
-        assert_eq!(all.len(), 3);
+        assert_eq!(all.len(), 4);
         assert!(all.contains(&ProviderKind::Anthropic));
         assert!(all.contains(&ProviderKind::OpenAI));
         assert!(all.contains(&ProviderKind::Gemini));
+        assert!(all.contains(&ProviderKind::OpenCode));
     }
 
     #[test]
@@ -415,6 +432,14 @@ mod tests {
         assert_eq!(
             ProviderKind::from_selector(" OpenAI "),
             Some(ProviderKind::OpenAI)
+        );
+        assert_eq!(
+            ProviderKind::from_selector("opencode"),
+            Some(ProviderKind::OpenCode)
+        );
+        assert_eq!(
+            ProviderKind::from_selector("OpenCode"),
+            Some(ProviderKind::OpenCode)
         );
     }
 
@@ -606,6 +631,10 @@ mod tests {
     fn create_provider_api_returns_expected_kind() {
         let client = reqwest::Client::new();
         for kind in ProviderKind::all() {
+            // OpenCode is CLI-only; skip it for the API-mode test.
+            if *kind == ProviderKind::OpenCode {
+                continue;
+            }
             let p = create_provider(
                 *kind,
                 &cfg(false),
@@ -627,6 +656,16 @@ mod tests {
             .await
             .expect_err("should reject empty key");
         assert!(err.contains("Add API key"));
+    }
+
+    #[tokio::test]
+    async fn list_models_opencode_returns_cli_only_error() {
+        let client = reqwest::Client::new();
+        let err = list_models(ProviderKind::OpenCode, "any_key", &client)
+            .await
+            .expect_err("should reject OpenCode");
+        assert!(err.contains("CLI-only"));
+        assert!(err.contains("opencode models"));
     }
 
     #[test]
@@ -658,6 +697,11 @@ mod tests {
         })
         .expect("serialize");
         assert!(s.contains("gemini"));
+        let s = toml::to_string(&W {
+            kind: ProviderKind::OpenCode,
+        })
+        .expect("serialize");
+        assert!(s.contains("opencode"));
     }
 
     #[test]
@@ -670,6 +714,8 @@ mod tests {
         assert_eq!(w.kind, ProviderKind::Anthropic);
         let w: W = toml::from_str("kind = \"openai\"").expect("deserialize");
         assert_eq!(w.kind, ProviderKind::OpenAI);
+        let w: W = toml::from_str("kind = \"opencode\"").expect("deserialize");
+        assert_eq!(w.kind, ProviderKind::OpenCode);
     }
 
     #[test]
