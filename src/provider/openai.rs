@@ -185,7 +185,7 @@ pub async fn list_models(api_key: &str, client: &reqwest::Client) -> Result<Vec<
         })
         .unwrap_or_default();
 
-    entries.sort_by(|a, b| b.1.cmp(&a.1));
+    entries.sort_by_key(|e| std::cmp::Reverse(e.1));
     Ok(entries.into_iter().map(|(id, _)| id).collect())
 }
 

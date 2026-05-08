@@ -583,13 +583,11 @@ impl ProgressLogger {
                 details,
                 is_skip,
                 ..
-            } => {
-                if !is_skip {
-                    let detail = details.as_deref().unwrap_or(error);
-                    self.push_error(format!(
-                        "[{run_tag}{parent_label} \u{203a} {inner_label} iter {iteration}] {detail}"
-                    ));
-                }
+            } if !is_skip => {
+                let detail = details.as_deref().unwrap_or(error);
+                self.push_error(format!(
+                    "[{run_tag}{parent_label} \u{203a} {inner_label} iter {iteration}] {detail}"
+                ));
             }
             _ => {}
         }

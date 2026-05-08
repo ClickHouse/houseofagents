@@ -42,21 +42,23 @@ impl EventHandler {
                     eprintln!("terminal poll error: {e}");
                     false
                 }) {
+                    #[allow(clippy::collapsible_match)]
                     match event::read() {
-                        Ok(CrosstermEvent::Key(key)) => {
-                            if sender.send(Event::Key(key)).is_err() {
-                                break;
-                            }
+                        Ok(CrosstermEvent::Key(key)) if sender.send(Event::Key(key)).is_err() => {
+                            break;
                         }
                         Ok(CrosstermEvent::Paste(text)) => {
+                            // Cannot use a match guard here: `text` is a
+                            // String which must be moved into Event::Paste,
+                            // but pattern guards cannot move bound variables.
                             if sender.send(Event::Paste(text)).is_err() {
                                 break;
                             }
                         }
-                        Ok(CrosstermEvent::Resize(w, h)) => {
-                            if sender.send(Event::Resize(w, h)).is_err() {
-                                break;
-                            }
+                        Ok(CrosstermEvent::Resize(w, h))
+                            if sender.send(Event::Resize(w, h)).is_err() =>
+                        {
+                            break;
                         }
                         _ => {}
                     }

@@ -65,9 +65,7 @@ pub async fn run_swarm(
             JoinHandle<SwarmWorkerResult>,
         )> = Vec::new();
 
-        for (i, ((name, mut provider), message)) in
-            taken.into_iter().zip(messages.into_iter()).enumerate()
-        {
+        for (i, ((name, mut provider), message)) in taken.into_iter().zip(messages).enumerate() {
             let kind = provider.kind();
             let agent_name = name.clone();
             let _ = progress_tx.send(ProgressEvent::AgentStarted {
