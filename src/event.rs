@@ -42,23 +42,16 @@ impl EventHandler {
                     eprintln!("terminal poll error: {e}");
                     false
                 }) {
-                    match event::read() {
-                        Ok(CrosstermEvent::Key(key)) => {
-                            if sender.send(Event::Key(key)).is_err() {
-                                break;
-                            }
+                    let event = match event::read() {
+                        Ok(CrosstermEvent::Key(key)) => Some(Event::Key(key)),
+                        Ok(CrosstermEvent::Paste(text)) => Some(Event::Paste(text)),
+                        Ok(CrosstermEvent::Resize(w, h)) => Some(Event::Resize(w, h)),
+                        _ => None,
+                    };
+                    if let Some(event) = event {
+                        if sender.send(event).is_err() {
+                            break;
                         }
-                        Ok(CrosstermEvent::Paste(text)) => {
-                            if sender.send(Event::Paste(text)).is_err() {
-                                break;
-                            }
-                        }
-                        Ok(CrosstermEvent::Resize(w, h)) => {
-                            if sender.send(Event::Resize(w, h)).is_err() {
-                                break;
-                            }
-                        }
-                        _ => {}
                     }
                 }
                 if worker_shutdown.load(Ordering::Relaxed) {

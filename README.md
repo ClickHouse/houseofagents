@@ -281,9 +281,9 @@ extra_cli_args = ""
 | `use_cli` | Use local CLI binary instead of HTTP API |
 | `extra_cli_args` | Shell-style extra CLI args parsed at runtime, for example `--sandbox workspace-write --profile "fast mode"` |
 | `reasoning_effort` | OpenAI effort setting — `low` / `medium` / `high` / `xhigh` |
-| `thinking_effort` | Anthropic & Gemini effort setting — `low` / `medium` / `high`; Anthropic CLI also supports `max` for `claude-opus-4-6` |
+| `thinking_effort` | Anthropic & Gemini effort setting — `low` / `medium` / `high`; Anthropic CLI also supports `xhigh` and `max` (`max` for `claude-opus-4-6`) |
 
-Anthropic `thinking_effort = "max"` is rejected in API mode. In CLI mode, House of Agents passes it through and lets the `claude` CLI report any model-specific incompatibility.
+Anthropic `thinking_effort = "xhigh"` and `thinking_effort = "max"` are rejected in API mode. In CLI mode, House of Agents passes them through and lets the `claude` CLI report any model-specific incompatibility.
 
 ## Keyboard Shortcuts
 

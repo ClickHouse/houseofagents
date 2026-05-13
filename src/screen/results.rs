@@ -335,12 +335,10 @@ pub(crate) fn render_markdown(markdown: &str) -> Text<'static> {
                     }
                     state.in_table_head = false;
                 }
-                TagEnd::TableRow => {
-                    if !state.current_table_row.is_empty() {
-                        state
-                            .table_rows
-                            .push(std::mem::take(&mut state.current_table_row));
-                    }
+                TagEnd::TableRow if !state.current_table_row.is_empty() => {
+                    state
+                        .table_rows
+                        .push(std::mem::take(&mut state.current_table_row));
                 }
                 TagEnd::Table => {
                     flush_table(&mut lines, &mut state);

@@ -94,16 +94,14 @@ pub(super) fn handle_home_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('?') => {
             app.help_popup.open(1);
         }
-        KeyCode::Char('M') => {
-            if app.effective_memory_enabled() && app.memory.store.is_some() {
-                // Purge expired memories so long-lived sessions stay clean.
-                if let Some(ref store) = app.memory.store {
-                    let _ = store.cleanup_expired();
-                }
-                app.memory.pending_bulk_delete = false;
-                refresh_memory_list(app);
-                app.screen = Screen::Memory;
+        KeyCode::Char('M') if app.effective_memory_enabled() && app.memory.store.is_some() => {
+            // Purge expired memories so long-lived sessions stay clean.
+            if let Some(ref store) = app.memory.store {
+                let _ = store.cleanup_expired();
             }
+            app.memory.pending_bulk_delete = false;
+            refresh_memory_list(app);
+            app.screen = Screen::Memory;
         }
         KeyCode::Char('e') => {
             app.edit_popup.visible = true;
@@ -1870,31 +1868,27 @@ pub(super) fn handle_pipeline_edit_key(app: &mut App, key: KeyEvent) {
                 _ => {}
             },
             PipelineEditField::Agent => match key.code {
-                KeyCode::Up | KeyCode::Char('k') => {
-                    if !app.config.agents.is_empty() {
-                        app.pipeline.pipeline_edit_agent_cursor =
-                            app.pipeline.pipeline_edit_agent_cursor.saturating_sub(1);
-                        if app.pipeline.pipeline_edit_agent_cursor
-                            < app.pipeline.pipeline_edit_agent_scroll
-                        {
-                            app.pipeline.pipeline_edit_agent_scroll =
-                                app.pipeline.pipeline_edit_agent_cursor;
-                        }
+                KeyCode::Up | KeyCode::Char('k') if !app.config.agents.is_empty() => {
+                    app.pipeline.pipeline_edit_agent_cursor =
+                        app.pipeline.pipeline_edit_agent_cursor.saturating_sub(1);
+                    if app.pipeline.pipeline_edit_agent_cursor
+                        < app.pipeline.pipeline_edit_agent_scroll
+                    {
+                        app.pipeline.pipeline_edit_agent_scroll =
+                            app.pipeline.pipeline_edit_agent_cursor;
                     }
                 }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    if !app.config.agents.is_empty() {
-                        let max = app.config.agents.len().saturating_sub(1);
-                        if app.pipeline.pipeline_edit_agent_cursor < max {
-                            app.pipeline.pipeline_edit_agent_cursor += 1;
-                        }
-                        let visible = app.pipeline.pipeline_edit_agent_visible.get().max(1);
-                        if app.pipeline.pipeline_edit_agent_cursor
-                            >= app.pipeline.pipeline_edit_agent_scroll + visible
-                        {
-                            app.pipeline.pipeline_edit_agent_scroll =
-                                app.pipeline.pipeline_edit_agent_cursor + 1 - visible;
-                        }
+                KeyCode::Down | KeyCode::Char('j') if !app.config.agents.is_empty() => {
+                    let max = app.config.agents.len().saturating_sub(1);
+                    if app.pipeline.pipeline_edit_agent_cursor < max {
+                        app.pipeline.pipeline_edit_agent_cursor += 1;
+                    }
+                    let visible = app.pipeline.pipeline_edit_agent_visible.get().max(1);
+                    if app.pipeline.pipeline_edit_agent_cursor
+                        >= app.pipeline.pipeline_edit_agent_scroll + visible
+                    {
+                        app.pipeline.pipeline_edit_agent_scroll =
+                            app.pipeline.pipeline_edit_agent_cursor + 1 - visible;
                     }
                 }
                 KeyCode::Char(' ') => {
@@ -1920,35 +1914,35 @@ pub(super) fn handle_pipeline_edit_key(app: &mut App, key: KeyEvent) {
                 _ => {}
             },
             PipelineEditField::Profile => match key.code {
-                KeyCode::Up | KeyCode::Char('k') => {
-                    if !app.pipeline.pipeline_edit_profile_list.is_empty() {
-                        app.pipeline.pipeline_edit_profile_cursor =
-                            app.pipeline.pipeline_edit_profile_cursor.saturating_sub(1);
-                        if app.pipeline.pipeline_edit_profile_cursor
-                            < app.pipeline.pipeline_edit_profile_scroll
-                        {
-                            app.pipeline.pipeline_edit_profile_scroll =
-                                app.pipeline.pipeline_edit_profile_cursor;
-                        }
+                KeyCode::Up | KeyCode::Char('k')
+                    if !app.pipeline.pipeline_edit_profile_list.is_empty() =>
+                {
+                    app.pipeline.pipeline_edit_profile_cursor =
+                        app.pipeline.pipeline_edit_profile_cursor.saturating_sub(1);
+                    if app.pipeline.pipeline_edit_profile_cursor
+                        < app.pipeline.pipeline_edit_profile_scroll
+                    {
+                        app.pipeline.pipeline_edit_profile_scroll =
+                            app.pipeline.pipeline_edit_profile_cursor;
                     }
                 }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    if !app.pipeline.pipeline_edit_profile_list.is_empty() {
-                        let max = app
-                            .pipeline
-                            .pipeline_edit_profile_list
-                            .len()
-                            .saturating_sub(1);
-                        if app.pipeline.pipeline_edit_profile_cursor < max {
-                            app.pipeline.pipeline_edit_profile_cursor += 1;
-                        }
-                        let visible = app.pipeline.pipeline_edit_profile_visible.get().max(1);
-                        if app.pipeline.pipeline_edit_profile_cursor
-                            >= app.pipeline.pipeline_edit_profile_scroll + visible
-                        {
-                            app.pipeline.pipeline_edit_profile_scroll =
-                                app.pipeline.pipeline_edit_profile_cursor + 1 - visible;
-                        }
+                KeyCode::Down | KeyCode::Char('j')
+                    if !app.pipeline.pipeline_edit_profile_list.is_empty() =>
+                {
+                    let max = app
+                        .pipeline
+                        .pipeline_edit_profile_list
+                        .len()
+                        .saturating_sub(1);
+                    if app.pipeline.pipeline_edit_profile_cursor < max {
+                        app.pipeline.pipeline_edit_profile_cursor += 1;
+                    }
+                    let visible = app.pipeline.pipeline_edit_profile_visible.get().max(1);
+                    if app.pipeline.pipeline_edit_profile_cursor
+                        >= app.pipeline.pipeline_edit_profile_scroll + visible
+                    {
+                        app.pipeline.pipeline_edit_profile_scroll =
+                            app.pipeline.pipeline_edit_profile_cursor + 1 - visible;
                     }
                 }
                 KeyCode::Char(' ') => {
@@ -2016,27 +2010,24 @@ pub(super) fn handle_pipeline_dialog_key(app: &mut App, key: KeyEvent) {
             KeyCode::Esc => {
                 app.pipeline.pipeline_file_dialog = None;
             }
-            KeyCode::Enter => {
-                if !app.pipeline.pipeline_file_input.is_empty() {
-                    let dir = pipeline_mod::ensure_pipelines_dir();
-                    match dir {
-                        Ok(dir) => {
-                            let filename =
-                                format!("{}.toml", app.pipeline.pipeline_file_input.trim());
-                            let path = dir.join(&filename);
-                            match pipeline_mod::save_pipeline(&app.pipeline.pipeline_def, &path) {
-                                Ok(()) => {
-                                    app.pipeline.pipeline_save_path = Some(path);
-                                    app.pipeline.pipeline_file_dialog = None;
-                                }
-                                Err(e) => {
-                                    app.error_modal = Some(format!("Save failed: {e}"));
-                                }
+            KeyCode::Enter if !app.pipeline.pipeline_file_input.is_empty() => {
+                let dir = pipeline_mod::ensure_pipelines_dir();
+                match dir {
+                    Ok(dir) => {
+                        let filename = format!("{}.toml", app.pipeline.pipeline_file_input.trim());
+                        let path = dir.join(&filename);
+                        match pipeline_mod::save_pipeline(&app.pipeline.pipeline_def, &path) {
+                            Ok(()) => {
+                                app.pipeline.pipeline_save_path = Some(path);
+                                app.pipeline.pipeline_file_dialog = None;
+                            }
+                            Err(e) => {
+                                app.error_modal = Some(format!("Save failed: {e}"));
                             }
                         }
-                        Err(e) => {
-                            app.error_modal = Some(format!("Cannot create pipelines dir: {e}"));
-                        }
+                    }
+                    Err(e) => {
+                        app.error_modal = Some(format!("Cannot create pipelines dir: {e}"));
                     }
                 }
             }
@@ -2278,10 +2269,10 @@ pub(super) fn handle_pipeline_conn_action_key(app: &mut App, key: KeyEvent) {
         KeyCode::Up | KeyCode::Char('k') => {
             app.pipeline.pipeline_conn_cursor = app.pipeline.pipeline_conn_cursor.saturating_sub(1);
         }
-        KeyCode::Down | KeyCode::Char('j') => {
-            if app.pipeline.pipeline_conn_cursor + 1 < refs.len() {
-                app.pipeline.pipeline_conn_cursor += 1;
-            }
+        KeyCode::Down | KeyCode::Char('j')
+            if app.pipeline.pipeline_conn_cursor + 1 < refs.len() =>
+        {
+            app.pipeline.pipeline_conn_cursor += 1;
         }
         KeyCode::Enter => {
             if let Some(conn_ref) = refs.get(app.pipeline.pipeline_conn_cursor) {
@@ -2839,37 +2830,34 @@ fn handle_pipeline_loop_edit_key(app: &mut App, key: KeyEvent) {
                         app.pipeline.pipeline_loop_edit_break_agent_selected =
                             app.pipeline.pipeline_loop_edit_break_agent_idx;
                     }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        if total > 0 {
-                            app.pipeline.pipeline_loop_edit_break_agent_idx = app
-                                .pipeline
-                                .pipeline_loop_edit_break_agent_idx
-                                .saturating_sub(1);
-                            if app.pipeline.pipeline_loop_edit_break_agent_idx
-                                < app.pipeline.pipeline_loop_edit_break_agent_scroll
-                            {
-                                app.pipeline.pipeline_loop_edit_break_agent_scroll =
-                                    app.pipeline.pipeline_loop_edit_break_agent_idx;
-                            }
+                    KeyCode::Up | KeyCode::Char('k') if total > 0 => {
+                        app.pipeline.pipeline_loop_edit_break_agent_idx = app
+                            .pipeline
+                            .pipeline_loop_edit_break_agent_idx
+                            .saturating_sub(1);
+                        if app.pipeline.pipeline_loop_edit_break_agent_idx
+                            < app.pipeline.pipeline_loop_edit_break_agent_scroll
+                        {
+                            app.pipeline.pipeline_loop_edit_break_agent_scroll =
+                                app.pipeline.pipeline_loop_edit_break_agent_idx;
                         }
                     }
-                    KeyCode::Down | KeyCode::Char('j') => {
+                    KeyCode::Down | KeyCode::Char('j')
                         if total > 0
                             && app.pipeline.pipeline_loop_edit_break_agent_idx
-                                < total.saturating_sub(1)
+                                < total.saturating_sub(1) =>
+                    {
+                        app.pipeline.pipeline_loop_edit_break_agent_idx += 1;
+                        let visible = app
+                            .pipeline
+                            .pipeline_loop_edit_break_agent_visible
+                            .get()
+                            .max(1);
+                        if app.pipeline.pipeline_loop_edit_break_agent_idx
+                            >= app.pipeline.pipeline_loop_edit_break_agent_scroll + visible
                         {
-                            app.pipeline.pipeline_loop_edit_break_agent_idx += 1;
-                            let visible = app
-                                .pipeline
-                                .pipeline_loop_edit_break_agent_visible
-                                .get()
-                                .max(1);
-                            if app.pipeline.pipeline_loop_edit_break_agent_idx
-                                >= app.pipeline.pipeline_loop_edit_break_agent_scroll + visible
-                            {
-                                app.pipeline.pipeline_loop_edit_break_agent_scroll =
-                                    app.pipeline.pipeline_loop_edit_break_agent_idx + 1 - visible;
-                            }
+                            app.pipeline.pipeline_loop_edit_break_agent_scroll =
+                                app.pipeline.pipeline_loop_edit_break_agent_idx + 1 - visible;
                         }
                     }
                     _ => {}
@@ -2947,10 +2935,11 @@ pub(super) fn handle_running_key(app: &mut App, key: KeyEvent) {
         KeyCode::Up | KeyCode::Char('k') if app.running.multi_run_total > 1 => {
             app.running.multi_run_cursor = app.running.multi_run_cursor.saturating_sub(1);
         }
-        KeyCode::Down | KeyCode::Char('j') if app.running.multi_run_total > 1 => {
-            if app.running.multi_run_cursor + 1 < app.running.multi_run_states.len() {
-                app.running.multi_run_cursor += 1;
-            }
+        KeyCode::Down | KeyCode::Char('j')
+            if app.running.multi_run_total > 1
+                && app.running.multi_run_cursor + 1 < app.running.multi_run_states.len() =>
+        {
+            app.running.multi_run_cursor += 1;
         }
         KeyCode::Esc if app.running.is_running => {
             app.running.cancel_flag.store(true, Ordering::Relaxed);
@@ -3742,7 +3731,8 @@ pub(super) fn cycle_reasoning(app: &mut App) {
                 None => Some("low".into()),
                 Some("low") => Some("medium".into()),
                 Some("medium") => Some("high".into()),
-                Some("high") => Some("max".into()),
+                Some("high") => Some("xhigh".into()),
+                Some("xhigh") => Some("max".into()),
                 _ => None,
             };
         }
@@ -4383,19 +4373,17 @@ fn handle_memory_key(app: &mut App, key: KeyEvent) {
             app.memory.management_cursor = 0;
             refresh_memory_list(app);
         }
-        KeyCode::Char('u') => {
-            if app.memory.management_show_archived {
-                if let Some(mem) = app
-                    .memory
-                    .management_memories
-                    .get(app.memory.management_cursor)
-                {
-                    let id = mem.id;
-                    if let Some(ref store) = app.memory.store {
-                        let _ = store.unarchive(id);
-                    }
-                    refresh_memory_list(app);
+        KeyCode::Char('u') if app.memory.management_show_archived => {
+            if let Some(mem) = app
+                .memory
+                .management_memories
+                .get(app.memory.management_cursor)
+            {
+                let id = mem.id;
+                if let Some(ref store) = app.memory.store {
+                    let _ = store.unarchive(id);
                 }
+                refresh_memory_list(app);
             }
         }
         KeyCode::Esc | KeyCode::Char('q') => {
