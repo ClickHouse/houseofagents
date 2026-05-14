@@ -91,6 +91,18 @@ pub fn home_help_lines() -> &'static [Line<'static>] {
             Line::from(""),
             Line::from(""),
             Line::from(Span::styled(
+                "Config Editor",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from("  Press e on the home screen to edit agents, timeouts, and memory settings."),
+            Line::from("  The t key cycles thinking or reasoning effort only where supported."),
+            Line::from("  OpenCode is CLI-only; use opencode models for model discovery."),
+            Line::from(""),
+            Line::from(""),
+            Line::from(Span::styled(
                 "Memory",
                 Style::default()
                     .fg(Color::Cyan)

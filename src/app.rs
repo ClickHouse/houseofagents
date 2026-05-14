@@ -711,7 +711,7 @@ impl App {
             .map(|agent| {
                 let config = self.effective_agent_config(&agent.name).unwrap_or(agent);
                 let has_key = !config.api_key.is_empty();
-                let using_cli = config.use_cli;
+                let using_cli = config.use_cli || config.provider.is_cli_only();
                 let cli_ok = self
                     .cli_available
                     .get(&config.provider)
@@ -2197,6 +2197,26 @@ mod tests {
         let agents = app.available_agents();
         let gemini = agents.iter().find(|(a, _)| a.name == "Gemini").unwrap();
         assert!(gemini.1);
+    }
+
+    #[test]
+    fn available_agents_opencode_api_mode_uses_cli_availability() {
+        let mut app = app_with_known_cli();
+        app.config.agents.push(agent_cfg(
+            "OC",
+            ProviderKind::OpenCode,
+            "ignored-api-key",
+            false,
+        ));
+        app.cli_available.insert(ProviderKind::OpenCode, false);
+        let agents = app.available_agents();
+        let opencode = agents.iter().find(|(a, _)| a.name == "OC").unwrap();
+        assert!(!opencode.1);
+
+        app.cli_available.insert(ProviderKind::OpenCode, true);
+        let agents = app.available_agents();
+        let opencode = agents.iter().find(|(a, _)| a.name == "OC").unwrap();
+        assert!(opencode.1);
     }
 
     #[test]

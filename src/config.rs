@@ -220,6 +220,10 @@ impl AppConfig {
             config.migrate_providers_to_agents();
         }
 
+        // Must run after legacy provider migration so migrated OpenCode
+        // providers are normalized too.
+        config.normalize_cli_only_agents();
+
         // Legacy migration: if diagnostic_provider contains a provider key like "openai",
         // try to find a matching agent by provider kind and replace with that agent's name.
         // Also normalize case to match the actual agent name.
@@ -257,6 +261,7 @@ impl AppConfig {
             ProviderKind::Anthropic,
             ProviderKind::OpenAI,
             ProviderKind::Gemini,
+            ProviderKind::OpenCode,
         ];
         for kind in &order {
             let key = kind.config_key();
@@ -269,6 +274,14 @@ impl AppConfig {
             }
         }
         self.providers.clear();
+    }
+
+    fn normalize_cli_only_agents(&mut self) {
+        for agent in &mut self.agents {
+            if agent.provider.is_cli_only() {
+                agent.use_cli = true;
+            }
+        }
     }
 
     /// Validate agent configs: unique names, non-empty, valid sanitized names
@@ -409,6 +422,14 @@ model = "gemini-2.5-pro"
 thinking_effort = "medium"
 use_cli = true
 extra_cli_args = ""
+
+[[agents]]
+name = "OpenCode"
+provider = "opencode"
+api_key = ""
+model = "anthropic/claude-sonnet-4-5"
+use_cli = true
+extra_cli_args = ""
 "#;
 
         std::fs::write(&path, TEMPLATE)
@@ -502,6 +523,62 @@ mod tests {
         assert_eq!(loaded.diagnostic_provider, cfg.diagnostic_provider);
         assert_eq!(loaded.agents.len(), 1);
         assert_eq!(loaded.agents[0].name, "Claude");
+    }
+
+    #[test]
+    fn opencode_use_cli_false_is_normalized_on_load() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+output_dir = "/tmp/hoa"
+
+[[agents]]
+name = "OC"
+provider = "opencode"
+api_key = "ignored"
+model = "anthropic/claude-sonnet-4-5"
+use_cli = false
+extra_cli_args = "--verbose"
+"#,
+        )
+        .expect("write config");
+
+        let loaded = AppConfig::load_with_override(path.to_str()).expect("load");
+        let agent = loaded.agents.iter().find(|a| a.name == "OC").unwrap();
+        assert!(agent.use_cli);
+        assert_eq!(agent.api_key, "ignored");
+        assert_eq!(agent.model, "anthropic/claude-sonnet-4-5");
+        assert_eq!(agent.extra_cli_args, "--verbose");
+    }
+
+    #[test]
+    fn legacy_opencode_provider_is_normalized_after_migration() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+output_dir = "/tmp/hoa"
+
+[providers.opencode]
+api_key = "ignored"
+model = "anthropic/claude-sonnet-4-5"
+use_cli = false
+extra_cli_args = "--verbose"
+"#,
+        )
+        .expect("write config");
+
+        let loaded = AppConfig::load_with_override(path.to_str()).expect("load");
+        let agent = loaded
+            .agents
+            .iter()
+            .find(|a| a.provider == ProviderKind::OpenCode)
+            .unwrap();
+        assert_eq!(agent.name, "OpenCode");
+        assert!(agent.use_cli);
     }
 
     #[test]
@@ -688,5 +765,56 @@ model = "claude-3"
         assert_eq!(pc2.reasoning_effort, Some("high".to_string()));
         assert!(pc2.use_cli);
         assert_eq!(pc2.extra_cli_args, "--x");
+    }
+
+    #[test]
+    fn opencode_agent_config_round_trip() {
+        let body = r#"
+output_dir = "/tmp/hoa"
+
+[[agents]]
+name = "OpenCode"
+provider = "opencode"
+api_key = ""
+model = "anthropic/claude-sonnet-4-5"
+use_cli = true
+extra_cli_args = "--thinking"
+"#;
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, body).expect("write");
+        let cfg = AppConfig::load_with_override(path.to_str()).expect("load");
+        assert_eq!(cfg.agents.len(), 1);
+        assert_eq!(cfg.agents[0].name, "OpenCode");
+        assert_eq!(cfg.agents[0].provider, ProviderKind::OpenCode);
+        assert_eq!(cfg.agents[0].model, "anthropic/claude-sonnet-4-5");
+        assert!(cfg.agents[0].use_cli);
+        assert!(cfg.agents[0].api_key.is_empty());
+        assert_eq!(cfg.agents[0].extra_cli_args, "--thinking");
+
+        // Save and reload
+        cfg.save_with_override(path.to_str()).expect("save");
+        let reloaded = AppConfig::load_with_override(path.to_str()).expect("reload");
+        assert_eq!(reloaded.agents[0].provider, ProviderKind::OpenCode);
+        assert_eq!(reloaded.agents[0].model, "anthropic/claude-sonnet-4-5");
+        assert!(reloaded.agents[0].use_cli);
+    }
+
+    #[test]
+    fn config_template_contains_opencode_agent() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        AppConfig::write_template_with_override(path.to_str(), false).expect("write");
+        let body = std::fs::read_to_string(&path).expect("read");
+        assert!(body.contains("provider = \"opencode\""));
+        assert!(body.contains("name = \"OpenCode\""));
+        // Verify the template can be loaded successfully
+        let cfg = AppConfig::load_with_override(path.to_str()).expect("load");
+        let oc = cfg
+            .agents
+            .iter()
+            .find(|a| a.provider == ProviderKind::OpenCode);
+        assert!(oc.is_some(), "template should include an OpenCode agent");
+        assert!(oc.unwrap().use_cli);
     }
 }

@@ -94,33 +94,43 @@ pub(super) fn start_pipeline_execution(app: &mut App) {
         return;
     }
 
-    // Check agent availability per block
-    let avail_agents: std::collections::HashMap<String, bool> = app
-        .available_agents()
-        .into_iter()
-        .map(|(a, avail)| (a.name.clone(), avail))
-        .collect();
-    {
-        let mut agent_error: Option<String> = None;
-        app.pipeline
-            .pipeline_def
-            .visit_all_agent_refs(&mut |agent_name, block_id| {
-                if agent_error.is_some() {
-                    return;
-                }
-                match avail_agents.get(agent_name) {
-                    Some(true) => {}
-                    Some(false) => {
-                        agent_error =
-                            Some(format!("{agent_name} is not available (block {block_id})"));
-                    }
-                    None => {
-                        agent_error =
-                            Some(format!("Agent '{agent_name}' not found (block {block_id})"));
-                    }
-                }
-            });
-        if let Some(err) = agent_error {
+    // Check agent availability and runtime validity per referenced block agent.
+    // Pipeline execution uses provider-specific CLI behavior while building
+    // prompts, so validate the same effective configs used at runtime.
+    let mut referenced_agents = Vec::new();
+    app.pipeline
+        .pipeline_def
+        .visit_all_agent_refs(&mut |agent_name, block_id| {
+            referenced_agents.push((agent_name.to_string(), block_id));
+        });
+    for (agent_name, block_id) in referenced_agents {
+        let Some(agent_cfg) = app.config.agents.iter().find(|a| a.name == agent_name) else {
+            app.error_modal = Some(format!("Agent '{agent_name}' not found (block {block_id})"));
+            return;
+        };
+        let agent_cfg = app
+            .effective_agent_config(&agent_cfg.name)
+            .unwrap_or(agent_cfg);
+        let using_cli = agent_cfg.use_cli || agent_cfg.provider.is_cli_only();
+        let cli_ok = app
+            .cli_available
+            .get(&agent_cfg.provider)
+            .copied()
+            .unwrap_or(false);
+        let available = if using_cli {
+            cli_ok
+        } else {
+            !agent_cfg.api_key.is_empty()
+        };
+        if !available {
+            app.error_modal = Some(format!("{agent_name} is not available (block {block_id})"));
+            return;
+        }
+        if let Err(err) = crate::runtime_support::validate_agent_runtime(
+            &app.cli_available,
+            &agent_name,
+            agent_cfg,
+        ) {
             app.error_modal = Some(err);
             return;
         }
@@ -157,7 +167,7 @@ pub(super) fn start_pipeline_execution(app: &mut App) {
                         (
                             agent_cfg.provider,
                             agent_cfg.to_provider_config(),
-                            agent_cfg.use_cli,
+                            agent_cfg.use_cli || agent_cfg.provider.is_cli_only(),
                         ),
                     );
                 }

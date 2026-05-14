@@ -4,7 +4,7 @@
 
 **Multi-agent prompt runner with a terminal UI**
 
-Run Claude, OpenAI, and Gemini in collaborative execution modes and save all artifacts to disk.
+Run Claude, OpenAI, Gemini, and OpenCode in collaborative execution modes and save all artifacts to disk.
 
 [![Rust](https://img.shields.io/badge/Rust-1.88%2B-orange?logo=rust)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -28,8 +28,9 @@ Run Claude, OpenAI, and Gemini in collaborative execution modes and save all art
 | **Anthropic** (Claude) | `api_key` | `claude` binary |
 | **OpenAI** | `api_key` | `codex` binary |
 | **Gemini** | `api_key` | `gemini` binary |
+| **OpenCode** | -- | `opencode` binary |
 
-Each agent can run in API mode or CLI mode (`use_cli = true`). Mix and match freely.
+Each agent can run in API mode or CLI mode (`use_cli = true`). Mix and match freely. OpenCode is CLI-only.
 
 ## Features
 
@@ -236,6 +237,14 @@ model = "gemini-2.5-pro"
 thinking_effort = "medium"
 use_cli = true
 extra_cli_args = ""
+
+[[agents]]
+name = "OpenCode"
+provider = "opencode"
+api_key = ""
+model = "anthropic/claude-sonnet-4-5"
+use_cli = true
+extra_cli_args = ""
 ```
 
 ### Config Reference
@@ -275,15 +284,19 @@ extra_cli_args = ""
 | Field | Description |
 |-------|-------------|
 | `name` | Display name for the agent (must be unique) |
-| `provider` | Provider type — `anthropic`, `openai`, or `gemini` |
+| `provider` | Provider type — `anthropic`, `openai`, `gemini`, or `opencode` |
 | `api_key` | API key (required when `use_cli = false`, leave empty for CLI mode) |
 | `model` | Model identifier to use |
-| `use_cli` | Use local CLI binary instead of HTTP API |
+| `use_cli` | Use local CLI binary instead of HTTP API (always `true` for OpenCode) |
 | `extra_cli_args` | Shell-style extra CLI args parsed at runtime, for example `--sandbox workspace-write --profile "fast mode"` |
 | `reasoning_effort` | OpenAI effort setting — `low` / `medium` / `high` / `xhigh` |
 | `thinking_effort` | Anthropic & Gemini effort setting — `low` / `medium` / `high`; Anthropic CLI also supports `xhigh` and `max` (`max` for `claude-opus-4-6`) |
 
 Anthropic `thinking_effort = "xhigh"` and `thinking_effort = "max"` are rejected in API mode. In CLI mode, House of Agents passes them through and lets the `claude` CLI report any model-specific incompatibility.
+
+OpenCode is a CLI-only provider; it has no API mode. Loaded OpenCode agents are normalized to `use_cli = true`, and runtime validation still rejects any invalid in-memory OpenCode API-mode state. The `model` field uses `provider/model` format (e.g. `anthropic/claude-sonnet-4-5`, `openai/gpt-4o`). Run `opencode models` to view or configure models, then set the model manually. OpenCode effort is delegated to the OpenCode/model configuration. The `opencode` binary must be installed and authenticated. OpenCode agents always pass `--dangerously-skip-permissions` for non-interactive execution.
+
+OpenCode `extra_cli_args` cannot include `--format`, `--dir`, `--model`, or `-m` forms because House of Agents owns those flags. OpenCode prompts are passed to `opencode run` as a positional argument and preflighted for embedded NUL bytes and a conservative byte limit before spawn. The default `max_history_bytes` can still allow a final OpenCode argv prompt above this conservative cap once prompt wrappers are added. If a prompt-limit error appears, reduce prompt/history size or lower `max_history_bytes`.
 
 ## Keyboard Shortcuts
 
@@ -322,12 +335,12 @@ Anthropic `thinking_effort = "xhigh"` and `thinking_effort = "max"` are rejected
 | `n` | Add new agent |
 | `Del` / `Backspace` | Remove agent |
 | `r` | Rename agent |
-| `p` | Cycle provider (Anthropic / OpenAI / Gemini) |
+| `p` | Cycle provider (Anthropic / OpenAI / Gemini / OpenCode) |
 | `c` | Toggle CLI / API mode |
 | `a` | Edit API key |
 | `m` | Edit model |
 | `l` | Open model picker |
-| `t` | Cycle thinking / reasoning effort |
+| `t` | Cycle thinking / reasoning effort where supported |
 | `x` | Edit extra CLI args |
 | `d` | Toggle diagnostic agent |
 | `o` | Edit output directory |

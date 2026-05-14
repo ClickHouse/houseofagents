@@ -179,10 +179,26 @@ fn draw_edit_popup(f: &mut Frame, app: &App) {
         EditPopupSection::Timeouts => app.edit_popup.timeout_cursor,
         EditPopupSection::Memory => app.edit_popup.memory_cursor,
     };
+    let selected_provider = if matches!(app.edit_popup.section, EditPopupSection::Providers) {
+        app.config
+            .agents
+            .get(app.edit_popup.cursor)
+            .and_then(|agent| app.effective_agent_config(&agent.name))
+            .map(|agent| agent.provider)
+    } else {
+        None
+    };
+    let selected_is_cli_only = selected_provider.is_some_and(|provider| provider.is_cli_only());
+
+    let shortcut_header = if selected_is_cli_only {
+        "j/k: navigate  Tab: section  [o]: output dir  [s]: save  Esc: keep for session  [n]: new  [Del]: remove  [p]: provider  [r]: rename  [d]: diagnostic  [c]: CLI/API  [a]: key  [m]: model  [l]: list  [x]: extra CLI"
+    } else {
+        "j/k: navigate  Tab: section  [o]: output dir  [s]: save  Esc: keep for session  [n]: new  [Del]: remove  [p]: provider  [r]: rename  [d]: diagnostic  [c]: CLI/API  [a]: key  [m]: model  [l]: list  [t]: effort  [x]: extra CLI"
+    };
 
     let mut header_lines = vec![
         Line::from(Span::styled(
-            "j/k: navigate  Tab: section  [o]: output dir  [s]: save  Esc: keep for session  [n]: new  [Del]: remove  [p]: provider  [r]: rename  [d]: diagnostic  [c]: CLI/API  [a]: key  [m]: model  [l]: list  [t]: effort  [x]: extra CLI",
+            shortcut_header,
             Style::default().fg(Color::DarkGray),
         )),
         Line::from(""),
@@ -251,6 +267,7 @@ fn draw_edit_popup(f: &mut Frame, app: &App) {
                 let provider = config.map(|c| c.provider).unwrap_or(agent_cfg.provider);
                 let cli_installed = app.cli_available.get(&provider).copied().unwrap_or(false);
                 let use_cli = config.map(|c| c.use_cli).unwrap_or(false);
+                let effective_use_cli = use_cli || provider.is_cli_only();
                 let (key, model, extra_cli_args, thinking_label, has_api_key) = match config {
                     Some(c) => {
                         let thinking = match c.provider {
@@ -258,6 +275,7 @@ fn draw_edit_popup(f: &mut Frame, app: &App) {
                                 Some(e) => format!("reasoning: {e}"),
                                 None => "off".into(),
                             },
+                            ProviderKind::OpenCode => "delegated".into(),
                             _ => match c.thinking_effort.as_deref() {
                                 Some(e) => format!("effort: {e}"),
                                 None => "off".into(),
@@ -279,12 +297,16 @@ fn draw_edit_popup(f: &mut Frame, app: &App) {
                         "(not set)".into(),
                         "(not set)".into(),
                         "(none)".into(),
-                        "off".into(),
+                        if provider.is_cli_only() {
+                            "delegated".into()
+                        } else {
+                            "off".into()
+                        },
                         false,
                     ),
                 };
 
-                let (mode_text, mode_style) = if use_cli {
+                let (mode_text, mode_style) = if effective_use_cli {
                     ("CLI", Style::default().fg(Color::Green))
                 } else if !cli_installed {
                     ("API (no CLI)", Style::default().fg(Color::DarkGray))
@@ -294,6 +316,7 @@ fn draw_edit_popup(f: &mut Frame, app: &App) {
                 let effort_title = match provider {
                     ProviderKind::OpenAI => "Reasoning",
                     ProviderKind::Anthropic | ProviderKind::Gemini => "Thinking",
+                    ProviderKind::OpenCode => "Effort",
                 };
 
                 let is_selected = i == selected_cursor;
@@ -323,7 +346,7 @@ fn draw_edit_popup(f: &mut Frame, app: &App) {
                         Span::styled(mode_text, mode_style),
                         Span::styled("  [c]", Style::default().fg(Color::DarkGray)),
                     ]));
-                    let key_style = if use_cli {
+                    let key_style = if effective_use_cli {
                         Style::default().fg(Color::DarkGray)
                     } else {
                         Style::default()
@@ -338,7 +361,7 @@ fn draw_edit_popup(f: &mut Frame, app: &App) {
                         Span::raw(model.clone()),
                         Span::styled("  [m] [l]", Style::default().fg(Color::DarkGray)),
                     ]));
-                    let extra_cli_style = cli_dependent_style(use_cli);
+                    let extra_cli_style = cli_dependent_style(effective_use_cli);
                     body_lines.push(Line::from(vec![
                         Span::styled("  Extra CLI:", extra_cli_style),
                         Span::styled(format!(" {extra_cli_args}"), extra_cli_style),
@@ -346,22 +369,30 @@ fn draw_edit_popup(f: &mut Frame, app: &App) {
                     ]));
                     if !has_api_key {
                         body_lines.push(Line::from(Span::styled(
-                            "            Add API key to fetch model list",
+                            if provider.is_cli_only() {
+                                "            Run `opencode models` to view or configure models"
+                            } else {
+                                "            Add API key to fetch model list"
+                            },
                             Style::default().fg(Color::DarkGray),
                         )));
                     }
-                    let thinking_style = if thinking_label == "off" {
+                    let thinking_style = if matches!(thinking_label.as_str(), "off" | "delegated") {
                         Style::default().fg(Color::DarkGray)
                     } else {
                         Style::default().fg(Color::Magenta)
                     };
-                    body_lines.push(Line::from(vec![
+                    let mut effort_spans = vec![
                         Span::raw(format!("  {effort_title}: ").to_string()),
                         Span::styled(thinking_label.clone(), thinking_style),
-                        Span::styled("  [t]", Style::default().fg(Color::DarkGray)),
-                    ]));
+                    ];
+                    if !provider.is_cli_only() {
+                        effort_spans
+                            .push(Span::styled("  [t]", Style::default().fg(Color::DarkGray)));
+                    }
+                    body_lines.push(Line::from(effort_spans));
                 } else {
-                    let thinking_style = if thinking_label == "off" {
+                    let thinking_style = if matches!(thinking_label.as_str(), "off" | "delegated") {
                         Style::default().fg(Color::DarkGray)
                     } else {
                         Style::default().fg(Color::Magenta)
@@ -370,7 +401,7 @@ fn draw_edit_popup(f: &mut Frame, app: &App) {
                         Span::raw("  Mode:     "),
                         Span::styled(mode_text, mode_style),
                     ]));
-                    let key_style = if use_cli {
+                    let key_style = if effective_use_cli {
                         Style::default().fg(Color::DarkGray)
                     } else {
                         Style::default()
@@ -380,7 +411,7 @@ fn draw_edit_popup(f: &mut Frame, app: &App) {
                         Span::styled(key, key_style),
                     ]));
                     body_lines.push(Line::from(format!("  Model:    {model}")));
-                    let extra_cli_style = cli_dependent_style(use_cli);
+                    let extra_cli_style = cli_dependent_style(effective_use_cli);
                     body_lines.push(Line::from(vec![
                         Span::styled("  Extra CLI:", extra_cli_style),
                         Span::styled(format!(" {extra_cli_args}"), extra_cli_style),
@@ -896,6 +927,51 @@ fn mask_key(key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{AgentConfig, AppConfig};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use std::collections::HashMap;
+
+    fn opencode_popup_text(api_key: &str) -> String {
+        let config = AppConfig {
+            output_dir: "/tmp/out".into(),
+            default_max_tokens: 4096,
+            max_history_messages: 50,
+            http_timeout_seconds: 120,
+            model_fetch_timeout_seconds: 30,
+            cli_timeout_seconds: 600,
+            max_history_bytes: 102400,
+            pipeline_block_concurrency: 0,
+            diagnostic_provider: None,
+            memory: crate::config::MemoryConfig::default(),
+            agents: vec![AgentConfig {
+                name: "OC".into(),
+                provider: ProviderKind::OpenCode,
+                api_key: api_key.into(),
+                model: "anthropic/claude-sonnet-4-5".into(),
+                reasoning_effort: None,
+                thinking_effort: None,
+                use_cli: false,
+                extra_cli_args: String::new(),
+            }],
+            providers: HashMap::new(),
+        };
+        let mut app = App::new(config);
+        app.edit_popup.visible = true;
+        app.edit_popup.section = EditPopupSection::Providers;
+        app.edit_popup.cursor = 0;
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw_edit_popup(f, &app)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+    }
 
     #[test]
     fn cli_dependent_style_for_cli_mode_is_default() {
@@ -922,5 +998,26 @@ mod tests {
     #[test]
     fn mask_key_long_values_unicode_safe() {
         assert_eq!(mask_key("ééééabcdéééé"), "éééé...éééé");
+    }
+
+    #[test]
+    fn home_renders_opencode_effort_as_delegated() {
+        let text = opencode_popup_text("ignored");
+        assert!(text.contains("delegated"));
+        assert!(!text.contains("Effort: off"));
+    }
+
+    #[test]
+    fn home_hides_effort_shortcut_for_opencode() {
+        let text = opencode_popup_text("ignored");
+        assert!(!text.contains("[t]: effort"));
+        assert!(!text.contains("delegated  [t]"));
+    }
+
+    #[test]
+    fn home_opencode_empty_key_guidance_mentions_opencode_models() {
+        let text = opencode_popup_text("");
+        assert!(text.contains("opencode models"));
+        assert!(!text.contains("Add API key to fetch model list"));
     }
 }
