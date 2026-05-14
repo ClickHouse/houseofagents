@@ -110,7 +110,8 @@ pub struct AgentConfig {
     /// OpenAI reasoning effort: "low", "medium", "high", "xhigh" (for o-series / gpt-5 models)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
-    /// Thinking effort: "low", "medium", "high", "max" (max for Claude Opus 4.6 only)
+    /// Thinking effort: "low", "medium", "high", "xhigh", "max"
+    /// (Anthropic "xhigh" and "max" require CLI mode; "max" is Claude Opus 4.6 only)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking_effort: Option<String>,
     /// Use CLI tool instead of API for this provider
@@ -156,7 +157,8 @@ pub struct ProviderConfig {
     /// OpenAI reasoning effort: "low", "medium", "high", "xhigh" (for o-series / gpt-5 models)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
-    /// Thinking effort: "low", "medium", "high", "max" (max for Claude Opus 4.6 only)
+    /// Thinking effort: "low", "medium", "high", "xhigh", "max"
+    /// (Anthropic "xhigh" and "max" require CLI mode; "max" is Claude Opus 4.6 only)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking_effort: Option<String>,
     /// Use CLI tool instead of API for this provider

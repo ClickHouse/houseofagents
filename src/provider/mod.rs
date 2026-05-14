@@ -319,8 +319,12 @@ pub fn validate_effort_config(
     let _ = reasoning_effort;
     match kind {
         ProviderKind::Anthropic => {
-            if thinking_effort == Some("max") && !use_cli {
-                return Err("\"max\" thinking effort requires CLI mode for Anthropic".into());
+            if !use_cli {
+                if let Some(effort @ ("xhigh" | "max")) = thinking_effort {
+                    return Err(format!(
+                        "\"{effort}\" thinking effort requires CLI mode for Anthropic"
+                    ));
+                }
             }
         }
         ProviderKind::OpenAI | ProviderKind::Gemini => {}
@@ -429,6 +433,7 @@ mod tests {
     #[test]
     fn effort_to_budget_rejects_unknown_values() {
         assert!(effort_to_budget("max").is_err());
+        assert!(effort_to_budget("xhigh").is_err());
         assert!(effort_to_budget("unexpected").is_err());
     }
 
@@ -442,6 +447,19 @@ mod tests {
     #[test]
     fn validate_effort_config_allows_anthropic_max_in_cli_mode() {
         validate_effort_config(ProviderKind::Anthropic, true, None, Some("max"))
+            .expect("cli mode should be allowed through to the provider");
+    }
+
+    #[test]
+    fn validate_effort_config_rejects_anthropic_xhigh_in_api_mode() {
+        let err = validate_effort_config(ProviderKind::Anthropic, false, None, Some("xhigh"))
+            .expect_err("should reject api mode");
+        assert!(err.contains("\"xhigh\" thinking effort requires CLI mode"));
+    }
+
+    #[test]
+    fn validate_effort_config_allows_anthropic_xhigh_in_cli_mode() {
+        validate_effort_config(ProviderKind::Anthropic, true, None, Some("xhigh"))
             .expect("cli mode should be allowed through to the provider");
     }
 

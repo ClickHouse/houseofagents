@@ -194,6 +194,37 @@ fn validate_agent_runtime_allows_anthropic_max_in_cli_mode() {
 }
 
 #[test]
+fn validate_agent_runtime_rejects_anthropic_xhigh_in_api_mode() {
+    let app = test_app();
+    let agent = test_agent(
+        "Claude",
+        ProviderKind::Anthropic,
+        "claude-opus-4-6",
+        false,
+        Some("xhigh"),
+    );
+
+    let err = validate_agent_runtime(&app, &agent.name, &agent).expect_err("should reject");
+    assert!(err.contains("\"xhigh\" thinking effort requires CLI mode"));
+}
+
+#[test]
+fn validate_agent_runtime_allows_anthropic_xhigh_in_cli_mode() {
+    let mut app = test_app();
+    app.cli_available.insert(ProviderKind::Anthropic, true);
+    let agent = test_agent(
+        "Claude",
+        ProviderKind::Anthropic,
+        "claude-sonnet-4-5",
+        true,
+        Some("xhigh"),
+    );
+
+    validate_agent_runtime(&app, &agent.name, &agent)
+        .expect("cli mode should be allowed through to the provider");
+}
+
+#[test]
 fn handle_execution_task_result_uses_selected_provider_kind() {
     let (tx, mut rx) = mpsc::unbounded_channel();
 
@@ -2109,6 +2140,67 @@ fn popup_locked_during_in_flight_save() {
     // Esc still works to close
     handle_edit_popup_key(&mut app, key(KeyCode::Esc));
     assert!(!app.edit_popup.visible);
+}
+
+#[test]
+fn cycle_reasoning_anthropic_includes_xhigh_before_max() {
+    let mut app = test_app();
+    app.config.agents.push(test_agent(
+        "Claude",
+        ProviderKind::Anthropic,
+        "claude-opus-4-6",
+        false,
+        None,
+    ));
+    app.edit_popup.cursor = 0;
+
+    let expected = [
+        Some("low"),
+        Some("medium"),
+        Some("high"),
+        Some("xhigh"),
+        Some("max"),
+        None,
+    ];
+
+    for expected_effort in expected {
+        cycle_reasoning(&mut app);
+        let actual = app
+            .session_overrides
+            .get("Claude")
+            .and_then(|agent| agent.thinking_effort.as_deref());
+        assert_eq!(actual, expected_effort);
+    }
+}
+
+#[test]
+fn cycle_reasoning_openai_order_unchanged() {
+    let mut app = test_app();
+    app.config.agents.push(test_agent(
+        "OpenAI",
+        ProviderKind::OpenAI,
+        "gpt-5",
+        false,
+        None,
+    ));
+    app.edit_popup.cursor = 0;
+
+    let expected = [
+        Some("low"),
+        Some("medium"),
+        Some("high"),
+        Some("xhigh"),
+        None,
+    ];
+
+    for expected_effort in expected {
+        cycle_reasoning(&mut app);
+        let actual = app
+            .session_overrides
+            .get("OpenAI")
+            .and_then(|agent| agent.reasoning_effort.as_deref());
+        assert_eq!(actual, expected_effort);
+    }
 }
 
 #[test]

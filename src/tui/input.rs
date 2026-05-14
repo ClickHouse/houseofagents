@@ -3731,7 +3731,8 @@ pub(super) fn cycle_reasoning(app: &mut App) {
                 None => Some("low".into()),
                 Some("low") => Some("medium".into()),
                 Some("medium") => Some("high".into()),
-                Some("high") => Some("max".into()),
+                Some("high") => Some("xhigh".into()),
+                Some("xhigh") => Some("max".into()),
                 _ => None,
             };
         }
