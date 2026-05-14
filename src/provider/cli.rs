@@ -16,6 +16,9 @@ const CLI_STDOUT_MAX_BYTES: usize = 1024 * 1024;
 const CLI_STDERR_MAX_BYTES: usize = 256 * 1024;
 const CLI_POST_EXIT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 const CLI_LIVE_LOG_LINE_MAX_BYTES: usize = 4096;
+// Linux MAX_ARG_STRLEN is commonly 128 KiB. Keep OpenCode prompt argv below
+// that with headroom for platform variance and the rest of argv/env.
+const OPENCODE_MAX_PROMPT_ARG_BYTES: usize = 96 * 1024;
 
 const CLI_TRANSIENT_MAX_RETRIES: u32 = 2;
 
@@ -117,7 +120,99 @@ impl CliProvider {
         }
     }
 
-    fn build_codex_args(&self) -> Result<(Vec<String>, PathBuf), AppError> {
+    fn is_reserved_long_flag(arg: &str, flag: &str) -> bool {
+        arg == flag
+            || arg
+                .strip_prefix(flag)
+                .is_some_and(|rest| rest.starts_with('='))
+    }
+
+    fn is_reserved_opencode_model_short(arg: &str) -> bool {
+        arg == "-m" || arg.starts_with("-m=") || (arg.starts_with("-m") && arg.len() > 2)
+    }
+
+    fn validate_reserved_extra_args(&self, args: &[String]) -> Result<(), AppError> {
+        let message = match self.kind {
+            ProviderKind::Anthropic
+                if args
+                    .iter()
+                    .any(|a| a == "-p" || Self::is_reserved_long_flag(a, "--system-prompt")) =>
+            {
+                Some(
+                    "extra_cli_args contains -p or --system-prompt which conflicts with internal CLI flags"
+                        .to_string(),
+                )
+            }
+            ProviderKind::OpenAI
+                if args.iter().any(|a| {
+                    a == "-o" || Self::is_reserved_long_flag(a, "--output-last-message")
+                }) =>
+            {
+                Some(
+                    "extra_cli_args contains -o or --output-last-message which conflicts with internal Codex output capture"
+                        .to_string(),
+                )
+            }
+            ProviderKind::Gemini
+                if args.iter().any(|a| {
+                    Self::is_reserved_long_flag(a, "--prompt")
+                        || Self::is_reserved_long_flag(a, "--output-format")
+                }) =>
+            {
+                Some(
+                    "extra_cli_args contains --prompt or --output-format which conflicts with internal Gemini CLI flags"
+                        .to_string(),
+                )
+            }
+            ProviderKind::OpenCode
+                if args.iter().any(|a| {
+                    Self::is_reserved_long_flag(a, "--format")
+                        || Self::is_reserved_long_flag(a, "--dir")
+                        || Self::is_reserved_long_flag(a, "--model")
+                        || Self::is_reserved_opencode_model_short(a)
+                }) =>
+            {
+                Some(
+                    "extra_cli_args cannot include --format, --dir, --model, or -m because House of Agents sets those OpenCode flags internally"
+                        .to_string(),
+                )
+            }
+            _ => None,
+        };
+
+        if let Some(message) = message {
+            return Err(AppError::Provider {
+                provider: self.provider_name().into(),
+                message,
+            });
+        }
+
+        Ok(())
+    }
+
+    fn preflight_opencode_prompt(&self, prompt: &str) -> Result<(), AppError> {
+        if prompt.as_bytes().contains(&0) {
+            return Err(AppError::Provider {
+                provider: self.provider_name().into(),
+                message: "OpenCode prompt contains an embedded NUL byte and cannot be passed to the opencode CLI".into(),
+            });
+        }
+
+        if prompt.len() > OPENCODE_MAX_PROMPT_ARG_BYTES {
+            return Err(AppError::Provider {
+                provider: self.provider_name().into(),
+                message: format!(
+                    "OpenCode prompt is too large to pass as a command argument ({} bytes, limit {} bytes); reduce prompt or history size",
+                    prompt.len(),
+                    OPENCODE_MAX_PROMPT_ARG_BYTES,
+                ),
+            });
+        }
+
+        Ok(())
+    }
+
+    fn build_codex_args(&self, extra_args: &[String]) -> (Vec<String>, PathBuf) {
         let mut args = vec!["exec".to_string()];
         if let Ok(cwd) = std::env::current_dir() {
             args.push("-C".to_string());
@@ -145,9 +240,9 @@ impl CliProvider {
         if let Some(ref session_id) = self.session_id {
             args.push(session_id.clone());
         }
-        args.extend(self.parse_extra_cli_args()?);
+        args.extend(extra_args.iter().cloned());
         args.push("-".to_string());
-        Ok((args, out_path))
+        (args, out_path)
     }
 
     fn build_prompt_from_history(&self) -> String {
@@ -231,6 +326,14 @@ impl CliProvider {
         crate::execution::truncate_chars(s, max_chars)
     }
 
+    fn prompt_redaction_summary(prompt: &str) -> String {
+        format!(
+            "<prompt redacted: {} bytes, {} chars>",
+            prompt.len(),
+            prompt.chars().count()
+        )
+    }
+
     fn short_session(id: &str) -> String {
         if id.len() <= 12 {
             id.to_string()
@@ -256,7 +359,13 @@ impl CliProvider {
         }
     }
 
-    fn push_command_debug(&self, debug_logs: &mut Vec<String>, bin: &str, args: &[String]) {
+    fn push_command_debug(
+        &self,
+        debug_logs: &mut Vec<String>,
+        bin: &str,
+        args: &[String],
+        prompt_arg_index: Option<usize>,
+    ) {
         debug_logs.push(format!(
             "cli start: {bin} (timeout={}s, model={})",
             self.timeout_seconds,
@@ -281,8 +390,15 @@ impl CliProvider {
         }
         let preview = args
             .iter()
+            .enumerate()
             .take(18)
-            .map(|a| Self::clip(a, 48))
+            .map(|(i, a)| {
+                if prompt_arg_index == Some(i) {
+                    Self::prompt_redaction_summary(a)
+                } else {
+                    Self::clip(a, 48)
+                }
+            })
             .collect::<Vec<_>>()
             .join(" ");
         let suffix = if args.len() > 18 {
@@ -291,6 +407,14 @@ impl CliProvider {
             String::new()
         };
         debug_logs.push(format!("args: {preview}{suffix}"));
+        if let Some(index) = prompt_arg_index {
+            if index >= 18 && index < args.len() {
+                debug_logs.push(format!(
+                    "prompt arg: {}",
+                    Self::prompt_redaction_summary(&args[index])
+                ));
+            }
+        }
     }
 
     fn provider_error_with_debug(
@@ -564,56 +688,8 @@ impl Provider for CliProvider {
         let message = message.to_string();
         Box::pin(async move {
             let message = &message;
-            let output_path = self.output_path.take();
-
-            if let Ok(extra_args) = self.parse_extra_cli_args() {
-                match self.kind {
-                    ProviderKind::Anthropic => {
-                        if extra_args
-                            .iter()
-                            .any(|a| a == "-p" || a.starts_with("--system-prompt"))
-                        {
-                            return Err(AppError::Provider {
-                                provider: self.provider_name().into(),
-                                message: "extra_cli_args contains -p or --system-prompt which conflicts with internal CLI flags".into(),
-                            });
-                        }
-                    }
-                    ProviderKind::OpenAI => {
-                        if extra_args
-                            .iter()
-                            .any(|a| a == "-o" || a.starts_with("--output-last-message"))
-                        {
-                            return Err(AppError::Provider {
-                                provider: self.provider_name().into(),
-                                message: "extra_cli_args contains -o or --output-last-message which conflicts with internal Codex output capture".into(),
-                            });
-                        }
-                    }
-                    ProviderKind::Gemini => {
-                        if extra_args
-                            .iter()
-                            .any(|a| a.starts_with("--prompt") || a.starts_with("--output-format"))
-                        {
-                            return Err(AppError::Provider {
-                                provider: self.provider_name().into(),
-                                message: "extra_cli_args contains --prompt or --output-format which conflicts with internal Gemini CLI flags".into(),
-                            });
-                        }
-                    }
-                    ProviderKind::OpenCode => {
-                        if extra_args
-                            .iter()
-                            .any(|a| a == "--format" || a == "--dir" || a.starts_with("--model"))
-                        {
-                            return Err(AppError::Provider {
-                                provider: self.provider_name().into(),
-                                message: "extra_cli_args contains --format, --dir, or --model which conflicts with internal OpenCode CLI flags".into(),
-                            });
-                        }
-                    }
-                }
-            }
+            let extra_args = self.parse_extra_cli_args()?;
+            self.validate_reserved_extra_args(&extra_args)?;
 
             if let Err(message) = validate_effort_config(
                 self.kind,
@@ -627,6 +703,7 @@ impl Provider for CliProvider {
                 });
             }
 
+            let output_path = self.output_path.take();
             let mut debug_logs: Vec<String> = Vec::new();
             self.history.push(Message {
                 role: Role::User,
@@ -660,6 +737,14 @@ impl Provider for CliProvider {
                         "IMPORTANT: Write your complete final response ONLY to the file: {}. Do not create any other files.\n\n{prompt}",
                         path.display()
                     );
+                }
+            }
+
+            if self.kind == ProviderKind::OpenCode {
+                if let Err(e) = self.preflight_opencode_prompt(&prompt) {
+                    self.history.pop();
+                    self.output_path = output_path;
+                    return Err(e);
                 }
             }
 
@@ -712,13 +797,7 @@ impl Provider for CliProvider {
                                 }
                             }
                         }
-                        let (args, out_path) = match self.build_codex_args() {
-                            Ok(v) => v,
-                            Err(e) => {
-                                self.history.pop();
-                                return Err(e);
-                            }
-                        };
+                        let (args, out_path) = self.build_codex_args(&extra_args);
                         codex_output_path = Some(out_path);
                         args
                     }
@@ -747,21 +826,17 @@ impl Provider for CliProvider {
                     args.push(self.model.clone());
                 }
                 if self.kind != ProviderKind::OpenAI {
-                    match self.parse_extra_cli_args() {
-                        Ok(extra) => args.extend(extra),
-                        Err(e) => {
-                            self.history.pop();
-                            return Err(e);
-                        }
-                    }
+                    args.extend(extra_args.iter().cloned());
                 }
                 // OpenCode takes the prompt as a positional argument after "run",
                 // not via stdin. Append it as the final argument.
+                let mut prompt_arg_index = None;
                 if self.kind == ProviderKind::OpenCode {
                     args.push(prompt.clone());
+                    prompt_arg_index = Some(args.len() - 1);
                 }
 
-                self.push_command_debug(&mut debug_logs, bin, &args);
+                self.push_command_debug(&mut debug_logs, bin, &args, prompt_arg_index);
                 self.emit_live_log(format!("start {} (timeout {}s)", bin, self.timeout_seconds));
 
                 if let Some(ref path) = output_path {
@@ -1171,7 +1246,7 @@ impl Provider for CliProvider {
 mod tests {
     use super::{
         CliProvider, CLI_POST_EXIT_DRAIN_TIMEOUT, CLI_STDERR_MAX_BYTES, CLI_STDOUT_MAX_BYTES,
-        CLI_TRANSIENT_BASE_BACKOFF, CLI_TRANSIENT_MAX_RETRIES,
+        CLI_TRANSIENT_BASE_BACKOFF, CLI_TRANSIENT_MAX_RETRIES, OPENCODE_MAX_PROMPT_ARG_BYTES,
     };
     use crate::provider::ProviderKind;
     use serde_json::json;
@@ -1242,7 +1317,8 @@ mod tests {
             50,
             0,
         );
-        let (args, _path) = provider.build_codex_args().unwrap();
+        let extra_args = provider.parse_extra_cli_args().unwrap();
+        let (args, _path) = provider.build_codex_args(&extra_args);
         // The prompt placeholder "-" must always be the last argument.
         assert_eq!(args.last().unwrap(), "-");
         // extra_cli_args ("--sandbox", "full") must appear before "-".
@@ -1325,6 +1401,7 @@ not json
             &mut logs,
             "codex",
             &["exec".to_string(), "resume".to_string()],
+            None,
         );
 
         assert!(logs.iter().any(|line| line.contains("session:")));
@@ -1618,6 +1695,26 @@ not json
             .contains("conflicts with internal Gemini CLI flags"));
     }
 
+    #[tokio::test]
+    async fn extra_cli_args_unmatched_quote_returns_parse_error_before_spawn() {
+        use crate::provider::Provider;
+        let mut provider = CliProvider::new(
+            ProviderKind::OpenAI,
+            String::new(),
+            None,
+            None,
+            "--opt \"unterminated".to_string(),
+            Vec::new(),
+            30,
+            50,
+            0,
+        );
+        let err = provider.send("test").await.expect_err("should fail");
+        let text = err.to_string();
+        assert!(text.contains("Invalid extra_cli_args"));
+        assert!(!text.contains("Failed to spawn"));
+    }
+
     #[test]
     fn codex_args_always_uses_temp_output_path() {
         let provider = CliProvider::new(
@@ -1631,7 +1728,7 @@ not json
             50,
             0,
         );
-        let (args, path) = provider.build_codex_args().unwrap();
+        let (args, path) = provider.build_codex_args(&[]);
         // Should use a temp path, not any specific output_path
         assert!(path.to_string_lossy().contains("houseofagents-codex-last-"));
         assert!(args.contains(&"-o".to_string()));
@@ -1896,6 +1993,150 @@ exit 1
         assert!(provider.history.is_empty());
     }
 
+    #[test]
+    fn opencode_rejects_oversize_final_prompt() {
+        let provider = opencode_provider();
+        let prompt = "x".repeat(OPENCODE_MAX_PROMPT_ARG_BYTES + 1);
+        let err = provider
+            .preflight_opencode_prompt(&prompt)
+            .expect_err("oversize prompt should fail");
+        let text = err.to_string();
+        assert!(text.contains("too large"));
+        assert!(text.contains(&OPENCODE_MAX_PROMPT_ARG_BYTES.to_string()));
+    }
+
+    #[test]
+    fn opencode_rejects_embedded_nul_prompt() {
+        let provider = opencode_provider();
+        let err = provider
+            .preflight_opencode_prompt("before\0after")
+            .expect_err("NUL prompt should fail");
+        assert!(err.to_string().contains("embedded NUL byte"));
+    }
+
+    #[tokio::test]
+    async fn opencode_rejects_single_oversize_surviving_history_message() {
+        use crate::provider::Provider;
+        let mut provider = CliProvider::new(
+            ProviderKind::OpenCode,
+            String::new(),
+            None,
+            None,
+            String::new(),
+            Vec::new(),
+            30,
+            10,
+            OPENCODE_MAX_PROMPT_ARG_BYTES * 2,
+        );
+        provider.history.push(crate::provider::Message {
+            role: crate::provider::Role::User,
+            content: "x".repeat(OPENCODE_MAX_PROMPT_ARG_BYTES + 1),
+        });
+
+        let err = provider
+            .send("small")
+            .await
+            .expect_err("surviving oversize history should fail preflight");
+        assert!(err.to_string().contains("too large"));
+        assert_eq!(provider.history.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn opencode_max_history_bytes_zero_still_preflights_final_prompt() {
+        use crate::provider::Provider;
+        let mut provider = CliProvider::new(
+            ProviderKind::OpenCode,
+            String::new(),
+            None,
+            None,
+            String::new(),
+            Vec::new(),
+            30,
+            10,
+            0,
+        );
+        provider.history.push(crate::provider::Message {
+            role: crate::provider::Role::User,
+            content: "x".repeat(OPENCODE_MAX_PROMPT_ARG_BYTES + 1),
+        });
+
+        let err = provider
+            .send("small")
+            .await
+            .expect_err("unpruned oversize history should fail preflight");
+        assert!(err.to_string().contains("too large"));
+        assert_eq!(provider.history.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn opencode_preflight_failure_pops_current_history_message() {
+        use crate::provider::Provider;
+        let mut provider = opencode_provider();
+        provider.history.push(crate::provider::Message {
+            role: crate::provider::Role::Assistant,
+            content: "prior".into(),
+        });
+        let history_len = provider.history.len();
+
+        let err = provider
+            .send("bad\0prompt")
+            .await
+            .expect_err("NUL prompt should fail preflight");
+        assert!(err.to_string().contains("embedded NUL byte"));
+        assert_eq!(provider.history.len(), history_len);
+        assert_eq!(provider.history[0].content, "prior");
+    }
+
+    #[tokio::test]
+    async fn opencode_preflight_failure_preserves_output_path() {
+        use crate::provider::Provider;
+        let mut provider = opencode_provider();
+        let output_path = PathBuf::from("/tmp/hoa-opencode-output.md");
+        provider.set_output_path(Some(output_path.clone()));
+
+        let err = provider
+            .send("bad\0prompt")
+            .await
+            .expect_err("NUL prompt should fail preflight");
+
+        assert!(err.to_string().contains("embedded NUL byte"));
+        assert_eq!(provider.output_path.as_ref(), Some(&output_path));
+    }
+
+    #[test]
+    fn push_command_debug_redacts_opencode_prompt_arg_in_preview() {
+        let provider = opencode_provider();
+        let raw_prompt = "secret prompt text";
+        let args = vec![
+            "run".to_string(),
+            "--format".to_string(),
+            "default".to_string(),
+            raw_prompt.to_string(),
+        ];
+        let mut logs = Vec::new();
+
+        provider.push_command_debug(&mut logs, "opencode", &args, Some(3));
+
+        let text = logs.join("\n");
+        assert!(text.contains("<prompt redacted: 18 bytes, 18 chars>"));
+        assert!(!text.contains(raw_prompt));
+    }
+
+    #[test]
+    fn push_command_debug_reports_redacted_prompt_when_arg_outside_preview() {
+        let provider = opencode_provider();
+        let raw_prompt = "secret prompt text";
+        let mut args: Vec<String> = (0..19).map(|i| format!("arg{i}")).collect();
+        args.push(raw_prompt.to_string());
+        let mut logs = Vec::new();
+
+        provider.push_command_debug(&mut logs, "opencode", &args, Some(19));
+
+        let text = logs.join("\n");
+        assert!(text.contains("prompt arg: <prompt redacted: 18 bytes, 18 chars>"));
+        assert!(!text.contains(raw_prompt));
+    }
+
     #[tokio::test]
     async fn opencode_rejects_format_flag_in_extra_args() {
         use crate::provider::Provider;
@@ -1915,7 +2156,7 @@ exit 1
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("conflicts with internal OpenCode CLI flags"));
+            .contains("cannot include --format, --dir, --model, or -m"));
     }
 
     #[tokio::test]
@@ -1937,7 +2178,7 @@ exit 1
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("conflicts with internal OpenCode CLI flags"));
+            .contains("cannot include --format, --dir, --model, or -m"));
     }
 
     #[tokio::test]
@@ -1959,7 +2200,73 @@ exit 1
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("conflicts with internal OpenCode CLI flags"));
+            .contains("cannot include --format, --dir, --model, or -m"));
+    }
+
+    #[tokio::test]
+    async fn opencode_rejects_reserved_extra_arg_forms() {
+        use crate::provider::Provider;
+        for extra in [
+            "--format json",
+            "--format=json",
+            "--dir /tmp",
+            "--dir=/tmp",
+            "--model model",
+            "--model=model",
+            "-m",
+            "-m model",
+            "-m=model",
+            "-msonnet",
+            "-modeler",
+        ] {
+            let mut provider = CliProvider::new(
+                ProviderKind::OpenCode,
+                String::new(),
+                None,
+                None,
+                extra.to_string(),
+                Vec::new(),
+                30,
+                50,
+                0,
+            );
+            let err = provider
+                .send("test")
+                .await
+                .expect_err("reserved OpenCode extra arg should fail");
+            assert!(
+                err.to_string()
+                    .contains("cannot include --format, --dir, --model, or -m"),
+                "{extra} should use OpenCode reserved-arg message, got {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn opencode_allows_reserved_flag_lookalikes() {
+        for extra in [
+            "--modeline",
+            "--model-provider",
+            "--formatting",
+            "--directory",
+            "--modeler",
+        ] {
+            let provider = CliProvider::new(
+                ProviderKind::OpenCode,
+                String::new(),
+                None,
+                None,
+                extra.to_string(),
+                Vec::new(),
+                30,
+                50,
+                0,
+            );
+            let args = provider.parse_extra_cli_args().unwrap();
+            provider
+                .validate_reserved_extra_args(&args)
+                .unwrap_or_else(|e| panic!("{extra} should be allowed, got {e}"));
+        }
     }
 
     #[cfg(unix)]
@@ -2037,6 +2344,11 @@ done
         let lines: Vec<&str> = resp.content.lines().collect();
 
         assert_eq!(lines[0], "run", "first arg should be 'run'");
+        let dir_pos = lines.iter().position(|arg| *arg == "--dir").unwrap();
+        assert_eq!(
+            lines[dir_pos + 1],
+            std::env::current_dir().unwrap().display().to_string()
+        );
         assert!(lines.contains(&"--format"), "should contain --format flag");
         assert!(
             lines.contains(&"default"),

@@ -225,7 +225,7 @@ fn validate_agent_runtime_allows_anthropic_xhigh_in_cli_mode() {
 }
 
 #[test]
-fn toggle_cli_mode_rejects_opencode() {
+fn start_model_fetch_opencode_empty_key_shows_opencode_models_guidance() {
     let mut app = test_app();
     app.config.agents.push(test_agent(
         "OC",
@@ -236,12 +236,127 @@ fn toggle_cli_mode_rejects_opencode() {
     ));
     app.edit_popup.cursor = 0;
     app.edit_popup.section = crate::app::EditPopupSection::Providers;
+
+    start_model_fetch(&mut app);
+
+    assert!(app
+        .error_modal
+        .as_ref()
+        .unwrap()
+        .contains("opencode models"));
+    assert!(!app.edit_popup.model_picker_active);
+    assert!(!app.edit_popup.model_picker_loading);
+    assert!(app.edit_popup.model_picker_rx.is_none());
+}
+
+#[test]
+fn toggle_cli_mode_rejects_opencode_cli_to_api() {
+    let mut app = test_app();
+    app.config.agents.push(test_agent(
+        "OC",
+        ProviderKind::OpenCode,
+        "anthropic/claude-sonnet-4-5",
+        true,
+        None,
+    ));
+    app.edit_popup.cursor = 0;
+    app.edit_popup.section = crate::app::EditPopupSection::Providers;
+    app.info_modal = Some("stale".into());
     toggle_cli_mode(&mut app);
     assert!(
         app.error_modal.as_ref().unwrap().contains("CLI-only"),
         "should show CLI-only error, got: {:?}",
         app.error_modal
     );
+    assert!(app.info_modal.is_none());
+    assert!(app.effective_agent_config("OC").unwrap().use_cli);
+}
+
+#[test]
+fn toggle_cli_mode_enables_stale_opencode_false_config() {
+    let mut app = test_app();
+    app.config.agents.push(test_agent(
+        "OC",
+        ProviderKind::OpenCode,
+        "anthropic/claude-sonnet-4-5",
+        false,
+        None,
+    ));
+    app.edit_popup.cursor = 0;
+    app.edit_popup.section = crate::app::EditPopupSection::Providers;
+    app.cli_available.insert(ProviderKind::OpenCode, false);
+
+    toggle_cli_mode(&mut app);
+
+    assert!(app.effective_agent_config("OC").unwrap().use_cli);
+    assert!(app.session_overrides.contains_key("OC"));
+    assert!(app.error_modal.is_none());
+    assert!(app
+        .info_modal
+        .as_ref()
+        .unwrap()
+        .contains("CLI mode enabled"));
+}
+
+#[test]
+fn cycle_reasoning_opencode_does_not_write_override() {
+    let mut app = test_app();
+    app.config.agents.push(test_agent(
+        "OC",
+        ProviderKind::OpenCode,
+        "anthropic/claude-sonnet-4-5",
+        true,
+        None,
+    ));
+    app.edit_popup.cursor = 0;
+    app.edit_popup.section = crate::app::EditPopupSection::Providers;
+    app.error_modal = Some("stale".into());
+    let overrides_before = app.session_overrides.len();
+
+    cycle_reasoning(&mut app);
+
+    assert_eq!(app.session_overrides.len(), overrides_before);
+    let config = app.effective_agent_config("OC").unwrap();
+    assert!(config.reasoning_effort.is_none());
+    assert!(config.thinking_effort.is_none());
+    assert!(app.error_modal.is_none());
+    assert!(app.info_modal.as_ref().unwrap().contains("delegated"));
+}
+
+#[test]
+fn start_pipeline_execution_rejects_opencode_api_mode_agent() {
+    use crate::execution::pipeline::PipelineBlock;
+
+    let mut app = test_app();
+    app.config.agents.push(test_agent(
+        "OC",
+        ProviderKind::OpenCode,
+        "anthropic/claude-sonnet-4-5",
+        false,
+        None,
+    ));
+    app.cli_available.insert(ProviderKind::OpenCode, true);
+    app.pipeline.pipeline_def.initial_prompt = "test".into();
+    app.pipeline.pipeline_def.blocks = vec![PipelineBlock {
+        id: 1,
+        name: "Worker".into(),
+        agents: vec!["OC".into()],
+        prompt: "work".into(),
+        profiles: vec![],
+        session_id: None,
+        position: (0, 0),
+        replicas: 1,
+        sub_pipeline: None,
+    }];
+
+    start_pipeline_execution(&mut app);
+
+    assert!(app
+        .error_modal
+        .as_ref()
+        .unwrap()
+        .contains("OpenCode is CLI-only"));
+    assert!(!app.running.is_running);
 }
 
 #[test]

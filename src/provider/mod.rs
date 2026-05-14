@@ -173,6 +173,14 @@ impl ProviderKind {
             kind.config_key() == selector || kind.display_name().to_lowercase() == selector
         })
     }
+
+    pub fn is_cli_only(self) -> bool {
+        matches!(self, ProviderKind::OpenCode)
+    }
+}
+
+pub(crate) fn opencode_models_guidance() -> &'static str {
+    "OpenCode is CLI-only. Run `opencode models` to view or configure models, then set the model manually."
 }
 
 impl fmt::Display for ProviderKind {
@@ -280,7 +288,8 @@ pub fn create_provider(
     cli_timeout_seconds: u64,
     add_dirs: Vec<String>,
 ) -> Box<dyn Provider> {
-    if config.use_cli {
+    let use_cli = config.use_cli || kind.is_cli_only();
+    if use_cli {
         return Box::new(cli::CliProvider::new(
             kind,
             config.model.clone(),
@@ -296,9 +305,7 @@ pub fn create_provider(
     let effort = match kind {
         ProviderKind::Anthropic | ProviderKind::Gemini => config.thinking_effort.clone(),
         ProviderKind::OpenAI => config.reasoning_effort.clone(),
-        // OpenCode is CLI-only; this branch is unreachable but we handle it
-        // gracefully by falling back to thinking_effort.
-        ProviderKind::OpenCode => config.thinking_effort.clone(),
+        ProviderKind::OpenCode => unreachable!("OpenCode is CLI-only and must use CliProvider"),
     };
     let base = HttpProviderBase {
         api_key: config.api_key.clone(),
@@ -314,10 +321,7 @@ pub fn create_provider(
         ProviderKind::Anthropic => Box::new(anthropic::AnthropicProvider::new(base)),
         ProviderKind::OpenAI => Box::new(openai::OpenAIProvider::new(base)),
         ProviderKind::Gemini => Box::new(gemini::GeminiProvider::new(base)),
-        // OpenCode is CLI-only; if we somehow reach here, fall back to Anthropic
-        // as a safe default. In practice create_provider always routes OpenCode
-        // through the CliProvider branch above.
-        ProviderKind::OpenCode => Box::new(anthropic::AnthropicProvider::new(base)),
+        ProviderKind::OpenCode => unreachable!("OpenCode is CLI-only and must use CliProvider"),
     }
 }
 
@@ -359,6 +363,10 @@ pub async fn list_models(
     api_key: &str,
     client: &reqwest::Client,
 ) -> Result<Vec<String>, String> {
+    if kind.is_cli_only() {
+        return Err(opencode_models_guidance().into());
+    }
+
     if api_key.is_empty() {
         return Err(
             "Add API key to fetch model list. You can still type any model manually.".into(),
@@ -369,9 +377,7 @@ pub async fn list_models(
         ProviderKind::Anthropic => anthropic::list_models(api_key, client).await,
         ProviderKind::OpenAI => openai::list_models(api_key, client).await,
         ProviderKind::Gemini => gemini::list_models(api_key, client).await,
-        ProviderKind::OpenCode => {
-            Err("OpenCode is CLI-only. Set model via config (e.g. \"anthropic/claude-sonnet-4-5\"). Run `opencode models` to list available models.".into())
-        }
+        ProviderKind::OpenCode => unreachable!("OpenCode is CLI-only and must not fetch models"),
     }
 }
 
@@ -415,6 +421,14 @@ mod tests {
         assert!(all.contains(&ProviderKind::OpenAI));
         assert!(all.contains(&ProviderKind::Gemini));
         assert!(all.contains(&ProviderKind::OpenCode));
+    }
+
+    #[test]
+    fn provider_kind_is_cli_only() {
+        assert!(!ProviderKind::Anthropic.is_cli_only());
+        assert!(!ProviderKind::OpenAI.is_cli_only());
+        assert!(!ProviderKind::Gemini.is_cli_only());
+        assert!(ProviderKind::OpenCode.is_cli_only());
     }
 
     #[test]
@@ -486,6 +500,31 @@ mod tests {
     fn validate_effort_config_allows_anthropic_xhigh_in_cli_mode() {
         validate_effort_config(ProviderKind::Anthropic, true, None, Some("xhigh"))
             .expect("cli mode should be allowed through to the provider");
+    }
+
+    #[test]
+    fn create_provider_opencode_false_use_cli_returns_opencode_provider() {
+        let config = cfg(false);
+        let provider = create_provider(
+            ProviderKind::OpenCode,
+            &config,
+            reqwest::Client::new(),
+            4096,
+            50,
+            0,
+            30,
+            Vec::new(),
+        );
+        assert_eq!(provider.kind(), ProviderKind::OpenCode);
+    }
+
+    #[tokio::test]
+    async fn list_models_opencode_empty_key_mentions_opencode_models() {
+        let err = list_models(ProviderKind::OpenCode, "", &reqwest::Client::new())
+            .await
+            .expect_err("OpenCode does not support HTTP model listing");
+        assert!(err.contains("opencode models"));
+        assert!(!err.contains("Add API key"));
     }
 
     #[test]

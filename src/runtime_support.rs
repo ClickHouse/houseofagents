@@ -75,6 +75,12 @@ pub(crate) fn validate_agent_runtime(
     agent_label: &str,
     agent_config: &AgentConfig,
 ) -> Result<(), String> {
+    if agent_config.provider.is_cli_only() && !agent_config.use_cli {
+        return Err(format!(
+            "{agent_label}: OpenCode is CLI-only; set use_cli = true and configure the opencode CLI"
+        ));
+    }
+
     if agent_config.use_cli
         && !cli_available
             .get(&agent_config.provider)
@@ -145,7 +151,7 @@ pub(crate) fn build_pipeline_agent_configs(
                 (
                     agent_cfg.provider,
                     agent_cfg.to_provider_config(),
-                    agent_cfg.use_cli,
+                    agent_cfg.use_cli || agent_cfg.provider.is_cli_only(),
                 ),
             );
         }
@@ -212,6 +218,78 @@ mod tests {
         cli_available.insert(ProviderKind::Anthropic, true);
         let overrides = compute_session_overrides(&agents, &cli_available);
         assert!(overrides.get("Claude").unwrap().use_cli);
+    }
+
+    #[test]
+    fn opencode_api_mode_is_rejected_by_runtime_validation() {
+        let cli_available = HashMap::new();
+        let agent = AgentConfig {
+            name: "OC".into(),
+            provider: ProviderKind::OpenCode,
+            api_key: "ignored".into(),
+            model: "anthropic/claude-sonnet-4-5".into(),
+            reasoning_effort: None,
+            thinking_effort: None,
+            use_cli: false,
+            extra_cli_args: String::new(),
+        };
+
+        let err = validate_agent_runtime(&cli_available, &agent.name, &agent)
+            .expect_err("OpenCode API mode must be rejected");
+        assert!(err.contains("OpenCode"));
+        assert!(err.contains("CLI-only"));
+        assert!(err.contains("use_cli = true"));
+        assert!(!err.contains("API key is missing"));
+    }
+
+    #[test]
+    fn opencode_cli_mode_requires_cli_available() {
+        let cli_available = HashMap::new();
+        let agent = AgentConfig {
+            name: "OC".into(),
+            provider: ProviderKind::OpenCode,
+            api_key: String::new(),
+            model: "anthropic/claude-sonnet-4-5".into(),
+            reasoning_effort: None,
+            thinking_effort: None,
+            use_cli: true,
+            extra_cli_args: String::new(),
+        };
+
+        let err = validate_agent_runtime(&cli_available, &agent.name, &agent)
+            .expect_err("missing OpenCode CLI should be rejected");
+        assert!(err.contains("OpenCode CLI is not installed"));
+    }
+
+    #[test]
+    fn build_pipeline_agent_configs_uses_effective_cli_for_cli_only_provider() {
+        let agents = vec![AgentConfig {
+            name: "OC".into(),
+            provider: ProviderKind::OpenCode,
+            api_key: "ignored".into(),
+            model: "anthropic/claude-sonnet-4-5".into(),
+            reasoning_effort: None,
+            thinking_effort: None,
+            use_cli: false,
+            extra_cli_args: String::new(),
+        }];
+        let mut pipeline_def = crate::execution::pipeline::PipelineDefinition::default();
+        pipeline_def
+            .blocks
+            .push(crate::execution::pipeline::PipelineBlock {
+                id: 1,
+                name: "Worker".into(),
+                agents: vec!["OC".into()],
+                prompt: String::new(),
+                profiles: vec![],
+                session_id: None,
+                position: (0, 0),
+                replicas: 1,
+                sub_pipeline: None,
+            });
+
+        let configs = build_pipeline_agent_configs(&pipeline_def, &agents, &HashMap::new());
+        assert!(configs.get("OC").unwrap().2);
     }
 
     #[test]

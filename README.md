@@ -294,7 +294,9 @@ extra_cli_args = ""
 
 Anthropic `thinking_effort = "xhigh"` and `thinking_effort = "max"` are rejected in API mode. In CLI mode, House of Agents passes them through and lets the `claude` CLI report any model-specific incompatibility.
 
-OpenCode is a CLI-only provider — it has no API mode. The `model` field uses `provider/model` format (e.g. `anthropic/claude-sonnet-4-5`, `openai/gpt-4o`). Run `opencode models` to list available models. The `opencode` binary must be installed and authenticated. OpenCode agents always pass `--dangerously-skip-permissions` for non-interactive execution.
+OpenCode is a CLI-only provider; it has no API mode. Loaded OpenCode agents are normalized to `use_cli = true`, and runtime validation still rejects any invalid in-memory OpenCode API-mode state. The `model` field uses `provider/model` format (e.g. `anthropic/claude-sonnet-4-5`, `openai/gpt-4o`). Run `opencode models` to view or configure models, then set the model manually. OpenCode effort is delegated to the OpenCode/model configuration. The `opencode` binary must be installed and authenticated. OpenCode agents always pass `--dangerously-skip-permissions` for non-interactive execution.
+
+OpenCode `extra_cli_args` cannot include `--format`, `--dir`, `--model`, or `-m` forms because House of Agents owns those flags. OpenCode prompts are passed to `opencode run` as a positional argument and preflighted for embedded NUL bytes and a conservative byte limit before spawn. The default `max_history_bytes` can still allow a final OpenCode argv prompt above this conservative cap once prompt wrappers are added. If a prompt-limit error appears, reduce prompt/history size or lower `max_history_bytes`.
 
 ## Keyboard Shortcuts
 
@@ -338,7 +340,7 @@ OpenCode is a CLI-only provider — it has no API mode. The `model` field uses `
 | `a` | Edit API key |
 | `m` | Edit model |
 | `l` | Open model picker |
-| `t` | Cycle thinking / reasoning effort |
+| `t` | Cycle thinking / reasoning effort where supported |
 | `x` | Edit extra CLI args |
 | `d` | Toggle diagnostic agent |
 | `o` | Edit output directory |

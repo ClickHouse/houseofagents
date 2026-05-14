@@ -3533,6 +3533,15 @@ pub(super) fn start_model_fetch(app: &mut App) {
         Some(k) => k,
         None => return,
     };
+    if kind.is_cli_only() {
+        app.edit_popup.model_picker_active = false;
+        app.edit_popup.model_picker_loading = false;
+        app.edit_popup.model_picker_rx = None;
+        app.info_modal = None;
+        app.error_modal = Some(provider::opencode_models_guidance().into());
+        return;
+    }
+
     let api_key = match effective_section_config(app) {
         Some(c) if !c.api_key.is_empty() => c.api_key,
         _ => {
@@ -3714,6 +3723,13 @@ pub(super) fn cycle_reasoning(app: &mut App) {
         Some(k) => k,
         None => return,
     };
+    if kind.is_cli_only() {
+        app.error_modal = None;
+        app.info_modal =
+            Some("OpenCode effort is delegated to the opencode model configuration".into());
+        return;
+    }
+
     let mut config = effective_section_config(app).unwrap_or_else(empty_provider_config);
 
     match kind {
@@ -3744,10 +3760,7 @@ pub(super) fn cycle_reasoning(app: &mut App) {
                 _ => None,
             };
         }
-        ProviderKind::OpenCode => {
-            // OpenCode delegates to the underlying model; effort is not
-            // directly configurable via the CLI, so this is a no-op.
-        }
+        ProviderKind::OpenCode => unreachable!("OpenCode returned before effort cycling"),
     }
     set_section_config_override(app, config);
 }
@@ -3769,15 +3782,29 @@ pub(super) fn toggle_cli_mode(app: &mut App) {
         Some(k) => k,
         None => return,
     };
-
-    // OpenCode is CLI-only — toggling to API mode is not supported.
-    if kind == ProviderKind::OpenCode {
-        app.error_modal = Some("OpenCode is CLI-only and cannot switch to API mode".into());
-        return;
-    }
-
     let cli_installed = app.cli_available.get(&kind).copied().unwrap_or(false);
     let mut config = effective_section_config(app).unwrap_or_else(empty_provider_config);
+
+    if kind.is_cli_only() {
+        if config.use_cli {
+            app.info_modal = None;
+            app.error_modal = Some("OpenCode is CLI-only and cannot switch to API mode".into());
+            return;
+        }
+
+        config.use_cli = true;
+        set_section_config_override(app, config);
+        app.error_modal = None;
+        if cli_installed {
+            app.info_modal = Some("OpenCode is CLI-only; CLI mode enabled".into());
+        } else {
+            app.info_modal = Some(
+                "OpenCode is CLI-only; CLI mode enabled. Install the opencode CLI to run this agent."
+                    .into(),
+            );
+        }
+        return;
+    }
 
     if !config.use_cli && !cli_installed {
         app.error_modal = Some(format!("{} CLI not installed", kind.display_name()));
