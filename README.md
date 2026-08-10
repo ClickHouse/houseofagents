@@ -125,7 +125,33 @@ Headless mode (noninteractive):
       --memory                    Enable cross-run memory
       --output-dir <DIR>          Override output directory
       --print-result              Print finalization/consolidation/sub-pipeline output to stdout
+      --workdir <PATH>            Working directory for CLI agents (spawn cwd + allowed dir)
+      --max-calls <N>             Hard budget: max agent invocations per pipeline run
+                                  (code blocks are free); exceeding it cancels the run
+      --allow-edits               Let agents create/edit files unattended (injects per-provider
+                                  permission flags, e.g. claude --dangerously-skip-permissions,
+                                  codex --skip-git-repo-check -s workspace-write)
 ```
+
+### Editing code with CLI agents
+
+By default CLI agents are told not to write files (they return their answer as
+text / to their output file). To let a pipeline actually create and edit code:
+
+```bash
+houseofagents --pipeline fix.toml --prompt "fix the login bug" \
+  --workdir /path/to/repo --allow-edits --output-format json
+```
+
+`--workdir` sets the spawned CLI's working directory and marks it as an allowed
+(writable) directory; `--allow-edits` injects each provider's unattended-edit
+permission flags and relaxes the "do not write files" instruction.
+
+Plans are always auto-approved: with `--allow-edits`, claude runs with bypass
+permissions (nothing prompts); without it, `ExitPlanMode` is still allowed, so a
+planning step's plan is approved automatically instead of stalling headlessly. **`--allow-edits`
+grants agents unattended file-write power in the working directory** — scope it to a
+throwaway checkout or a git worktree (the Browser UI does this automatically per workflow).
 
 ## Noninteractive (Headless) Mode
 
@@ -190,6 +216,72 @@ houseofagents --pipeline my_pipeline.toml --print-result
 - Resume is not supported in headless mode (planned for a future version).
 - Prompt is required for relay/swarm (`--prompt` or `--prompt-file`); for pipeline, the pipeline TOML's `initial_prompt` is used if `--prompt` is not given.
 - `--consolidate` is not supported for single-run relay (relay produces a single output chain with no branches to merge). Batch relay consolidation works normally.
+
+## Browser UI (optional)
+
+A browser **DAG workflow builder** lives in `web/` — build arbitrary agent pipelines visually, run many tasks/workflows in parallel, and (for code-editing workflows) review the resulting diffs. It's a thin bridge over headless mode.
+
+```bash
+cargo build --release          # the UI shells out to the built binary
+python3 web/serve.py           # then open http://localhost:8765
+```
+
+The UI ships a clean light theme (white, near-black ink, yellow primary actions) with a dark theme behind the theme toggle in the app bar (also `?theme=dark`); the preference persists.
+
+**Layout — three scoped zones:**
+- **App bar:** app name · a **Build / Runs / Schedules** view switcher · **⚙** for global settings (parallelism, binary path).
+- **Workflow bar:** current-workflow selector · **+ New** / **+ Example** · **🗑 Delete** · one primary **▶ Run** · **⏱ Schedule…** · **💾 Save** / **📂 Open**. Everything here acts on the *current* workflow.
+- **Build pane:** a simple form — workflow settings, an ordered **step list**, and an optional **loop**.
+
+**What you can build:**
+- **A free canvas.** The Build pane is a drag-anywhere canvas: each step is a card you place freely; **drag from a step's ● port onto another step to wire them** (or 🔗 then click). An arrow = "runs after and receives the output"; **click any wire to remove it**; **Esc** cancels connecting, **Delete** removes the selected step, **🧹 Tidy** auto-arranges by execution order. Anything not connected runs in parallel; several arrows in = fan-in; several out = fan-out; **wiring backward onto something upstream creates a loop** (dashed). Click a step to edit its prompt/agent/model/contract/gate in the editor below — where the same wiring is also editable as "Depends on" checkboxes (cycle-safe by construction). Execution order is derived purely from the arrows; canvas position is just layout.
+- **Multiple loops.** Any number of loop-backs, each with its own max passes and break agent/condition **or** deterministic break command. Create them by wiring backward on the canvas or with **+ Add loop**; they're listed with their settings under the canvas. (Loops must not overlap each other, and can't combine with human gates.)
+- **JIRA-style run board.** Each run card in the Runs view shows a live board — **⛔ Blocked** (waiting on unfinished dependencies, listed by name) / **○ To do** (ready) / **⏳ In progress** (live elapsed time) / **✔ Done** (duration; click to read that step's output) / **✖ Failed**, plus a **⏸ Waiting for you** column while a human gate is pending. Loop passes are labeled; cards move as the graph executes — and while a run is live, the Build canvas glows the same states onto its nodes.
+- **Runs are server-owned and reload-proof.** Launching a run returns immediately; the bridge executes it in the background and buffers its events. Reload the page, open another tab, close the browser entirely — **the fleet keeps running**, and reopening the UI reattaches to every live run with its full board, log, and pending gate rebuilt from the event history. The only thing that stops a run is **⏹ Stop**, which kills the engine and all its spawned agent CLIs (process-group kill) within seconds.
+- **📁 Run history from disk.** The Runs view lists earlier run directories (with ok/failed status) — click one to read its outputs. The permanent record survives reloads and restarts.
+- **Agents come from your config.** The UI loads agent names from `config.toml` via the bridge (`/agents`) — no more editing the HTML to match your setup. **⧉** duplicates a workflow; **⌘Enter** runs the current one.
+- **Never lose work.** Workflows persist in the browser (reload-safe) with **⌘Z / ⌘⇧Z undo/redo** on canvas edits. **▶ Run preflights** the workflow first (empty prompts, invalid contracts, gate+loop conflicts, allow-edits without a workdir) and shows the problem instead of burning tokens. A live **"≈ N agent calls/task worst-case"** estimate sits next to the optimize buttons.
+- **📚 Templates.** One-click starting graphs — Research desk (the article's diamond with contracts + skeptic verify), Review ↔ Fix loop, Bug hunt (loop-until-dry with adversarial verify), Launch kit (parallel research → ⏸ human-gated positioning doc → parallel copywriting).
+- Human gates pause after the gated step's whole stage; downstream steps that depend on pre-gate steps receive their outputs (including your edited approval) automatically.
+- **Per-step "Code step" — reduce with plain code, zero tokens.** Tick "Code step" and the prompt becomes a **shell command**: its dependencies' outputs are piped to stdin verbatim and stdout becomes the step's output (e.g. `sort -u`, `jq`, `python3 dedupe.py`). The diamond's reduce stage without burning a model call; output contracts still apply if set.
+- **Max agent calls (hard budget).** A per-workflow cap on total agent invocations (code steps are free). Exceeding it **cancels the run** — the runaway-spend stop. Also available headless via `--max-calls N`.
+- **Per-step model & effort.** Each step can override the model (free-text with suggestions, e.g. `claude-fable-5` to plan, `claude-opus-4-8` to implement, `claude-sonnet-5` for a small step) and the reasoning/thinking **effort** (`low`/`medium`/`high`/`xhigh`/`max`). Blank = inherit the agent's `config.toml` model/effort. (Anthropic `xhigh`/`max` require CLI mode; in API mode the override falls back to the configured effort.)
+- **Per-step "Start fresh".** A step can ignore the previous steps' output — it still runs after them, but its message is built like a root (the task + its own prompt + working-directory access), not the upstream text. Use it for an unbiased review step that re-reads the actual code with fresh eyes.
+- **Per-step "Run as command (raw)".** A step can send its prompt to the CLI **verbatim** so it invokes a custom slash command (e.g. `/goal`); the previous step's output is appended as the command's argument. No House of Agents wrapping is added, so the command is recognized. (Works with `claude`; codex is best-effort — depends on the CLI expanding custom commands non-interactively.)
+- **✦ Optimize steps.** One agent call explores the working directory, **rewrites every step's prompt** to be precise and codebase-grounded, and **proposes an output contract per step** (where a fixed shape helps the next step consume it). Results land in the form for review, with ↩ Undo. Complements ✦ Rewrite task (same for the task text); every step also has its own ✦ for a single-step rewrite.
+- **✦ Suggest contracts.** One agent call reasons over the **whole graph's wiring** and proposes a consistent **input + output contract for every step** — each step's input matches its dependencies' outputs along every edge. Output contracts are enforced by the engine (reject & retry); **input contracts are folded into the step's prompt at run time** so the agent knows exactly what shape arrives (saved TOMLs keep them as a separate `input_schema` field). Nested descriptor keys (`"bugs[].file"`) document item shapes for the model; only top-level fields are enforced. Both contracts are editable per step, with ↩ Undo.
+- **Per-step "Human gate" — you stay the last yes.** Tick "Human gate" on a step and the run **pauses after it**: the Runs card shows that step's output in an editable box, and nothing downstream runs until you click **✔ Approve & continue** (your edits become the hand-off the next step receives) or **✖ Discard run**. E.g. *research → positioning doc → ⏸ gate → write the launch assets*. Gated workflows run one task at a time, can't contain a loop, and one git worktree spans all segments so approved edit runs still produce a single diff. Pending approvals persist to `gates.json` in the config dir, so they survive a `serve.py` restart (a gate whose worktree has been deleted is dropped).
+- **Per-step output contract.** Give a step a JSON contract — a flat object of `"field": "type"` pairs (`string`/`number`/`boolean`/`array`/`object`/`any`, `"?"` suffix = optional, e.g. `{"price": "number", "plan": "string", "notes": "string?"}`). The engine **enforces** it: the step must return ONLY a JSON object matching the contract; free text or wrong types are **rejected and retried** (up to 2 retries, then the step errors). This is what makes steps mechanically wire-able — the next step reads structured data, not prose. (Not available on raw command steps.)
+
+**Runs dashboard.** Each **▶ Run** launches an independent run that streams in the background — you can switch to **Build**, create/run another workflow, and both run **concurrently**. The **Runs** view lists every run with a status badge, a **live per-step timeline** (○ pending → ⏳ running → ✔ done / ✖ error, with loop passes), a log, code diffs, and — after completion — the **run directory** plus a **"view step outputs"** button that shows each step's output. A completed run stays completed; clicking Run again starts a new run (never re-executes a finished one). Runs are tracked for the browser session; the on-disk run directories are the permanent record.
+- **Optional loop.** Tick **Enable loop** and choose *"after step X, loop back to step Y"*, a **break agent**, a break condition, and a max-passes cap — e.g. Review ↔ Fix until the reviewer says APPROVED. Or set a **break command** instead — a deterministic shell gate (exit 0 = stop, e.g. `cargo test`) that runs in the working directory after each pass and replaces the agent judge, so the loop ends on a machine-checked condition rather than a model's opinion.
+- **Multiple workflows** — switch via the selector; **▶ Run** executes the **current** workflow, its tasks running under the global parallelism cap (⚙), with live per-workflow status in the **Runs** view and **in-browser toasts** as each agent starts/finishes/errors.
+- **Tasks** — each task is one parallel run of the workflow, injected into step 1 as `{prompt}` + task text. Separate multiple tasks with a line containing only `---`, so a **single big multi-line prompt is one task**. Leave tasks empty to run once using only the step prompts (e.g. a one-step analysis job).
+- **✦ Rewrite for LLM** — write the task in plain English, click the button, and an agent (the first step's agent) **explores the working directory** and rewrites the task into a precise, codebase-grounded prompt: real paths, real module names, clear success criteria — intent and scope preserved. The rewrite lands back in the task box for you to **review/edit before running** (↩ Undo restores your original). Multi-task inputs keep their `---` separators. The rewrite also returns an **execution plan** — best agent for the task, effort, model, and attack mode (`/goal` iterate-until-done, `/loop` sweep, plan-first, or "this wants a multi-step workflow"), plus a persona lens when one genuinely changes the output — auto-applied to single-step workflows (with Undo) and shown as a recommendation otherwise. Per-step ✦ and ✦ Optimize steps recommend and apply agent/effort per step the same way.
+- **Save / Open** — persists workflows as `pipeline.toml` in the engine's `pipelines_dir`, shared with the terminal builder. (The step list maps to a linear pipeline of blocks + connections + an optional loop.)
+- **Cross-run memory** — toggle per workflow; passes the engine's `--memory` flag so agents recall lessons extracted from previous runs and save new ones (the write-back step that makes repeated workflows improve over time).
+- **Allow edits + auto worktrees** — toggle "Allow edits" per workflow. When the working directory is a git repo, **the whole workflow runs in one throwaway git worktree/branch** (its tasks share it and see each other's edits) so parallel workflows never collide; the committed diff streams back per workflow in the Runs view.
+
+### Scheduled workflows (generic gate)
+
+Run a workflow **repeatedly on a schedule until a condition holds** — fully generic, no built-in integrations. Click **⏱ Schedule…** on a workflow and set an interval, a max-runs cap, and an optional **gate command** (any shell command). Each tick the bridge runs the gate: **exit 0 ⇒ done (stop)**, non-zero ⇒ run the workflow, then wait for the next tick. The tool only ever checks the exit code — GitHub/CI/tests/lint are just gate commands *you* type, e.g.:
+
+```
+gate = gh pr checks 123      # stop when the PR's checks pass
+gate = make test             # stop when tests pass
+gate = test -f done.flag     # stop when a file appears
+```
+
+The gate can also be **an agent instead of a command**: pick "Agent judges" in the schedule form, choose an agent, and write the condition in plain language (e.g. *"the PR's CI is green and there are no unresolved review comments"*). Each tick that agent evaluates the condition in the working directory and replies DONE/CONTINUE — the fuzzy counterpart to the deterministic shell gate (mirrors the loop's break agent).
+
+The **Schedules** view (app-bar switcher) shows each schedule's live state (`running` / `converged` / `capped` / `stopped`), run count, last gate exit code, and log, with a **Stop** button. Each tick launches as a normal run — it appears live in the **Runs** view (named `⏱ <schedule>`) with the full pipeline strip, step results, and its own Stop. Scheduled runs edit the working directory directly (not a worktree) so an agent step can commit/push and let the gate converge. Schedules are persisted to `schedules.json` in the config dir — restarting `serve.py` restores them, and ones that were still running resume ticking.
+
+**How it maps:** the bridge (`web/serve.py`, Python stdlib only — no pip installs) generates one `pipeline.toml` per workflow (blocks + connections + loop_connections), creates a per-workflow git worktree when editing, then spawns `houseofagents --pipeline … [--prompt "<task>"] [--workdir …] [--allow-edits] --output-format json --print-result` and streams JSON events to the browser as live per-task cards.
+
+**Notes:**
+- Edit the agent list in `web/index.html` (`const AGENTS`) to match the agent names in your `config.toml`.
+- Binary auto-detected at `target/release` then `target/debug`; override with `HOA_BIN=/path/to/houseofagents` or the "Binary" field.
+- The canvas authors blocks + connections + loops + scatter. Sub-pipelines and the finalization DAG are not yet drawable in the browser (the engine still supports them via saved TOML).
 
 ## Configuration
 
@@ -539,6 +631,48 @@ break_condition = "Stop when the output is stable and no new improvements are su
 ```
 
 `count` is the number of additional passes beyond the initial run. Each block in the sub-DAG runs `count + 1` times total. Loop wires are drawn as double-line in yellow on the canvas. Optionally set `break_agent` and `break_condition` to enable early termination — the agent evaluates outputs after each pass and can stop the loop before reaching `count`.
+
+Alternatively set `break_command` — a **deterministic** break gate. After each pass the shell command runs (in `--workdir` if given, else the current directory); **exit 0 means the condition is met and the loop stops**. Prefer it over the agent judge whenever the goal is machine-checkable — the model never gets to grade its own homework:
+
+```toml
+[[loop_connections]]
+from = 2
+to = 1
+count = 5
+break_command = "cargo test"   # loop Fix ↔ Review until the tests actually pass
+```
+
+`break_command` and `break_agent` are mutually exclusive. The command is best-effort like the agent evaluator: spawn failure or a 300s timeout counts as CONTINUE.
+
+### Code (reduce) blocks
+
+A block can run a **shell command instead of an agent** — the article's "reduce with plain code, no model, no tokens" node:
+
+```toml
+[[blocks]]
+id = 3
+name = "Dedupe findings"
+command = "sort -u"        # upstream outputs piped to stdin; stdout = block output
+position = [2, 0]
+```
+
+Code blocks take their dependencies' outputs verbatim on stdin (the initial prompt if they're roots), run in `--workdir` (else the current directory, 600s timeout), and their stdout feeds downstream blocks like any agent output. `schema` is validated once (no retry — code is deterministic). They cost zero agent calls, so they're exempt from `--max-calls`. Mutually exclusive with `agents`, `raw`, and `sub_pipeline`.
+
+### Block output contracts
+
+Any (non-raw) block can declare an enforced output contract in its TOML:
+
+```toml
+[[blocks]]
+id = 2
+name = "Research pricing"
+agents = ["Claude"]
+prompt = "Research this competitor's current pricing."
+position = [1, 0]
+schema = '{"price": "number", "plan": "string", "source": "string", "date": "string", "notes": "string?"}'
+```
+
+The contract is a flat JSON object mapping field names to types (`string`, `number`, `boolean`, `array`, `object`, `any`; a `"?"` suffix marks a field optional; extra fields are allowed). The block's prompt is augmented with the contract, and after each response the engine validates the output: free text, invalid JSON, missing required fields, or wrong types are **rejected** — the same agent (with its session context) is told why and asked to retry, up to 2 retries, after which the block fails. Downstream blocks receive the validated JSON, so they can consume it without a human in the middle.
 
 ### Profiles
 
