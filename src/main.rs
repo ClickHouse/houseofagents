@@ -119,6 +119,20 @@ struct Cli {
     /// Print finalization, consolidation, or sub-pipeline output to stdout after completion
     #[arg(long)]
     print_result: bool,
+
+    /// Working directory for CLI agents (spawn cwd + allowed dir); default: current dir
+    #[arg(long)]
+    workdir: Option<String>,
+
+    /// Allow agents to create/edit files unattended (injects per-provider permission
+    /// flags, e.g. claude --dangerously-skip-permissions, codex -s workspace-write)
+    #[arg(long)]
+    allow_edits: bool,
+
+    /// Hard budget: maximum agent invocations per pipeline run (code blocks are
+    /// free). Exceeding it cancels the run.
+    #[arg(long)]
+    max_calls: Option<u32>,
 }
 
 impl Cli {
@@ -141,6 +155,9 @@ impl Cli {
             || !matches!(self.output_format, CliOutputFormat::Text)
             || self.mode.is_some()
             || self.print_result
+            || self.workdir.is_some()
+            || self.allow_edits
+            || self.max_calls.is_some()
     }
 }
 
@@ -228,6 +245,9 @@ fn cli_to_headless_args(cli: &Cli) -> Result<headless::HeadlessArgs, String> {
         output_format,
         quiet: cli.quiet,
         print_result: cli.print_result,
+        workdir: cli.workdir.as_ref().map(std::path::PathBuf::from),
+        allow_edits: cli.allow_edits,
+        max_calls: cli.max_calls,
     })
 }
 

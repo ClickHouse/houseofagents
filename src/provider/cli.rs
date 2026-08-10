@@ -55,6 +55,9 @@ pub struct CliProvider {
     history: Vec<Message>,
     live_log_tx: Option<mpsc::UnboundedSender<String>>,
     output_path: Option<PathBuf>,
+    workdir: Option<PathBuf>,
+    allow_edits: bool,
+    raw: bool,
     #[cfg(test)]
     pub(crate) test_bin_path: Option<String>,
 }
@@ -90,6 +93,9 @@ impl CliProvider {
             history: Vec::new(),
             live_log_tx: None,
             output_path: None,
+            workdir: None,
+            allow_edits: false,
+            raw: false,
             #[cfg(test)]
             test_bin_path: None,
         }
@@ -212,11 +218,29 @@ impl CliProvider {
         Ok(())
     }
 
+    /// The working directory to run the CLI in: an explicit `--workdir` if set,
+    /// otherwise the inherited process cwd.
+    fn effective_cwd(&self) -> Option<PathBuf> {
+        self.workdir
+            .clone()
+            .or_else(|| std::env::current_dir().ok())
+    }
+
     fn build_codex_args(&self, extra_args: &[String]) -> (Vec<String>, PathBuf) {
         let mut args = vec!["exec".to_string()];
-        if let Ok(cwd) = std::env::current_dir() {
+        if let Some(cwd) = self.effective_cwd() {
             args.push("-C".to_string());
             args.push(cwd.display().to_string());
+        }
+        // Headless runs can never answer codex's interactive trust prompt, so
+        // the repo check must always be skipped; write access stays governed
+        // by the sandbox flag below (read-only unless edits are allowed).
+        args.push("--skip-git-repo-check".to_string());
+        if self.allow_edits {
+            // Let Codex write within the workspace unattended. Isolation is
+            // provided upstream (per-task worktree).
+            args.push("-s".to_string());
+            args.push("workspace-write".to_string());
         }
         for dir in &self.add_dirs {
             args.push("--add-dir".to_string());
@@ -684,6 +708,23 @@ impl Provider for CliProvider {
         self.output_path = path;
     }
 
+    fn set_command_mode(&mut self, raw: bool) {
+        self.raw = raw;
+    }
+
+    fn set_edit_context(&mut self, workdir: Option<PathBuf>, allow_edits: bool) {
+        // The working directory must also be an allowed dir so Claude/Codex are
+        // permitted to edit files there, not just read them.
+        if let Some(ref dir) = workdir {
+            let dir_str = dir.display().to_string();
+            if !self.add_dirs.contains(&dir_str) {
+                self.add_dirs.push(dir_str);
+            }
+        }
+        self.workdir = workdir;
+        self.allow_edits = allow_edits;
+    }
+
     fn send(&mut self, message: &str) -> SendFuture<'_> {
         let message = message.to_string();
         Box::pin(async move {
@@ -703,7 +744,13 @@ impl Provider for CliProvider {
                 });
             }
 
-            let output_path = self.output_path.take();
+            // Raw/command mode: no output file (capture stdout), send verbatim.
+            let output_path = if self.raw {
+                self.output_path = None;
+                None
+            } else {
+                self.output_path.take()
+            };
             let mut debug_logs: Vec<String> = Vec::new();
             self.history.push(Message {
                 role: Role::User,
@@ -711,7 +758,7 @@ impl Provider for CliProvider {
             });
             prune_history(&mut self.history, self.max_history_messages);
             prune_history_bytes(&mut self.history, self.max_history_bytes);
-            let mut prompt = if self.uses_native_session() {
+            let mut prompt = if self.raw || self.uses_native_session() {
                 message.to_string()
             } else {
                 self.build_prompt_from_history()
@@ -722,6 +769,8 @@ impl Provider for CliProvider {
                 || self.kind == ProviderKind::OpenCode)
                 && output_path.is_none()
                 && !self.session_started
+                && !self.allow_edits
+                && !self.raw
             {
                 prompt = format!(
                 "IMPORTANT: Do NOT write any files. Return everything in your output.\n\n{prompt}"
@@ -733,10 +782,17 @@ impl Provider for CliProvider {
                 || self.kind == ProviderKind::OpenCode
             {
                 if let Some(ref path) = output_path {
-                    prompt = format!(
-                        "IMPORTANT: Write your complete final response ONLY to the file: {}. Do not create any other files.\n\n{prompt}",
-                        path.display()
-                    );
+                    prompt = if self.allow_edits {
+                        format!(
+                            "IMPORTANT: You may create and edit files in the working directory as needed to complete the task. When you are done, write a concise summary of the changes you made to the file: {}.\n\n{prompt}",
+                            path.display()
+                        )
+                    } else {
+                        format!(
+                            "IMPORTANT: Write your complete final response ONLY to the file: {}. Do not create any other files.\n\n{prompt}",
+                            path.display()
+                        )
+                    };
                 }
             }
 
@@ -759,10 +815,17 @@ impl Provider for CliProvider {
                         let mut args = Vec::new();
                         if let Some(ref path) = output_path {
                             args.push("--system-prompt".to_string());
-                            args.push(format!(
-                                "Write your complete final response ONLY to the file: {}. Do not create any other files.",
-                                path.display()
-                            ));
+                            if self.allow_edits {
+                                args.push(format!(
+                                    "You may create and edit files in the working directory as needed to complete the task. When done, write a concise summary of the changes you made to the file: {}.",
+                                    path.display()
+                                ));
+                            } else {
+                                args.push(format!(
+                                    "Write your complete final response ONLY to the file: {}. Do not create any other files.",
+                                    path.display()
+                                ));
+                            }
                         } else {
                             args.push("-p".to_string());
                             args.push("--system-prompt".to_string());
@@ -786,6 +849,21 @@ impl Provider for CliProvider {
                             args.push("--effort".to_string());
                             args.push(effort.to_string());
                         }
+                        if self.allow_edits {
+                            args.push("--dangerously-skip-permissions".to_string());
+                        } else if output_path.is_some() {
+                            // Read-only mode still needs the Write tool for the
+                            // instructed output file — otherwise headless claude
+                            // can't write it and "asks for permission" on stdout,
+                            // polluting the captured block output. The CLI ignores
+                            // path-scoped Write(...) rules, so allow the bare tool;
+                            // the system prompt restricts it to the one file.
+                            // ExitPlanMode is allowed so planning steps get their
+                            // plan auto-approved instead of stalling headlessly.
+                            args.push("--allowedTools".to_string());
+                            args.push("Write".to_string());
+                            args.push("ExitPlanMode".to_string());
+                        }
                         args
                     }
                     ProviderKind::OpenAI => {
@@ -801,15 +879,21 @@ impl Provider for CliProvider {
                         codex_output_path = Some(out_path);
                         args
                     }
-                    ProviderKind::Gemini => vec![
-                        "--prompt".to_string(),
-                        "".to_string(),
-                        "--output-format".to_string(),
-                        "text".to_string(),
-                    ],
+                    ProviderKind::Gemini => {
+                        let mut args = vec![
+                            "--prompt".to_string(),
+                            "".to_string(),
+                            "--output-format".to_string(),
+                            "text".to_string(),
+                        ];
+                        if self.allow_edits {
+                            args.push("--yolo".to_string());
+                        }
+                        args
+                    }
                     ProviderKind::OpenCode => {
                         let mut args = vec!["run".to_string()];
-                        if let Ok(cwd) = std::env::current_dir() {
+                        if let Some(cwd) = self.effective_cwd() {
                             args.push("--dir".to_string());
                             args.push(cwd.display().to_string());
                         }
@@ -862,14 +946,16 @@ impl Provider for CliProvider {
                 #[cfg(not(test))]
                 let spawn_bin: &str = bin;
 
-                let mut child = match Command::new(spawn_bin)
-                    .args(&args)
+                let mut cmd = Command::new(spawn_bin);
+                cmd.args(&args)
                     .stdin(std::process::Stdio::piped())
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped())
-                    .kill_on_drop(true)
-                    .spawn()
-                {
+                    .kill_on_drop(true);
+                if let Some(ref dir) = self.workdir {
+                    cmd.current_dir(dir);
+                }
+                let mut child = match cmd.spawn() {
                     Ok(c) => c,
                     Err(e) => {
                         self.history.pop();
@@ -1337,6 +1423,53 @@ mod tests {
     }
 
     #[test]
+    fn edit_context_off_by_default_no_codex_edit_flags() {
+        let provider = provider_with_extra("");
+        let (args, _p) = provider.build_codex_args(&[]);
+        // trust prompt can't be answered headlessly — always skipped
+        assert!(args.contains(&"--skip-git-repo-check".to_string()));
+        // but writes stay off without allow_edits
+        assert!(!args.iter().any(|a| a == "workspace-write"));
+        // no explicit workdir by default
+        assert!(provider.workdir.is_none());
+    }
+
+    #[test]
+    fn allow_edits_injects_codex_workspace_write_and_skip_git() {
+        use crate::provider::Provider;
+        let mut provider = provider_with_extra("");
+        provider.set_edit_context(Some(PathBuf::from("/tmp/hoa-work")), true);
+        let (args, _p) = provider.build_codex_args(&[]);
+        // -C uses the explicit workdir
+        let c_pos = args.iter().position(|a| a == "-C").unwrap();
+        assert_eq!(args[c_pos + 1], "/tmp/hoa-work");
+        // edit flags present, before the temp-output/model tail
+        assert!(args.contains(&"--skip-git-repo-check".to_string()));
+        let s_pos = args.iter().position(|a| a == "-s").unwrap();
+        assert_eq!(args[s_pos + 1], "workspace-write");
+    }
+
+    #[test]
+    fn set_edit_context_adds_workdir_to_allowed_dirs() {
+        use crate::provider::Provider;
+        let mut provider = provider_with_extra("");
+        assert!(provider.add_dirs.is_empty());
+        provider.set_edit_context(Some(PathBuf::from("/tmp/hoa-work")), false);
+        assert!(provider.add_dirs.contains(&"/tmp/hoa-work".to_string()));
+        assert!(!provider.allow_edits);
+        // idempotent
+        provider.set_edit_context(Some(PathBuf::from("/tmp/hoa-work")), false);
+        assert_eq!(
+            provider
+                .add_dirs
+                .iter()
+                .filter(|d| *d == "/tmp/hoa-work")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn find_session_id_matches_expected_keys() {
         let value = json!({
             "meta": {
@@ -1784,6 +1917,53 @@ not json
     }
 
     // -- Integration tests using test_bin_path --
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn anthropic_readonly_output_file_gets_scoped_write_permission() {
+        use crate::provider::Provider;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let args_file = dir.path().join("args");
+        let script = format!(
+            "#!/bin/sh\necho \"$@\" > \"{}\"\ncat > /dev/null\necho ok\n",
+            args_file.display()
+        );
+        let script_path = dir.path().join("claude");
+        std::fs::write(&script_path, &script).unwrap();
+        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut provider = CliProvider::new(
+            ProviderKind::Anthropic,
+            String::new(),
+            None,
+            None,
+            String::new(),
+            Vec::new(),
+            30,
+            50,
+            0,
+        );
+        provider.test_bin_path = Some(script_path.to_string_lossy().into_owned());
+        let out = dir.path().join("out.md");
+        provider.set_output_path(Some(out.clone()));
+        provider.send("hi").await.unwrap();
+        let args = std::fs::read_to_string(&args_file).unwrap();
+        assert!(
+            args.contains("--allowedTools Write ExitPlanMode"),
+            "read-only mode must allow the output-file Write and plan auto-approval: {args}"
+        );
+        assert!(!args.contains("--dangerously-skip-permissions"));
+
+        // allow_edits: skip-permissions instead, no scoped rule
+        provider.set_edit_context(None, true);
+        provider.set_output_path(Some(out.clone()));
+        provider.send("hi").await.unwrap();
+        let args = std::fs::read_to_string(&args_file).unwrap();
+        assert!(args.contains("--dangerously-skip-permissions"));
+        assert!(!args.contains("--allowedTools"), "{args}");
+    }
 
     #[cfg(unix)]
     #[tokio::test]

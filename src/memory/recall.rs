@@ -529,6 +529,10 @@ mod tests {
 
     fn make_block(id: u32, name: &str, prompt: &str) -> crate::execution::pipeline::PipelineBlock {
         crate::execution::pipeline::PipelineBlock {
+            raw: false,
+            fresh: false,
+            model: None,
+            effort: None,
             id,
             name: name.into(),
             agents: vec!["c".into()],
@@ -537,6 +541,8 @@ mod tests {
             profiles: vec![],
             session_id: None,
             replicas: 1,
+            command: None,
+            schema: None,
             sub_pipeline: None,
         }
     }
@@ -547,6 +553,10 @@ mod tests {
         sub: Option<PipelineDefinition>,
     ) -> crate::execution::pipeline::PipelineBlock {
         crate::execution::pipeline::PipelineBlock {
+            raw: false,
+            fresh: false,
+            model: None,
+            effort: None,
             id,
             name: name.into(),
             agents: vec![],
@@ -555,6 +565,8 @@ mod tests {
             profiles: vec![],
             session_id: None,
             replicas: 1,
+            command: None,
+            schema: None,
             sub_pipeline: sub,
         }
     }
@@ -700,6 +712,7 @@ mod tests {
                 prompt: "Refine mutation testing analysis".into(),
                 break_condition: "convergence achieved".into(),
                 break_agent: String::new(),
+                break_command: String::new(),
             }],
             ..Default::default()
         };
@@ -726,6 +739,7 @@ mod tests {
                 prompt: "Refine serialization strategy".into(),
                 break_condition: "stabilization reached".into(),
                 break_agent: String::new(),
+                break_command: String::new(),
             }],
             ..Default::default()
         };

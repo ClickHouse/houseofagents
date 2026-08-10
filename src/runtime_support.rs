@@ -277,6 +277,10 @@ mod tests {
         pipeline_def
             .blocks
             .push(crate::execution::pipeline::PipelineBlock {
+                raw: false,
+                fresh: false,
+                model: None,
+                effort: None,
                 id: 1,
                 name: "Worker".into(),
                 agents: vec!["OC".into()],
@@ -285,6 +289,8 @@ mod tests {
                 session_id: None,
                 position: (0, 0),
                 replicas: 1,
+                command: None,
+                schema: None,
                 sub_pipeline: None,
             });
 

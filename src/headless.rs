@@ -43,6 +43,12 @@ pub(crate) struct HeadlessArgs {
     pub output_format: OutputFormat,
     pub quiet: bool,
     pub print_result: bool,
+    /// Explicit working directory for CLI agents (spawn cwd + allowed dir).
+    pub workdir: Option<PathBuf>,
+    /// Enable unattended file edits: inject per-provider permission flags.
+    pub allow_edits: bool,
+    /// Hard budget: max agent invocations per pipeline run (None = unlimited).
+    pub max_calls: Option<u32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -887,6 +893,12 @@ fn install_signal_handler(cancel: Arc<AtomicBool>, quiet: bool) {
 fn validate_args(args: &HeadlessArgs, config: &AppConfig) -> Result<(), String> {
     let is_pipeline = args.pipeline_path.is_some();
 
+    if let Some(ref wd) = args.workdir {
+        if !wd.is_dir() {
+            return Err(format!("--workdir is not a directory: {}", wd.display()));
+        }
+    }
+
     if !is_pipeline {
         // Prompt-based runs
         if args.mode == ExecutionMode::Pipeline {
@@ -1457,7 +1469,7 @@ async fn run_single_standard(
     let providers: Vec<(String, Box<dyn provider::Provider>)> = resolved
         .iter()
         .map(|a| {
-            let p = provider::create_provider(
+            let mut p = provider::create_provider(
                 a.provider,
                 &a.to_provider_config(),
                 client.clone(),
@@ -1467,12 +1479,15 @@ async fn run_single_standard(
                 cli_timeout_secs,
                 add_dirs.clone(),
             );
+            p.set_edit_context(args.workdir.clone(), args.allow_edits);
             (a.name.clone(), p)
         })
         .collect();
 
     let mut prompt_context =
         PromptRuntimeContext::new(prompt.clone(), config.diagnostic_provider.is_some());
+    prompt_context.set_edit_context(args.workdir.clone(), args.allow_edits);
+    prompt_context.set_max_calls(args.max_calls);
     let recalled_ids = inject_memory_recall_headless(
         config,
         memory_store,
@@ -1673,6 +1688,8 @@ async fn run_single_pipeline(
         pipeline_def.initial_prompt.clone(),
         config.diagnostic_provider.is_some(),
     );
+    prompt_context.set_edit_context(args.workdir.clone(), args.allow_edits);
+    prompt_context.set_max_calls(args.max_calls);
     let recalled_ids = inject_memory_recall_headless(
         config,
         memory_store,
@@ -2262,6 +2279,9 @@ async fn run_batch_pipeline(
     let batch_root_dir = batch_root.run_dir().to_path_buf();
     let pipeline_path_clone = args.pipeline_path.clone();
     let runs = args.runs;
+    let edit_workdir = args.workdir.clone();
+    let edit_max_calls = args.max_calls;
+    let edit_allow = args.allow_edits;
     let http_timeout_secs = config.http_timeout_seconds.max(1);
     let cli_timeout_secs = config.cli_timeout_seconds.max(1);
 
@@ -2298,6 +2318,7 @@ async fn run_batch_pipeline(
         let pipeline_path_clone = pipeline_path_clone.clone();
         let pipeline_toml_str = pipeline_toml_str.clone();
         let shared_memory_context = shared_memory_context.clone();
+        let edit_workdir = edit_workdir.clone();
         move |run_id: u32,
               progress_tx: mpsc::UnboundedSender<ProgressEvent>,
               run_cancel: Arc<AtomicBool>| {
@@ -2309,6 +2330,7 @@ async fn run_batch_pipeline(
             let pipeline_path = pipeline_path_clone.clone();
             let pipeline_toml_str = pipeline_toml_str.clone();
             let shared_memory_context = shared_memory_context.clone();
+            let edit_workdir = edit_workdir.clone();
             async move {
                 let parent_output = match OutputManager::from_existing(batch_root_dir.clone()) {
                     Ok(o) => o,
@@ -2329,6 +2351,8 @@ async fn run_batch_pipeline(
                     pipeline_def.initial_prompt.clone(),
                     config.diagnostic_provider.is_some(),
                 );
+                prompt_context.set_edit_context(edit_workdir.clone(), edit_allow);
+                prompt_context.set_max_calls(edit_max_calls);
                 if let Some(ref ctx) = shared_memory_context {
                     prompt_context.set_memory_context(ctx.clone());
                 }
@@ -3229,8 +3253,9 @@ fn emit_final_result(
             }
         }
         OutputFormat::Json => {
+            // Single-line like every other event — consumers parse NDJSON.
             let obj = build_final_result_json(args, status, run_dir, error, extra.as_ref());
-            println!("{}", serde_json::to_string_pretty(&obj).unwrap_or_default());
+            println!("{}", serde_json::to_string(&obj).unwrap_or_default());
         }
     }
 }
@@ -3404,6 +3429,9 @@ mod tests {
             output_format,
             quiet: false,
             print_result,
+            workdir: None,
+            allow_edits: false,
+            max_calls: None,
         }
     }
 

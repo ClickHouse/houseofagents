@@ -231,6 +231,14 @@ pub trait Provider: Send {
     /// Set the output file path for this send. CLI providers instruct the model
     /// to write its response directly to this file. No-op for API providers.
     fn set_output_path(&mut self, _path: Option<PathBuf>) {}
+    /// Configure the working directory and edit mode for CLI-mode providers.
+    /// When `workdir` is set it becomes the spawned CLI's cwd (and an allowed
+    /// dir); when `allow_edits` is true the provider injects the CLI's
+    /// unattended file-edit permission flags. No-op for API providers.
+    fn set_edit_context(&mut self, _workdir: Option<PathBuf>, _allow_edits: bool) {}
+    /// Enable raw/command mode: the prompt is sent to the CLI verbatim (no
+    /// wrapping) so it can invoke a slash command. No-op for API providers.
+    fn set_command_mode(&mut self, _raw: bool) {}
 }
 
 /// Prune message history by byte budget — remove oldest messages until total fits.
