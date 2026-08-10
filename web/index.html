@@ -1,0 +1,1735 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>House of Agents — Workflow Builder</title>
+<style>
+  /* ---- design tokens: ClickHouse-style light theme (default) ---- */
+  :root{
+    --bg:#0d0f13;--panel:#14171d;--card:#181c24;--card2:#1e232d;
+    --edge:#262b36;--edge2:#39404f;
+    --fg:#e8eaf0;--muted:#98a0b3;--faint:#6d7489;
+    --accent:#ffcc00;--accent-hover:#ffd83d;--accent-dim:rgba(255,204,0,.16);
+    --yellow:#ffcc00;--yellow-soft:rgba(255,204,0,.12);
+    --ok:#4ac26b;--err:#f4747f;--run:#d9a13e;--loop:#d9a13e;
+    --well:#14161b;--grid-dot:#20242e;--warn-bg:#3a2f16;--warn-fg:#d9a13e;
+    --btn:#1e232d;--btn-hover:#242a36;
+    --on-accent:#111;
+    --shadow-sm:0 1px 2px rgba(0,0,0,.35);
+    --shadow-md:0 4px 16px rgba(0,0,0,.45);
+    --shadow-lg:0 16px 48px rgba(0,0,0,.6);
+    --sans:Inter,-apple-system,"SF Pro Text","Segoe UI",system-ui,sans-serif;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
+    --r-sm:6px;--r-md:8px;--r-lg:12px;
+  }
+  [data-theme="light"]{
+    --bg:#ffffff;--panel:#fafbfc;--card:#ffffff;--card2:#f6f7f9;
+    --edge:#e4e6ea;--edge2:#c9cdd4;
+    --fg:#16181d;--muted:#5f6672;--faint:#9aa0ab;
+    --accent:#0f1114;--accent-hover:#2a2e36;--accent-dim:rgba(255,204,0,.30);
+    --yellow:#ffcc00;--yellow-soft:#fff8d6;
+    --ok:#1a7f37;--err:#cf222e;--run:#9a6700;--loop:#9a6700;
+    --well:#f6f8fa;--grid-dot:#e2e5ea;--warn-bg:#fff8d6;--warn-fg:#7a5b00;
+    --btn:#ffffff;--btn-hover:#f2f3f5;
+    --on-accent:#ffcc00;
+    --sans:Inter,-apple-system,"SF Pro Text","Segoe UI",system-ui,sans-serif;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
+    --shadow-sm:0 1px 2px rgba(16,24,40,.06);
+    --shadow-md:0 4px 16px rgba(16,24,40,.12);
+    --shadow-lg:0 16px 48px rgba(16,24,40,.18);
+    --r-sm:6px;--r-md:8px;--r-lg:12px;
+  }
+  *{box-sizing:border-box;}
+  ::selection{background:var(--accent-dim);}
+  ::-webkit-scrollbar{width:10px;height:10px;}
+  ::-webkit-scrollbar-thumb{background:var(--edge2);border-radius:8px;border:3px solid transparent;background-clip:padding-box;}
+  ::-webkit-scrollbar-track{background:transparent;}
+  body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.6 var(--sans);
+    -webkit-font-smoothing:antialiased;height:100vh;display:flex;flex-direction:column;overflow:hidden;}
+  code,pre,.log,.diff{font-family:var(--mono);}
+
+  /* ---- controls ---- */
+  button{background:var(--btn);color:var(--fg);border:1px solid var(--edge);border-radius:var(--r-sm);
+    padding:5px 12px;font:500 13px/1.45 var(--sans);cursor:pointer;transition:background .12s,border-color .12s;}
+  button:hover{background:var(--btn-hover);border-color:var(--edge2);}
+  button:active{transform:translateY(.5px);}
+  button:disabled{opacity:.45;cursor:default;transform:none;}
+  button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-dim);}
+  input,select,textarea{background:var(--panel);color:var(--fg);border:1px solid var(--edge);border-radius:var(--r-sm);
+    padding:6px 10px;font:13px/1.5 var(--sans);width:100%;transition:border-color .12s;}
+  input:hover,select:hover,textarea:hover{border-color:var(--edge2);}
+  textarea{resize:vertical;}
+  .danger{color:var(--err);}
+  .danger:hover{border-color:rgba(244,116,127,.5);background:rgba(244,116,127,.08);}
+
+  /* ---- chrome ---- */
+  .appbar{display:flex;align-items:center;gap:16px;padding:0 18px;height:48px;flex:none;
+    border-bottom:1px solid var(--edge);background:var(--panel);}
+  .appbar h1{margin:0;font-size:14.5px;font-weight:650;letter-spacing:-.01em;white-space:nowrap;}
+  .seg{display:flex;background:var(--bg);border:1px solid var(--edge);border-radius:8px;padding:2px;gap:2px;}
+  .seg button{border:0;border-radius:6px;padding:4px 16px;background:transparent;color:var(--muted);font-weight:500;}
+  .seg button:hover{color:var(--fg);background:transparent;}
+  .seg button.on{background:var(--card2);color:var(--fg);font-weight:600;box-shadow:var(--shadow-sm);}
+  .grow{flex:1;}
+  .wfbar{display:flex;align-items:center;gap:8px;padding:9px 18px;border-bottom:1px solid var(--edge);background:var(--bg);flex-wrap:wrap;}
+  .wfbar select{width:auto;min-width:170px;}
+  .wfbar .primary{background:var(--yellow);color:#111;font-weight:650;border-color:transparent;padding:6px 20px;}
+  .wfbar .primary:hover{background:#f0c000;}
+  .wfbar .sep{width:1px;height:20px;background:var(--edge);margin:0 4px;}
+  .panes{flex:1;position:relative;min-height:0;}
+  .pane{position:absolute;inset:0;display:none;overflow-y:auto;}
+  .pane.on{display:block;}
+  .wrap{max-width:none;margin:0 auto;padding:20px 26px 80px;}
+
+  /* ---- forms & sections ---- */
+  label{display:block;font-size:11px;font-weight:600;color:var(--muted);margin:12px 0 4px;text-transform:uppercase;letter-spacing:.06em;}
+  label.inl{display:inline-flex;align-items:center;gap:7px;text-transform:none;letter-spacing:0;color:var(--fg);font-size:13px;font-weight:400;margin:0;cursor:pointer;}
+  label.inl input{width:auto;accent-color:var(--accent);}
+  input[type=checkbox]{accent-color:var(--accent);}
+  .box{border:1px solid var(--edge);border-radius:var(--r-lg);padding:16px 18px;margin-bottom:16px;background:var(--panel);box-shadow:var(--shadow-sm);}
+  .box h2{margin:0 0 4px;font-size:15px;font-weight:650;color:var(--fg);letter-spacing:-.01em;}
+  .sub{color:var(--muted);font-size:12px;line-height:1.6;max-width:95ch;}
+  .row2{display:flex;gap:12px;} .row2>div{flex:1;}
+
+  /* ---- step editor & loops ---- */
+  .step{border:1px solid var(--edge);border-radius:var(--r-md);padding:13px 14px;background:var(--card);position:relative;}
+  .step .top{display:flex;align-items:center;gap:8px;}
+  .step .num{width:24px;height:24px;border-radius:50%;background:var(--accent-dim);color:var(--accent);font-weight:650;display:flex;align-items:center;justify-content:center;font-size:11px;flex:none;}
+  .step .nm{flex:1;font-weight:600;}
+  .step .ag{width:140px;flex:none;}
+  .step .btns{display:flex;gap:5px;flex:none;}
+  .step .btns button{padding:3px 9px;font-size:11.5px;}
+  .arrow{text-align:center;color:var(--faint);font-size:15px;line-height:1;margin:5px 0;}
+  .loopnote{color:var(--loop);font-size:11.5px;margin-top:6px;}
+  .addstep{width:100%;margin-top:10px;border-style:dashed;color:var(--muted);}
+  .addstep:hover{color:var(--fg);}
+
+  /* ---- canvas ---- */
+  .canvas{position:relative;border:1px solid var(--edge);border-radius:var(--r-md);background:
+    radial-gradient(circle, var(--grid-dot) 1px, transparent 1px);background-size:22px 22px;
+    background-color:var(--panel);overflow:auto;resize:vertical;min-height:220px;}
+  .canvas > svg{position:absolute;top:0;left:0;pointer-events:none;}
+  .canvas > svg [data-edge],.canvas > svg [data-loopedge]{pointer-events:stroke;cursor:pointer;}
+  .canvas > svg [data-edge]:hover,.canvas > svg [data-loopedge]:hover{stroke:var(--err);}
+  .cnode{position:absolute;width:176px;height:48px;box-sizing:border-box;border:1px solid var(--edge2);border-radius:var(--r-md);
+    background:var(--card2);padding:5px 9px;cursor:grab;user-select:none;box-shadow:var(--shadow-sm);transition:border-color .12s,box-shadow .12s;}
+  .cnode:hover{border-color:var(--accent);box-shadow:var(--shadow-md);}
+  .cnode:active{cursor:grabbing;}
+  .cnode.sel{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-dim),var(--shadow-md);}
+  .cnode.conn{border-color:var(--run);border-style:dashed;}
+  .cnode .cn-h{display:flex;align-items:center;gap:5px;}
+  .cnode .cn-name{flex:1;font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;letter-spacing:-.005em;}
+  .cnode .cn-h button{padding:0 5px;font-size:11px;line-height:17px;border-radius:5px;background:transparent;border-color:transparent;color:var(--muted);}
+  .cnode .cn-h button:hover{color:var(--fg);background:var(--accent-dim);}
+  .cnode .cn-sub{font-size:10.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px;}
+  .cnode .port{position:absolute;left:50%;bottom:-7px;transform:translateX(-50%);width:13px;height:13px;border-radius:50%;
+    background:var(--panel);border:1.5px solid var(--accent);cursor:crosshair;touch-action:none;transition:transform .12s;}
+  .cnode .port:hover{background:var(--accent);transform:translateX(-50%) scale(1.25);}
+
+  /* ---- run board ---- */
+  .runsplit{display:flex;gap:14px;align-items:flex-start;}
+  .runlist{width:290px;flex:none;position:sticky;top:0;}
+  .runrow{border:1px solid var(--edge);border-radius:var(--r-md);background:var(--panel);padding:9px 11px;margin-bottom:7px;cursor:pointer;transition:border-color .12s;}
+  .runrow:hover{border-color:var(--edge2);}
+  .runrow.sel{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-dim);}
+  .runrow .rr1{display:flex;align-items:center;gap:7px;font-size:12.5px;font-weight:600;}
+  .runrow .rr2{display:flex;justify-content:space-between;color:var(--muted);font-size:10.5px;margin-top:3px;font-variant-numeric:tabular-nums;}
+  .dot{width:8px;height:8px;border-radius:50%;flex:none;}
+  .dot.running{background:var(--run);animation:aispin 0s;box-shadow:0 0 0 3px rgba(217,161,62,.18);}
+  .dot.completed{background:var(--ok);}.dot.error{background:var(--err);}.dot.gated{background:var(--run);}
+  .dot.stopped,.dot.pend{background:var(--faint);}
+  .rundetail{flex:1;min-width:0;}
+  .strip{display:flex;gap:6px;padding:10px 12px;flex-wrap:wrap;}
+  .schip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--edge);border-radius:999px;padding:3px 11px;font-size:11.5px;background:var(--card2);font-variant-numeric:tabular-nums;}
+  .schip.running{border-color:var(--run);color:var(--run);}
+  .schip.done{border-color:rgba(74,194,107,.45);color:var(--ok);}
+  .schip.error{border-color:rgba(244,116,127,.5);color:var(--err);}
+  .schip.blocked{color:var(--faint);}
+  .kb{display:flex;gap:8px;padding:10px 12px;overflow-x:auto;}
+  .kb .col{flex:1;min-width:120px;background:var(--bg);border:1px solid var(--edge);border-radius:var(--r-md);padding:8px;}
+  .kb .col h4{margin:0 0 6px;font-size:10.5px;font-weight:650;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);}
+  .kb .kcard{border:1px solid var(--edge);border-radius:var(--r-sm);background:var(--card2);padding:6px 9px;font-size:12px;margin-bottom:5px;box-shadow:var(--shadow-sm);}
+  .kb .kcard .kmeta{color:var(--muted);font-size:10.5px;margin-top:2px;font-variant-numeric:tabular-nums;}
+
+  /* ---- runs & schedules ---- */
+  .empty{color:var(--muted);text-align:center;margin-top:80px;font-size:14px;}
+  .card{border:1px solid var(--edge);border-radius:var(--r-md);margin:10px 0;overflow:hidden;background:var(--panel);box-shadow:var(--shadow-sm);}
+  .card .h{padding:8px 12px;background:var(--card);display:flex;justify-content:space-between;align-items:center;gap:8px;font-weight:600;}
+  .badge2{font-size:10.5px;font-variant-numeric:tabular-nums;font-weight:600;padding:2.5px 9px;border-radius:999px;letter-spacing:.01em;white-space:nowrap;}
+  .b-pend{background:var(--card2);color:var(--muted);}.b-run{background:rgba(217,161,62,.14);color:var(--run);}
+  .b-ok{background:rgba(74,194,107,.13);color:var(--ok);}.b-err{background:rgba(244,116,127,.12);color:var(--err);}
+  .wfhdr{color:var(--muted);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid var(--edge);margin:12px 0 6px;padding-bottom:5px;display:flex;justify-content:space-between;gap:8px;}
+  .steps{display:flex;flex-wrap:wrap;gap:6px;padding:8px 12px;}
+  .stepchip{font-size:12px;padding:2px 9px;border-radius:var(--r-sm);border:1px solid var(--edge);color:var(--muted);}
+  .stepchip.running{color:var(--run);border-color:rgba(217,161,62,.45);}
+  .stepchip.done{color:var(--ok);border-color:rgba(74,194,107,.4);}
+  .stepchip.error{color:var(--err);border-color:rgba(244,116,127,.4);}
+  .log{max-height:170px;overflow:auto;padding:9px 13px;font-size:12px;line-height:1.65;color:var(--muted);white-space:pre-wrap;word-break:break-word;border-top:1px solid var(--edge);background:var(--bg);}
+  .diff{max-height:300px;overflow:auto;padding:9px 13px;font-size:12px;line-height:1.55;white-space:pre;border-top:1px solid var(--edge);background:var(--bg);}
+  .diff .add{color:var(--ok);}.diff .del{color:var(--err);}.diff .hdr{color:var(--accent);}
+  .meta{padding:0 12px 8px;color:var(--muted);font-size:12px;}
+
+  /* ---- overlays ---- */
+  .modal{position:fixed;inset:0;background:rgba(5,6,9,.72);backdrop-filter:blur(3px);display:flex;align-items:center;justify-content:center;z-index:100;}
+  .modal .mbox{background:var(--card);border:1px solid var(--edge2);border-radius:var(--r-lg);padding:20px;min-width:340px;max-width:72vw;max-height:84vh;overflow:auto;box-shadow:var(--shadow-lg);}
+  .primary2{background:var(--yellow);color:#111;font-weight:600;border-color:transparent;padding:6px 16px;border-radius:var(--r-sm);}
+  .primary2:hover{background:#f0c000;}
+  .radios{display:flex;gap:16px;align-items:center;}
+  .radios label{display:inline-flex;align-items:center;gap:6px;margin:0;font-size:12.5px;font-weight:400;color:var(--fg);text-transform:none;letter-spacing:0;cursor:pointer;}
+  .radios input{width:auto;accent-color:var(--accent);}
+  .autogrow{resize:none;overflow-y:hidden;}
+  @keyframes aispin{to{transform:rotate(360deg)}}
+  .aispin{display:inline-block;width:11px;height:11px;border:1.6px solid var(--edge2);border-top-color:var(--accent);border-radius:50%;animation:aispin .8s linear infinite;vertical-align:-1.5px;margin-right:6px;}
+  .toasts{position:fixed;top:56px;right:16px;z-index:60;display:flex;flex-direction:column;gap:8px;max-width:340px;}
+  .toast{background:var(--card2);border:1px solid var(--edge2);border-left:3px solid var(--accent);border-radius:var(--r-md);
+    padding:9px 12px;font-size:12px;line-height:1.5;box-shadow:var(--shadow-md);transition:opacity .25s;}
+  .toast.ok{border-left-color:var(--ok);}.toast.err{border-left-color:var(--err);}.toast.run{border-left-color:var(--run);}
+</style>
+</head>
+<body>
+<div class="appbar">
+  <h1><svg width="21" height="21" viewBox="0 0 22 22" style="vertical-align:-4.5px;margin-right:8px">
+    <rect width="22" height="22" rx="5" fill="#ffcc00"/>
+    <path d="M4.6 9.6L11 4.6l6.4 5" fill="none" stroke="#131313" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="7.4" cy="13.4" r="1.9" fill="#131313"/>
+    <circle cx="14.6" cy="13.4" r="1.9" fill="#131313"/>
+    <path d="M9.3 13.4h3.4" stroke="#131313" stroke-width="1.6"/>
+  </svg>House <span style="font-weight:400;color:var(--muted)">of</span> Agents</h1>
+  <div class="seg" id="viewSeg">
+    <button data-view="build" class="on">Build</button>
+    <button data-view="runs">Runs</button>
+    <button data-view="schedules">Schedules</button>
+  </div>
+  <div class="grow"></div>
+  <span title="UI version — if features look missing, hard-refresh (Cmd+Shift+R)" style="font-size:10px;color:var(--faint);letter-spacing:.02em;margin-right:2px">v51</span>
+  <button id="btnTheme" title="toggle light / dark theme"><svg width="14" height="14" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8 2a6 6 0 010 12z" fill="currentColor"/></svg></button>
+  <button id="btnSettings" title="Global settings"><svg width="14" height="14" viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" fill="none"><path d="M1.5 4.5h13M1.5 11.5h13"/><circle cx="10.5" cy="4.5" r="2" fill="var(--panel)"/><circle cx="5.5" cy="11.5" r="2" fill="var(--panel)"/></svg></button>
+</div>
+<script>
+  // theme before first paint (no flash)
+  const _t = new URLSearchParams(location.search).get("theme") || localStorage.getItem("hoa_theme"); if (_t === "light") document.documentElement.dataset.theme = "light";
+</script>
+<div class="wfbar" id="wfbar"></div>
+<div class="panes">
+  <div class="pane on" id="buildPane"><div class="wrap" id="buildForm"></div></div>
+  <div class="pane" id="runsPane"><div class="wrap" id="runsBody"><div class="empty">Press ▶ Run to execute the current workflow.</div></div></div>
+  <div class="pane" id="schedPane"><div class="wrap" id="schedBody"></div></div>
+</div>
+<div class="toasts" id="toasts"></div>
+
+<script>
+let AGENTS = ["Claude", "OpenAI", "Gemini", "OpenCode"]; // fallback — replaced from config.toml via /agents
+fetch("/agents").then(r => r.json()).then(d => { if (Array.isArray(d.agents) && d.agents.length) { AGENTS = d.agents; renderAll(); } }).catch(() => { });
+
+// Setup health: surface broken prerequisites as a banner instead of cryptic run failures
+fetch("/health").then(r => r.json()).then(h => {
+  const issues = [];
+  if (!h.binary_found) issues.push(`engine binary not found (${h.binary}) — run: cargo build --release`);
+  else if (h.stale) issues.push("engine binary is older than src/ — run: cargo build --release (newer features are silently missing)");
+  if (!h.config_found) issues.push("config.toml not found — run the terminal app once to create it");
+  else if (!(h.agents || []).length) issues.push("config.toml has no [[agents]]");
+  if (issues.length) {
+    const b = document.createElement("div");
+    b.style.cssText = "background:var(--warn-bg);color:var(--warn-fg);font-size:11px;padding:6px 16px;display:flex;gap:14px;align-items:center";
+    b.innerHTML = `<span>⚠ ${issues.map(esc).join(" · ")}</span><button style="margin-left:auto;padding:1px 8px;font-size:10px">dismiss</button>`;
+    b.querySelector("button").onclick = () => b.remove();
+    document.querySelector(".appbar").after(b);
+  }
+}).catch(() => { });
+
+document.getElementById("btnTheme").onclick = () => {
+  const light = document.documentElement.dataset.theme === "light";
+  if (light) delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = "light";
+  localStorage.setItem("hoa_theme", light ? "dark" : "light");
+};
+
+// Desktop notifications for the moments that matter in a background tab
+function notify(title, body) {
+  try {
+    if (!("Notification" in window) || document.hasFocus()) return;
+    if (Notification.permission === "granted") new Notification("🏠 " + title, { body });
+  } catch { }
+}
+// Suggestions only — you can type ANY model string your CLI/API accepts. Edit freely.
+const MODEL_SUGGESTIONS = {
+  Claude: ["claude-opus-4-8", "claude-sonnet-5", "claude-fable-5", "claude-haiku-4-5-20251001"],
+  OpenAI: ["gpt-5.3-codex", "gpt-5.3"],
+  Gemini: ["gemini-2.5-pro", "gemini-2.5-flash"],
+  OpenCode: ["anthropic/claude-sonnet-4-5"],
+};
+const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+const esc = s => (s || "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+/* -------- state: a workflow is a free-form DAG on a canvas -------- */
+function pruneDeps(w) {
+  const ids = new Set(w.steps.map(s => s.id));
+  w.steps.forEach(s => { s.deps = (s.deps || []).filter(d => ids.has(d)); });
+  w.loops = (w.loops || []).filter(l => ids.has(l.from) && ids.has(l.to));
+}
+function computeDepth(w) {
+  // Longest-path depth from the roots — the execution layering the engine
+  // and human gates use; layout on the canvas is free and separate.
+  const depsOf = {}; w.steps.forEach(s => depsOf[s.id] = s.deps || []);
+  const level = {};
+  const depth = id => { if (level[id] != null) return level[id]; level[id] = 0; const ds = depsOf[id] || []; if (ds.length) level[id] = 1 + Math.max(...ds.map(depth)); return level[id]; };
+  w.steps.forEach(s => depth(s.id));
+  return level;
+}
+function reachesVia(w, from, target) {
+  // true if `from` transitively depends on `target`
+  const byId = {}; w.steps.forEach(s => byId[s.id] = s);
+  const seen = new Set(); const stack = [from];
+  while (stack.length) {
+    const id = stack.pop(); if (seen.has(id)) continue; seen.add(id);
+    if (id === target) return true;
+    ((byId[id] || {}).deps || []).forEach(d => stack.push(d));
+  }
+  return false;
+}
+function ensurePositions(w) {
+  // migrate: place unpositioned steps by execution depth
+  if (w.steps.every(s => s.x != null)) return;
+  const level = computeDepth(w);
+  const rows = {};
+  w.steps.forEach(s => {
+    if (s.x != null) return;
+    const lv = level[s.id] || 0;
+    rows[lv] = (rows[lv] || 0);
+    s.x = 30 + rows[lv] * 200; s.y = 24 + lv * 110;
+    rows[lv]++;
+  });
+}
+function migrateLoops(w) {
+  if (w.loop && !(w.loops || []).length) w.loops = [w.loop];
+  if (!w.loops) w.loops = [];
+  delete w.loop;
+}
+const CN_W = 176, CN_H = 48;
+function renderWires(w) {
+  // SVG underlay for the canvas: dep edges (solid) + loop-backs (dashed).
+  let out = `<defs><marker id="arr" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="5" markerHeight="5" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="var(--muted)"/></marker><marker id="arrl" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="5" markerHeight="5" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="var(--loop)"/></marker></defs>`;
+  const byId = {}; w.steps.forEach(s => byId[s.id] = s);
+  w.steps.forEach(s => (s.deps || []).forEach(d => {
+    const a = byId[d], b = s; if (!a) return;
+    const x1 = a.x + CN_W / 2, y1 = a.y + CN_H, x2 = b.x + CN_W / 2, y2 = b.y;
+    const bend = Math.max(24, Math.abs(y2 - y1) / 2);
+    const path = `M${x1},${y1} C${x1},${y1 + bend} ${x2},${y2 - bend} ${x2},${y2}`;
+    out += `<path d="${path}" fill="none" stroke="var(--muted)" stroke-width="1.4" marker-end="url(#arr)" data-edge="${d}-${s.id}"><title>click to disconnect ${esc(a.name)} → ${esc(b.name)}</title></path>`;
+  }));
+  (w.loops || []).forEach((l, li) => {
+    const a = byId[l.from], b = byId[l.to]; if (!a || !b) return;
+    const off = 40 + Math.abs(a.y - b.y) / 6;
+    // A loop with no dependency path underneath it is broken — show it broken.
+    const valid = l.from !== l.to && reachesVia(w, l.from, l.to);
+    out += `<path d="M${a.x},${a.y + CN_H / 2} C${Math.min(a.x, b.x) - off},${a.y + CN_H / 2} ${Math.min(a.x, b.x) - off},${b.y + CN_H / 2} ${b.x},${b.y + CN_H / 2}" fill="none" stroke="${valid ? "var(--loop)" : "var(--err)"}" stroke-width="${valid ? 1.4 : 2}" stroke-dasharray="5 3" marker-end="url(#arrl)" data-loopedge="${li}"><title>${valid ? "click to remove this loop" : "BROKEN LOOP: no dependency path from the restart target down to the feedback source — rewire or click to remove"}</title></path>`;
+  });
+  return out;
+}
+function tidyLayout(w) {
+  const level = computeDepth(w);
+  const rows = {};
+  const maxLv = Math.max(0, ...w.steps.map(s => level[s.id] || 0));
+  const counts = {};
+  w.steps.forEach(s => { const lv = level[s.id] || 0; counts[lv] = (counts[lv] || 0) + 1; });
+  const widest = Math.max(1, ...Object.values(counts));
+  w.steps.forEach(s => {
+    const lv = level[s.id] || 0;
+    rows[lv] = rows[lv] || 0;
+    const rowW = counts[lv] * (CN_W + 30) - 30;
+    const fullW = widest * (CN_W + 30) - 30;
+    s.x = 30 + (fullW - rowW) / 2 + rows[lv] * (CN_W + 30);
+    s.y = 24 + lv * 110;
+    rows[lv]++;
+  });
+}
+function renderCanvasNodes(w) {
+  return w.steps.map(s => {
+    const sel = w._selected === s.id, conn = w._connectFrom === s.id;
+    const badges = [s.code ? "⌘ code" : esc(s.agent), s.raw ? "/raw" : "", s.gate ? "⏸ gate" : "", (s.inputSchema || "").trim() ? "{in}" : "", (s.schema || "").trim() ? "{out}" : "", !(s.deps || []).length ? "root" : ""].filter(Boolean).join(" · ");
+    return `<div class="cnode${sel ? " sel" : ""}${conn ? " conn" : ""}" data-node="${s.id}" style="left:${s.x}px;top:${s.y}px" title="${esc((s.prompt || "").slice(0, 300))}">
+      <div class="cn-h"><span class="cn-name">${esc(s.name || ("Step " + s.id))}</span><button data-nopt="${s.id}" title="✦ rewrite this step's prompt (LLM, codebase-grounded) + propose its output contract">✦</button><button data-link="${s.id}" title="connect: click here, then click another step. Forward = dependency; backward = loop."><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></svg></button></div>
+      <div class="cn-sub">${badges}</div>
+      <div class="port" data-port="${s.id}" title="drag from this dot onto another step to wire them"></div>
+    </div>`;
+  }).join("");
+}
+function emptyWf() {
+  return { name: "New workflow", workdir: "", allowEdits: true, tasks: "", maxCalls: "", nextId: 2,
+    steps: [{ id: 1, name: "Step 1", agent: "Claude", prompt: "", fresh: true, deps: [], x: 30, y: 24 }], loops: [] };
+}
+
+let wfs = [emptyWf()];
+let active = 0;
+// Workflows survive reloads — losing an unsaved graph to a refresh is not ok.
+try {
+  const saved = JSON.parse(localStorage.getItem("hoa_state") || "null");
+  if (saved && Array.isArray(saved.wfs) && saved.wfs.length) { wfs = saved.wfs; active = Math.min(saved.active || 0, wfs.length - 1); }
+} catch { }
+function persist() {
+  try {
+    const clean = wfs.map(w => { const c = { ...w }; delete c._selected; delete c._connectFrom; delete c._preRewrite; delete c._preOptimize; delete c._preContracts; return c; });
+    localStorage.setItem("hoa_state", JSON.stringify({ wfs: clean, active }));
+  } catch { }
+}
+setInterval(persist, 2000);
+addEventListener("beforeunload", persist);
+
+// Undo/redo for canvas edits (per active workflow, ⌘Z / ⌘⇧Z)
+const hist = { key: -1, stack: [], ptr: -1, silent: false };
+function snapshot() {
+  if (hist.silent) return;
+  const w = wf(); if (!w) return;
+  const cur = JSON.stringify({ steps: w.steps, loops: w.loops });
+  if (hist.key !== active) { hist.key = active; hist.stack = [cur]; hist.ptr = 0; return; }
+  if (hist.stack[hist.ptr] === cur) return;
+  hist.stack = hist.stack.slice(0, hist.ptr + 1);
+  hist.stack.push(cur); hist.ptr++;
+  if (hist.stack.length > 100) { hist.stack.shift(); hist.ptr--; }
+}
+// Shared UX for every ✦ action: a live modal with elapsed time, the agent's
+// actual progress log streaming in, and a working Cancel — never a dead "…".
+// What each kind of ✦ task actually looks at — shown live in the modal.
+function aiDesc(kind, body) {
+  const wd = (body.workdir || "").trim();
+  if (kind === "contracts") return (body.scoped ? "reasoning over this step's prompt and its connected parent/child steps" : "reasoning over every step's prompt along the graph's wiring") + (wd ? ", grounded in your codebase" : "");
+  if (kind === "optimize") return "reading the step prompts" + (wd ? " and exploring your codebase" : "") + " to rewrite them";
+  if (kind === "breaks") return "deciding how this loop should stop — deterministic gate if checkable, else a judge condition";
+  if (kind === "plan") return "designing steps, wiring and contracts from your task" + (wd ? ", grounded in your codebase" : "");
+  return wd ? "exploring your codebase to ground the task" : "rewriting the task";
+}
+// Progress lines worth showing a human (plumbing noise filtered out).
+function aiLogFilter(lines) {
+  return (lines || []).filter(l => !/^(args:|stdin chars|stderr( lines)?>?|CLI stderr|session active|output file read)/.test(l));
+}
+function aiTask(kind, body, title) {
+  return new Promise(async (resolve, reject) => {
+    let taskId = null, closed = false, lastLog = "", lastElapsed = "", lastLogAt = Date.now();
+    const finish = (fn, arg) => { if (closed) return; closed = true; closeModal(); fn(arg); };
+    showModal(`<div style="font-weight:600;margin-bottom:3px">✦ ${esc(title)}</div>
+      <div class="sub" id="aiElapsed"><span class="aispin"></span>starting… · ${esc(aiDesc(kind, body))}</div>
+      <div class="log" id="aiLog" style="max-height:200px;min-height:100px;margin-top:10px;border:1px solid var(--edge);border-radius:8px;border-top:1px solid var(--edge)">waiting for the agent…</div>
+      <div style="display:flex;justify-content:flex-end;margin-top:10px"><button id="aiCancel" class="danger">Cancel</button></div>`, box => {
+      box.querySelector("#aiCancel").onclick = () => {
+        if (taskId) fetch(`/ai-tasks/${taskId}/cancel`, { method: "POST" }).catch(() => { });
+        finish(reject, new Error("cancelled"));
+      };
+    }, { noBackdropClose: true });
+    try {
+      const r = await fetch(`/ai-tasks/${kind}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || r.statusText);
+      taskId = d.task_id;
+      while (!closed) {
+        await new Promise(res => setTimeout(res, 1200));
+        if (!document.getElementById("modal")) {   // modal gone some other way — stop & cancel
+          if (taskId) fetch(`/ai-tasks/${taskId}/cancel`, { method: "POST" }).catch(() => { });
+          finish(reject, new Error("cancelled"));
+          return;
+        }
+        let st; try { st = await (await fetch(`/ai-tasks/${taskId}`)).json(); } catch { continue; }
+        if (st && st.error === "no such task") { finish(reject, new Error("the bridge restarted mid-task and lost it — just run it again")); return; }
+        // Patch the DOM only when content actually changed — no repaint flicker.
+        const quiet = Date.now() - lastLogAt > 12000;
+        const elapsedText = st.state === "running"
+          ? `running · ${st.elapsed}s · ${aiDesc(kind, body)}${quiet ? " — quiet but working (some agents think without printing; codex only reports at the end)" : ""}`
+          : st.state;
+        const el = document.getElementById("aiElapsed"), lg = document.getElementById("aiLog");
+        if (el && elapsedText !== lastElapsed) { el.innerHTML = (st.state === "running" ? '<span class="aispin"></span>' : "") + esc(elapsedText); lastElapsed = elapsedText; }
+        const logText = aiLogFilter(st.log).join("\n");
+        if (lg && logText && logText !== lastLog) {
+          const pinned = lg.scrollTop + lg.clientHeight >= lg.scrollHeight - 6;
+          lg.textContent = logText; lastLog = logText; lastLogAt = Date.now();
+          if (pinned) lg.scrollTop = lg.scrollHeight;
+        }
+        if (st.state !== "running") {
+          if (st.state === "done") { finish(resolve, st.result); return; }
+          // failure: keep the modal (and its log) on screen until dismissed
+          closed = true;
+          if (el) { el.textContent = "✕ " + (st.error || st.state); el.style.color = "var(--err)"; }
+          const c = document.getElementById("aiCancel");
+          if (c) { c.textContent = "Close"; c.onclick = () => { closeModal(); reject(new Error(st.error || st.state)); }; }
+          return;
+        }
+      }
+    } catch (e) { finish(reject, e); }
+  });
+}
+function autoGrow(el, maxH) {
+  el.style.height = "auto";
+  const h = Math.min(el.scrollHeight + 2, maxH || 99999);
+  el.style.height = h + "px";
+  el.style.overflowY = el.scrollHeight > h + 4 ? "auto" : "hidden";
+}
+function aiFail(e, what) { if (e.message !== "cancelled") toast(`${what} failed: ${e.message}`, "err", 6000); }
+
+function applyStepRec(s, v) {
+  // Apply a rewrite recommendation to a step: prompt + contracts + execution
+  // settings (agent, model, effort, raw for slash-command modes).
+  s.prompt = v.prompt || s.prompt;
+  if (v.output) s.schema = v.output;
+  if (v.input) s.inputSchema = v.input;
+  if (v.agent) s.agent = v.agent;
+  if (v.model) s.model = v.model;
+  if (v.effort) s.effort = v.effort;
+  if (v.raw && (s.prompt || "").trimStart().startsWith("/")) s.raw = true;
+}
+async function optimizeStep(w, s, btn) {
+  // Per-step ✦ — one agent call rewrites THIS step's prompt (grounded in the
+  // workdir, with the rest of the workflow as context) + proposes its contract.
+  if (s.code || s.raw) { toast("code/raw steps run verbatim — nothing to optimize", "err"); return; }
+  if (!(s.prompt || "").trim()) { toast("write the step's prompt first", "err"); return; }
+  try {
+    // Context = tagged parents (feed this step) and children (consume it) —
+    // that's what determines the input and output contracts.
+    const rel = x => (s.deps || []).includes(x.id) ? "parent" : (x.deps || []).includes(s.id) ? "child" : "other";
+    const context = w.steps.filter(x => x.id !== s.id && rel(x) !== "other")
+      .map(x => ({ id: x.id, name: x.name, relation: rel(x), prompt: x.prompt, input: x.inputSchema || "", output: x.schema || "" }));
+    const data = await aiTask("optimize",
+      { steps: [{ id: s.id, name: s.name, prompt: s.prompt, deps: s.deps || [], input: s.inputSchema || "", output: s.schema || "" }], context, workdir: w.workdir, task: w.tasks, agent: assistAgent(), binary: settings.binary },
+      `Rewriting "${s.name}" — prompt + input & output contracts`);
+    const v = data.steps[String(s.id)];
+    if (v) {
+      w._preOptimize = w.steps.map(x => ({ id: x.id, prompt: x.prompt, schema: x.schema || "", inputSchema: x.inputSchema || "", agent: x.agent, model: x.model || "", effort: x.effort || "", raw: !!x.raw }));
+      applyStepRec(s, v);
+    }
+    toast(`✦ "${s.name}" rewritten${v && v.agent ? " · " + v.agent : ""}${v && v.effort ? " · " + v.effort : ""}${v && v.why ? " — " + v.why : ""} (↩ Undo optimize reverts)`, "ok", 7000);
+    renderBuild();
+  } catch (e) { aiFail(e, "rewrite"); }
+}
+function timeTravel(dir) {
+  if (hist.key !== active) return;
+  const np = hist.ptr + dir;
+  if (np < 0 || np >= hist.stack.length) { toast(dir < 0 ? "nothing to undo" : "nothing to redo"); return; }
+  hist.ptr = np;
+  const data = JSON.parse(hist.stack[np]);
+  const w = wf(); w.steps = data.steps; w.loops = data.loops;
+  delete w._selected; delete w._connectFrom;
+  hist.silent = true; renderBuild(); hist.silent = false;
+}
+
+// Preflight: catch problems before tokens are spent
+function preflight(w) {
+  const errors = [], warnings = [];
+  const nameOf = s => s.name || ("Step " + s.id);
+  const byId = {}; w.steps.forEach(s => byId[s.id] = s);
+
+  // Every step needs real instructions.
+  w.steps.forEach(s => {
+    const p = (s.prompt || "").trim();
+    if (s.code) {
+      if (!p) errors.push(`"${nameOf(s)}" is a code step with no shell command`);
+    } else if (s.raw) {
+      if (!p) errors.push(`"${nameOf(s)}" is a raw step with no command text`);
+    } else if (!p) {
+      if ((s.deps || []).length) errors.push(`"${nameOf(s)}" has an empty prompt — it would receive its dependencies' output with no instruction what to do with it`);
+      else if (!(w.tasks || "").trim()) errors.push(`"${nameOf(s)}" has an empty prompt and there's no Task to fall back on`);
+      else warnings.push(`"${nameOf(s)}" has no prompt of its own — it will run on the Task text alone`);
+    }
+  });
+
+  // Names must be unique — run events, the board, and gate hand-offs match by name.
+  const seen = {};
+  w.steps.forEach(s => { const n = nameOf(s).trim().toLowerCase(); (seen[n] = seen[n] || []).push(nameOf(s)); });
+  Object.values(seen).filter(v => v.length > 1).forEach(v => errors.push(`Duplicate step name "${v[0]}" — run tracking matches steps by name, rename one`));
+
+  // Structure
+  if ((w.loops || []).length && w.steps.some(s => s.gate)) errors.push("Human gates and loops can't combine — remove one");
+  w.steps.filter(s => s.gate && !w.steps.some(o => (o.deps || []).includes(s.id))).forEach(s =>
+    warnings.push(`"${nameOf(s)}" is gated but nothing runs after it — the gate never pauses (gates hold the hand-off to downstream steps)`));
+  (w.loops || []).forEach(l => {
+    const fn = byId[l.from] ? nameOf(byId[l.from]) : l.from, tn = byId[l.to] ? nameOf(byId[l.to]) : l.to;
+    if (l.from === l.to) errors.push(`Loop "${fn}" → itself: the feedback source and restart target must differ`);
+    else if (!reachesVia(w, l.from, l.to)) errors.push(`Loop "${fn}" → "${tn}": the restart target must be upstream of the feedback source (wire a dependency path between them)`);
+    if (!(l.breakCommand || "").trim() && !((l.breakAgent || "").trim() && (l.breakCondition || "").trim()))
+      warnings.push(`Loop "${fn}" → "${tn}" has no break condition — it will always run all ${l.maxPasses || 8} passes`);
+    if ((l.breakAgent || "").trim() && !(l.breakCondition || "").trim() && !(l.breakCommand || "").trim())
+      errors.push(`Loop "${fn}" → "${tn}": the break agent needs a "Stop when…" condition`);
+  });
+
+  // Contracts must be valid JSON objects
+  w.steps.forEach(s => {
+    for (const [field, label] of [["schema", "output contract"], ["inputSchema", "input contract"]]) {
+      if ((s[field] || "").trim()) {
+        try { const o = JSON.parse(s[field]); if (typeof o !== "object" || o === null || Array.isArray(o)) throw 0; }
+        catch { errors.push(`"${nameOf(s)}": the ${label} isn't a JSON object`); }
+      }
+    }
+  });
+
+  if (w.allowEdits && !(w.workdir || "").trim()) errors.push("Allow edits needs a Working directory (otherwise there's nothing safe to edit in)");
+
+  // Cost sanity
+  const est = estimateCalls(w);
+  if (w.maxCalls && est > w.maxCalls) warnings.push(`Worst case is ≈${est} agent calls but the budget is ${w.maxCalls} — the run may be cancelled mid-way`);
+  else if (!w.maxCalls && est > 30) warnings.push(`Worst case is ≈${est} agent calls with no budget cap — consider setting Max agent calls`);
+  if (w.steps.filter(s => !s.code).length >= 3 && !w.steps.some(s => (s.schema || "").trim()))
+    warnings.push("No step has an output contract — hand-offs will be free text (✦ Suggest contracts can design them)");
+
+  return { errors, warnings };
+}
+
+// Gate ▶ Run behind the preflight: errors block with the full list; warnings
+// require an explicit "Run anyway".
+function launchChecked(w) {
+  const { errors, warnings } = preflight(w);
+  if (!errors.length && !warnings.length) { showView("runs"); runWorkflow(w); return; }
+  const li = (arr, color) => arr.map(m => `<div style="display:flex;gap:8px;margin-bottom:7px;font-size:12.5px;line-height:1.5"><span style="color:${color};flex:none">${color === "var(--err)" ? "✕" : "!"}</span><span>${esc(m)}</span></div>`).join("");
+  showModal(`<div style="font-weight:600;margin-bottom:10px">${errors.length ? "Can't run yet" : "Before you run"}</div>
+    ${li(errors, "var(--err)")}${li(warnings, "var(--run)")}
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px">
+      <button id="pfBack">${errors.length ? "Go fix it" : "Go back"}</button>
+      ${errors.length ? "" : `<button id="pfRun" class="primary2">Run anyway</button>`}
+    </div>`, box => {
+    box.querySelector("#pfBack").onclick = () => { closeModal(); showView("build"); };
+    const go = box.querySelector("#pfRun");
+    if (go) go.onclick = () => { closeModal(); showView("runs"); runWorkflow(w); };
+  });
+}
+
+// The estimate must be explainable on click — an unexplained number is noise.
+function estimateBreakdown(w) {
+  const nm = s => s.name || ("Step " + s.id);
+  const agents = w.steps.filter(s => !s.code);
+  const lines = [[`${agents.length} agent step${agents.length === 1 ? "" : "s"} run once (${agents.map(nm).join(", ")})`, agents.length]];
+  (w.loops || []).forEach(l => {
+    const inLoop = agents.filter(s => s.id === l.from || s.id === l.to ||
+      (reachesVia(w, l.from, s.id) && reachesVia(w, s.id, l.to)));
+    const passes = l.maxPasses || 8;
+    if (inLoop.length) lines.push([`loop re-runs ${inLoop.map(nm).join(" → ")}: ${inLoop.length} step${inLoop.length === 1 ? "" : "s"} × up to ${passes} extra passes`, inLoop.length * passes]);
+    if (l.breakAgent) lines.push([`break judge (${l.breakAgent}) once per pass`, passes]);
+  });
+  const codeSteps = w.steps.filter(s => s.code);
+  if (codeSteps.length) lines.push([`${codeSteps.length} code step${codeSteps.length === 1 ? "" : "s"} (${codeSteps.map(nm).join(", ")}) — free, no agent`, 0]);
+  return lines;
+}
+
+// Rough cost transparency: worst-case agent invocations per task
+function estimateCalls(w) {
+  const agents = w.steps.filter(s => !s.code);
+  let n = agents.length;
+  (w.loops || []).forEach(l => {
+    const inLoop = agents.filter(s => s.id === l.from || s.id === l.to ||
+      (reachesVia(w, l.from, s.id) && reachesVia(w, s.id, l.to))).length;
+    const passes = (l.maxPasses || 8);
+    n += inLoop * passes + (l.breakAgent ? passes : 0);
+  });
+  return n;
+}
+let view = "build";
+let settings = { parallel: 2, binary: "", assistAgent: "" };
+try { Object.assign(settings, JSON.parse(localStorage.getItem("hoa_settings") || "{}")); } catch { }
+function assistAgent() {
+  if (settings.assistAgent && AGENTS.includes(settings.assistAgent)) return settings.assistAgent;
+  return AGENTS.includes("OpenAI") ? "OpenAI" : AGENTS[0];   // codex by default
+}
+const wf = () => wfs[active];
+
+/* ---------------- views ---------------- */
+function showView(v) {
+  view = v;
+  document.querySelectorAll("#viewSeg button").forEach(b => b.classList.toggle("on", b.dataset.view === v));
+  document.getElementById("buildPane").classList.toggle("on", v === "build");
+  document.getElementById("runsPane").classList.toggle("on", v === "runs");
+  document.getElementById("schedPane").classList.toggle("on", v === "schedules");
+  document.getElementById("wfbar").style.display = v === "schedules" ? "none" : "flex";
+  stopSchedPoll();
+  if (v === "schedules") { renderSchedules(); schedTimer = setInterval(renderSchedules, 3000); }
+  if (v === "build") renderBuild();
+  if (v === "runs") renderRuns();
+}
+document.querySelectorAll("#viewSeg button").forEach(b => b.onclick = () => showView(b.dataset.view));
+
+/* ---------------- workflow bar ---------------- */
+let savedPipelines = [];
+fetch("/pipelines").then(r => r.json()).then(d => { savedPipelines = d.pipelines || []; renderWfbar(); }).catch(() => { });
+function renderWfbar() {
+  const bar = document.getElementById("wfbar");
+  const openNames = new Set(wfs.map(w => w.name));
+  const savedOpts = savedPipelines.filter(n => !openNames.has(n));
+  bar.innerHTML = `
+    <select id="wfSel" title="Current workflow">${wfs.map((w, i) => `<option value="${i}" ${i === active ? "selected" : ""}>${esc(w.name || "Workflow " + (i + 1))}</option>`).join("")}${savedOpts.length ? `<optgroup label="Saved pipelines — pick to open">${savedOpts.map(n => `<option value="saved:${esc(n)}">${esc(n)}</option>`).join("")}</optgroup>` : ""}</select>
+    <button id="btnNew">+ New</button>
+    <button id="btnClone" title="Duplicate this workflow">⧉</button>
+    <button id="btnDelete" class="danger" title="Delete this workflow">Delete</button>
+    <div class="sep"></div>
+    <button class="primary" id="btnRun" title="Run this workflow">▶ Run</button>
+    <button id="btnSchedule" title="Run THIS workflow on a schedule until a gate passes">Schedule…</button>
+    <div class="sep"></div>
+    <button id="btnSave">Save</button>
+    <button id="btnOpen">Open</button>`;
+  bar.querySelector("#wfSel").onchange = async e => {
+    const v = e.target.value;
+    if (v.startsWith("saved:")) {
+      const name = v.slice(6);
+      try {
+        const j = await (await fetch("/pipeline?name=" + encodeURIComponent(name))).json();
+        if (!j.graph) throw new Error(j.error || "not found");
+        wfs.push(graphToWf(j.name, j.graph)); active = wfs.length - 1;
+      } catch (err) { toast("open failed: " + err.message, "err"); }
+      showView("build"); renderAll(); return;
+    }
+    active = +v; showView("build"); renderAll();
+  };
+  bar.querySelector("#btnNew").onclick = () => { wfs.push(emptyWf()); active = wfs.length - 1; showView("build"); renderAll(); };
+  bar.querySelector("#btnClone").onclick = () => {
+    const c = JSON.parse(JSON.stringify(wf()));
+    delete c._selected; delete c._connectFrom; delete c._preRewrite; delete c._preOptimize; delete c._preContracts;
+    c.name = (c.name || "workflow") + " copy";
+    wfs.push(c); active = wfs.length - 1; showView("build"); renderAll();
+  };
+  bar.querySelector("#btnDelete").onclick = deleteWorkflow;
+  bar.querySelector("#btnRun").onclick = () => launchChecked(wf());
+  bar.querySelector("#btnSchedule").onclick = openScheduleForm;
+  patchScheduleBtn();
+  bar.querySelector("#btnSave").onclick = saveWorkflow;
+  bar.querySelector("#btnOpen").onclick = openWorkflow;
+}
+function deleteWorkflow() {
+  const name = wf().name || "this workflow";
+  showModal(`<div style="margin-bottom:10px">Delete <b>${esc(name)}</b>? This can't be undone.</div>
+    <div style="display:flex;justify-content:flex-end;gap:8px"><button id="dCancel">Cancel</button><button class="primary2" style="background:var(--err)" id="dOk">Delete</button></div>`, box => {
+    box.querySelector("#dCancel").onclick = closeModal;
+    box.querySelector("#dOk").onclick = () => { wfs.splice(active, 1); if (!wfs.length) wfs.push(emptyWf()); active = Math.min(active, wfs.length - 1); closeModal(); showView("build"); renderAll(); toast("Workflow deleted", "run"); };
+  });
+}
+
+/* ---------------- build pane: ordered step list ---------------- */
+const buildForm = document.getElementById("buildForm");
+function renderBuild() {
+  const w = wf();
+  const agentOpts = a => AGENTS.map(x => `<option ${x === a ? "selected" : ""}>${x}</option>`).join("");
+  migrateLoops(w);
+  pruneDeps(w);
+  ensurePositions(w);
+  const stepOpts = sel => w.steps.map(s => `<option value="${s.id}" ${s.id === sel ? "selected" : ""}>${esc(s.name || ("Step " + s.id))}</option>`).join("");
+
+  const renderEditor = (s) => {
+    const i = w.steps.indexOf(s);
+    const deps = s.deps || [];
+    const nm = id => (w.steps.find(x => x.id === id) || {}).name || ("Step " + id);
+    const children = w.steps.filter(x => (x.deps || []).includes(s.id)).map(x => x.name);
+    const depChips = `
+        <div class="sub" style="margin-top:7px">${deps.length ? `runs after <b>${deps.map(nm).map(esc).join(", ")}</b>` : "independent root — starts immediately with the task"}${children.length ? ` · feeds <b>${children.map(esc).join(", ")}</b>` : ""}</div>`;
+    return `<div class="step" data-i="${i}">
+        <div class="top">
+          <input class="nm" data-k="name" value="${esc(s.name)}" placeholder="step name">
+          <select class="ag" data-k="agent" ${s.code ? "disabled" : ""}>${agentOpts(s.agent)}</select>
+          <div class="btns">
+            <button data-act="opt" title="an agent explores the working directory, rewrites THIS step's prompt to be precise and codebase-grounded, and proposes its output contract">✦ Rewrite this step</button>
+            <button data-act="del" title="delete step" class="danger">✕</button>
+          </div>
+        </div>
+        <textarea data-k="prompt" class="autogrow" data-maxh="420" rows="4" placeholder="${s.code ? "shell command — dependencies' outputs are piped to stdin, stdout is this step's output (e.g. sort -u  ·  python3 dedupe.py)" : "what this step's agent should do"}">${esc(s.prompt)}</textarea>
+        ${depChips}
+        ${s.code ? "" : `<div class="row2" style="margin-top:8px">
+          <div><label>Model (blank = ${esc(s.agent)}'s config default)</label>
+            <input data-k="model" list="models-${esc(s.agent)}" value="${esc(s.model || "")}" placeholder="agent default"></div>
+          <div style="max-width:150px"><label>Effort</label>
+            <select data-k="effort"><option value="">(default)</option>${EFFORTS.map(e => `<option ${(s.effort || "") === e ? "selected" : ""}>${e}</option>`).join("")}</select></div>
+        </div>`}
+        <label style="display:block;margin-top:7px;font-size:11px;color:var(--fg)">
+          <input type="checkbox" style="width:auto;margin-right:5px" data-code ${s.code ? "checked" : ""}><span title="plain-code reduce: dependencies’ outputs are piped to stdin, stdout flows on — dedupe, count, filter; zero tokens">Code step — prompt runs as a shell command</span></label>
+        ${s.code ? "" : `<label style="display:block;margin-top:5px;font-size:11px;color:var(--fg)">
+          <input type="checkbox" style="width:auto;margin-right:5px" data-fresh ${s.fresh ? "checked" : ""} ${!deps.length ? "disabled" : ""}><span title="still runs after its dependencies, but its message is built like a root: the task + its own prompt only">Start fresh — ignore dependencies’ output</span></label>
+        <label style="display:block;margin-top:5px;font-size:11px;color:var(--fg)">
+          <input type="checkbox" style="width:auto;margin-right:5px" data-raw ${s.raw ? "checked" : ""}><span title="sends the prompt verbatim so slash commands like /goal work; dependencies’ output is appended as the argument unless Start fresh is on">Raw — send prompt verbatim (slash commands)</span></label>`}
+        <label style="display:block;margin-top:5px;font-size:11px;color:var(--fg)">
+          <input type="checkbox" style="width:auto;margin-right:5px" data-gate ${s.gate ? "checked" : ""}><span title="the run pauses once this step’s stage finishes; you review/edit its output and downstream continues only when you approve. Not combinable with loops.">Human gate — pause for your approval</span></label>
+        <div class="row2">
+          <div><label style="margin-top:7px" title="advisory: folded into the prompt at run time so the agent knows the shape it receives from its dependencies">Input contract (JSON)</label>
+          <textarea data-k="inputSchema" class="autogrow" rows="2" placeholder='what this step receives, e.g. {"findings": "array"}' style="font-family:var(--mono);font-size:11.5px;white-space:pre-wrap;word-break:break-all">${esc(s.inputSchema || "")}</textarea></div>
+          <div><label style="margin-top:7px" title="enforced: free text is rejected and retried; types: string, number, boolean, array, object; ? suffix = optional">Output contract (JSON)</label>
+          <textarea data-k="schema" class="autogrow" rows="2" placeholder='what it must return, e.g. {"price": "number", "notes": "string?"}' style="font-family:var(--mono);font-size:11.5px;white-space:pre-wrap;word-break:break-all">${esc(s.schema || "")}</textarea></div>
+          <div style="flex:none;max-width:180px"><label style="margin-top:7px">&nbsp;</label>
+          <button data-act="ctr" title="an agent reads this step's prompt AND the whole graph's wiring, then proposes this step's input + output contracts (consistent with its neighbors)">✦ Suggest contracts</button></div>
+        </div>
+      </div>`;
+  };
+
+  const canvasH = Math.max(300, ...w.steps.map(s => (s.y || 0) + CN_H + 60));
+  const canvasW = Math.max(700, ...w.steps.map(s => (s.x || 0) + CN_W + 60));
+  const selected = w.steps.find(s => s.id === w._selected);
+  // A loop is only meaningful between CONNECTED steps: the feedback source
+  // must be downstream of the restart target. The selects only ever offer
+  // valid pairs — "from" = steps with at least one upstream, "to" = the
+  // chosen source's actual upstream steps.
+  const loopFromOpts = sel => w.steps.filter(s => (s.deps || []).length)
+    .map(s => `<option value="${s.id}" ${s.id === sel ? "selected" : ""}>${esc(s.name || ("Step " + s.id))}</option>`).join("");
+  const loopToOpts = (fromId, sel) => w.steps.filter(s => s.id !== fromId && reachesVia(w, fromId, s.id))
+    .map(s => `<option value="${s.id}" ${s.id === sel ? "selected" : ""}>${esc(s.name || ("Step " + s.id))}</option>`).join("");
+  const loopsHtml = (w.loops || []).map((l, li) => {
+    const valid = l.from !== l.to && reachesVia(w, l.from, l.to);
+    let scopeNote = "";
+    if (valid) {
+      // The loop re-runs every step on a path between target and source;
+      // everything else keeps its original output as fixed context.
+      const nm = x => (w.steps.find(s => s.id === x) || {}).name || ("Step " + x);
+      const inScope = w.steps.filter(s => (s.id === l.to || reachesVia(w, s.id, l.to)) && (s.id === l.from || reachesVia(w, l.from, s.id))).map(s => s.id);
+      const frozen = [...new Set(w.steps.filter(s => inScope.includes(s.id)).flatMap(s => s.deps || []).filter(d => !inScope.includes(d)))];
+      scopeNote = `<div class="sub" style="margin-bottom:6px">↻ each pass re-runs <b>${inScope.map(nm).map(esc).join(" → ")}</b>${frozen.length ? ` · fixed input: ${frozen.map(nm).map(esc).join(", ")}` : ""}</div>`;
+    }
+    return `
+      <div class="step" style="margin-top:8px${valid ? "" : ";border-color:var(--err)"}" data-loop="${li}">
+        ${valid ? scopeNote : `<div style="color:var(--err);font-size:12px;margin-bottom:6px">⚠ these steps are no longer connected — a loop needs a dependency path from the restart target down to the feedback source. Rewire them or delete this loop.</div>`}
+        <div class="row2">
+          <div><label>After (feedback source)</label><select data-lk="from">${loopFromOpts(l.from)}</select></div>
+          <div><label>loop back to (restart target)</label><select data-lk="to">${loopToOpts(l.from, l.to)}</select></div>
+          <div style="max-width:110px"><label>Max passes</label><input data-lk="maxPasses" type="number" min="1" value="${l.maxPasses || 8}"></div>
+          <div style="max-width:150px"><label>&nbsp;</label><button data-lbreak="${li}" title="an agent designs this loop's stop: a deterministic shell gate when the goal is machine-checkable, else a precise judge condition">✦ Suggest break</button></div>
+          <div style="max-width:60px"><label>&nbsp;</label><button data-delloop="${li}" class="danger">✕</button></div>
+        </div>
+        <div class="row2">
+          <div><label>Break agent</label><select data-lk="breakAgent"><option value="">(none)</option>${agentOpts(l.breakAgent)}</select></div>
+        </div>
+        <label>Stop when… (for the break agent)</label><textarea data-lk="breakCondition" rows="1">${esc(l.breakCondition || "")}</textarea>
+        <label title="deterministic gate: shell command, exit 0 = stop; replaces the break agent when set">Break command</label><input data-lk="breakCommand" placeholder="e.g. cargo test" value="${esc(l.breakCommand || "")}">
+      </div>`;
+  }).join("");
+
+  const stepsHtml = `
+    <div class="box" style="padding:10px 12px">
+      <h2>Canvas</h2>
+      <div class="sub">${w._connectFrom != null ? `<b style="color:var(--run)">connecting from "${esc((w.steps.find(x => x.id === w._connectFrom) || {}).name || "")}" — click a target step (forward = dependency; backward onto something it already depends on = loop; same pair again = disconnect). Esc cancels.</b>` : `drag to move · drag from ● to wire · click a wire to remove it · backward wire = loop · unwired steps run in parallel`}</div>
+      <div class="canvas" id="canvas" style="height:${Math.min(canvasH, 560)}px">
+        <svg id="wires" width="${canvasW}" height="${canvasH}" style="width:${canvasW}px;height:${canvasH}px">${renderWires(w)}</svg>
+        ${renderCanvasNodes(w)}
+        ${w.steps.length === 1 && !(w.steps[0].prompt || "").trim() ? `<div style="position:absolute;left:230px;top:30px;max-width:420px;color:var(--muted);font-size:12.5px;line-height:1.6;pointer-events:none">← write the Task above, then <b>✦ Draft workflow</b> designs the steps for you.<br>Or build by hand: click the step to write its prompt · drag from ● to wire.</div>` : ""}
+      </div>
+      <div style="display:flex;gap:8px;margin-top:10px">
+        <button class="addstep" id="addStep" style="margin-top:0">+ Add step</button>
+        <button id="tidyBtn" title="auto-arrange the canvas by execution order" style="flex:none">Tidy</button>
+      </div>
+    </div>
+    <div class="box">
+      <h2>Step editor ${selected ? `— ${esc(selected.name || "")}` : ""}</h2>
+      ${selected ? renderEditor(selected) : `<div class="sub" style="margin-top:6px">click a step on the canvas to edit its prompt, agent, model, contract, gate…</div>`}
+    </div>`;
+  const datalists = AGENTS.map(a => `<datalist id="models-${esc(a)}">${(MODEL_SUGGESTIONS[a] || []).map(m => `<option value="${esc(m)}">`).join("")}</datalist>`).join("");
+
+  buildForm.innerHTML = `
+    <div class="box">
+      <h2>Workflow</h2>
+      <label>Name</label><input id="wfName" value="${esc(w.name)}">
+      <div class="row2">
+        <div><label>Working directory</label><input id="wfDir" placeholder="/Users/you/project" value="${esc(w.workdir)}"></div>
+        <div style="max-width:220px"><label title="hard budget: exceeding it cancels the run; blank = unlimited">Max agent calls</label><input id="wfMaxCalls" type="number" min="1" placeholder="unlimited" value="${esc(String(w.maxCalls || ""))}"></div>
+      </div>
+      <label class="inl" style="margin-top:10px"><input type="checkbox" id="wfEdits" title="agents may create and edit files; each workflow runs in an isolated git worktree and returns a diff" ${w.allowEdits ? "checked" : ""}> Allow edits</label>
+      <label class="inl" style="margin-top:4px"><input type="checkbox" id="wfMemory" title="agents recall lessons from previous runs and save new ones" ${w.memory ? "checked" : ""}> Cross-run memory</label>
+      <label title="fed to the workflow's root steps; blank = run with just the step prompts">Task</label>
+      <textarea id="wfTasks" rows="2" placeholder="e.g. fix the login redirect bug">${esc(w.tasks)}</textarea>
+      <div style="margin-top:6px;display:flex;gap:8px;align-items:center">
+        <button id="wfDraft" title="one agent call designs the whole workflow FROM your Task: steps with precise prompts, wiring, a loop if iteration helps, and contracts. Replaces this workflow's steps (⌘Z undoes).">✦ Draft workflow</button>
+        <button id="wfRewrite" title="An agent explores the working directory and rewrites your plain-English task into a precise, codebase-grounded prompt — and picks the best agent, effort, and attack mode (/goal, /loop, plan-first, workflow) for it. Auto-applied to single-step workflows; review/edit before running.">✦ Rewrite task</button>
+        ${w._preRewrite != null ? `<button id="wfRewriteUndo">↩ Undo rewrite</button>` : ""}
+        <button id="wfOptimize" title="One agent call: opens your working directory, reads every step's prompt, rewrites each to be precise and codebase-grounded (real paths, real names, success criteria), proposes contracts, and recommends agent + effort (+ persona/mode where they pay) per step. Nothing runs — results land in the form for your review, with Undo.">✦ Improve all prompts</button>
+        <button id="wfContracts" title="One agent call reasons over the whole graph's wiring and proposes a CONSISTENT input + output contract for every step: outputs are enforced (reject & retry), inputs are folded into each prompt so the agent knows what shape arrives.">✦ Suggest contracts</button>
+        ${w._preOptimize != null ? `<button id="wfOptimizeUndo">↩ Undo optimize</button>` : ""}
+        ${w._preContracts != null ? `<button id="wfContractsUndo">↩ Undo contracts</button>` : ""}
+        <span class="sub" id="estBtn" style="margin-left:auto;cursor:pointer;text-decoration:underline dotted" title="click for the exact breakdown">≈ ${estimateCalls(w)} agent call${estimateCalls(w) === 1 ? "" : "s"}/task worst-case${w.maxCalls ? ` · capped at ${w.maxCalls}` : ""}</span>
+      </div>
+    </div>
+
+    ${stepsHtml}
+
+    <div class="box">
+      <h2>Loops (${(w.loops || []).length})</h2>
+      <div class="sub">Re-runs the path between two connected steps until the break condition holds. Create one by wiring backward on the canvas.</div>
+      ${loopsHtml}
+      <button class="addstep" id="addLoop">+ Add loop</button>
+    </div>${datalists}`;
+  wireBuild();
+  snapshot();
+}
+function wireBuild() {
+  const w = wf();
+  const bind = (id, fn) => { const el = document.getElementById(id); if (el) el.oninput = () => fn(el); };
+  bind("wfName", el => { w.name = el.value; renderWfbar(); });
+  bind("wfDir", el => w.workdir = el.value);
+  bind("wfTasks", el => w.tasks = el.value);
+  const ed = document.getElementById("wfEdits"); if (ed) ed.onchange = () => w.allowEdits = ed.checked;
+  const mem = document.getElementById("wfMemory"); if (mem) mem.onchange = () => w.memory = mem.checked;
+  bind("wfMaxCalls", el => w.maxCalls = el.value ? Math.max(1, +el.value) : "");
+
+  const est = document.getElementById("estBtn");
+  if (est) est.onclick = () => {
+    const lines = estimateBreakdown(w);
+    const total = lines.reduce((a, [, n]) => a + n, 0);
+    showModal(`<div style="font-weight:600;margin-bottom:10px">Worst-case cost per task</div>
+      ${lines.map(([t, n]) => `<div style="display:flex;gap:10px;justify-content:space-between;font-size:12.5px;margin-bottom:6px"><span>${esc(t)}</span><b style="font-variant-numeric:tabular-nums">${n}</b></div>`).join("")}
+      <div style="display:flex;justify-content:space-between;border-top:1px solid var(--edge);padding-top:8px;margin-top:8px;font-weight:600"><span>total agent invocations</span><span>≈ ${total}</span></div>
+      <div class="sub" style="margin-top:8px">"Worst case" = every loop runs to its full pass cap. Loops usually break earlier via their break condition${w.maxCalls ? `; the hard budget of ${w.maxCalls} cancels the run beyond that` : " — and you can cap spend with Max agent calls"}.</div>
+      <div style="display:flex;justify-content:flex-end;margin-top:10px"><button id="ebClose">Close</button></div>`,
+      box => box.querySelector("#ebClose").onclick = closeModal);
+  };
+
+  const opt = document.getElementById("wfOptimize");
+  opt.onclick = async () => {
+    const steps = w.steps.map(s => ({ id: s.id, name: s.name, prompt: s.prompt, code: !!s.code, raw: !!s.raw, deps: s.deps || [], input: s.inputSchema || "", output: s.schema || "" }));
+    if (!steps.some(s => !s.code && !s.raw && (s.prompt || "").trim())) { toast("write step prompts first", "err"); return; }
+    try {
+      const data = await aiTask("optimize",
+        { steps, workdir: w.workdir, task: w.tasks, agent: assistAgent(), binary: settings.binary },
+        "Improving every step — prompts + input & output contracts");
+      w._preOptimize = w.steps.map(s => ({ id: s.id, prompt: s.prompt, schema: s.schema || "", inputSchema: s.inputSchema || "", agent: s.agent, model: s.model || "", effort: s.effort || "", raw: !!s.raw }));
+      w.steps.forEach(s => { const v = data.steps[String(s.id)]; if (v && !s.code && !s.raw) applyStepRec(s, v); });
+      toast("✦ steps improved (prompts, contracts, agent/effort per step) — review before running", "ok", 6000);
+      renderBuild();
+    } catch (e) { aiFail(e, "optimize"); }
+  };
+  const optu = document.getElementById("wfOptimizeUndo");
+  if (optu) optu.onclick = () => { (w._preOptimize || []).forEach(p => { const s = w.steps.find(x => x.id === p.id); if (s) { s.prompt = p.prompt; s.schema = p.schema; if (p.inputSchema != null) s.inputSchema = p.inputSchema; if (p.agent != null) { s.agent = p.agent; s.model = p.model; s.effort = p.effort; s.raw = p.raw; } } }); delete w._preOptimize; renderBuild(); };
+
+  const ctr = document.getElementById("wfContracts");
+  ctr.onclick = async () => {
+    const steps = w.steps.filter(s => !s.raw).map(s => ({ id: s.id, name: s.name, prompt: s.prompt, deps: s.deps || [], input: s.inputSchema || "", output: s.schema || "" }));
+    if (!steps.length) { toast("no steps to contract", "err"); return; }
+    try {
+      const data = await aiTask("contracts",
+        { steps, workdir: w.workdir, task: w.tasks, agent: assistAgent(), binary: settings.binary },
+        "Designing input + output contracts across the whole graph");
+      w._preContracts = w.steps.map(s => ({ id: s.id, schema: s.schema || "", inputSchema: s.inputSchema || "" }));
+      let applied = 0;
+      w.steps.forEach(s => {
+        const v = data.steps[String(s.id)];
+        if (!v || s.raw) return;
+        if (v.output != null && v.output !== "") { s.schema = v.output; applied++; }
+        if (v.input != null && v.input !== "") { s.inputSchema = v.input; applied++; }
+      });
+      toast(`✦ ${applied} contract${applied === 1 ? "" : "s"} proposed — review each step before running`, "ok", 6000);
+      renderBuild();
+    } catch (e) { aiFail(e, "contracts"); }
+  };
+  const ctru = document.getElementById("wfContractsUndo");
+  if (ctru) ctru.onclick = () => { (w._preContracts || []).forEach(p => { const s = w.steps.find(x => x.id === p.id); if (s) { s.schema = p.schema; s.inputSchema = p.inputSchema; } }); delete w._preContracts; renderBuild(); };
+
+  const dft = document.getElementById("wfDraft");
+  dft.onclick = async () => {
+    if (!(w.tasks || "").trim()) { toast("write the Task first — the draft is designed from it", "err"); return; }
+    try {
+      const data = await aiTask("plan",
+        { task: w.tasks, workdir: w.workdir, agent: assistAgent(), binary: settings.binary },
+        "Drafting the workflow from your task");
+      const agent = AGENTS.includes("Claude") ? "Claude" : AGENTS[0];
+      w.steps = data.steps.map(s => ({ id: s.id, name: s.name || ("Step " + s.id), agent, prompt: s.prompt || "", deps: s.deps || [], gate: !!s.gate, schema: s.output || "", inputSchema: s.input || "", x: 0, y: 0 }));
+      w.nextId = Math.max(0, ...w.steps.map(s => s.id)) + 1;
+      w.loops = (data.loops || []).map(l => ({ from: l.from, to: l.to, maxPasses: l.max_passes || 4, breakAgent: l.break_condition ? agent : "", breakCondition: l.break_condition || "", breakCommand: "" }));
+      delete w._selected;
+      tidyLayout(w);
+      toast(`✦ drafted ${w.steps.length} step${w.steps.length === 1 ? "" : "s"}${w.loops.length ? " + a loop" : ""}${w.steps.some(s => s.gate) ? " + a human gate" : ""} — review the graph, then Run (⌘Z undoes)`, "ok", 6000);
+      renderBuild();
+    } catch (e) { aiFail(e, "draft"); }
+  };
+
+  const rw = document.getElementById("wfRewrite");
+  rw.onclick = async () => {
+    const prompt = (w.tasks || "").trim();
+    if (!prompt) { toast("write a task first", "err"); return; }
+    try {
+      const data = await aiTask("rewrite",
+        { prompt, workdir: w.workdir, agent: assistAgent(), binary: settings.binary },
+        "Rewriting the task — codebase-grounded");
+      const lone = w.steps.length === 1 && !w.steps[0].code ? w.steps[0] : null;
+      w._preRewrite = { tasks: w.tasks, step: lone ? { id: lone.id, prompt: lone.prompt, agent: lone.agent, model: lone.model || "", effort: lone.effort || "", raw: !!lone.raw } : null };
+      w.tasks = data.rewritten;
+      const applied = [];
+      if (lone) {
+        // Single-step workflow: the recommendation IS the step's config — apply it.
+        if (data.agent) { lone.agent = data.agent; applied.push(data.agent); }
+        if (data.model) lone.model = data.model;
+        if (data.effort) { lone.effort = data.effort; applied.push(data.effort + " effort"); }
+        if ((data.mode === "goal" || data.mode === "loop") && data.rewritten.trimStart().startsWith("/")) {
+          // Slash task must reach the CLI verbatim at position 0: raw step, empty prompt.
+          lone.raw = true; lone.prompt = ""; applied.push("runs as " + data.rewritten.trimStart().split(/\s/)[0]);
+        } else if (data.mode === "plan-first") applied.push("plan-first");
+      }
+      if (data.mode === "workflow") toast("💡 this task wants a multi-step workflow — try ✦ Draft workflow", "run", 8000);
+      toast(`✦ task rewritten${applied.length ? " · " + applied.join(" · ") : ""}${data.why ? " — " + data.why : ""}`, "ok", 8000);
+      renderBuild();
+    } catch (e) { aiFail(e, "rewrite"); }
+  };
+  const rwu = document.getElementById("wfRewriteUndo");
+  if (rwu) rwu.onclick = () => {
+    const p = w._preRewrite;
+    if (p && typeof p === "object") {
+      w.tasks = p.tasks;
+      if (p.step) { const s = w.steps.find(x => x.id === p.step.id); if (s) { s.prompt = p.step.prompt; s.agent = p.step.agent; s.model = p.step.model; s.effort = p.step.effort; s.raw = p.step.raw; } }
+    } else w.tasks = p;
+    delete w._preRewrite; renderBuild();
+  };
+
+  buildForm.querySelectorAll(".step[data-i]").forEach(row => {
+    const i = +row.dataset.i, s = w.steps[i];
+    if (!s) return;
+    row.querySelectorAll(".autogrow").forEach(el => autoGrow(el, +el.dataset.maxh || 99999));
+    row.querySelectorAll("[data-k]").forEach(el => {
+      el.oninput = () => {
+        s[el.dataset.k] = el.value;
+        if (el.classList.contains("autogrow")) autoGrow(el, +el.dataset.maxh || 99999);
+        if (el.dataset.k === "name") {
+          // live-patch the canvas node instead of re-rendering (which would
+          // steal focus from the input on every keystroke)
+          const cn = document.querySelector(`.cnode[data-node="${s.id}"] .cn-name`);
+          if (cn) cn.textContent = s.name || ("Step " + s.id);
+        }
+      };
+      // selects (agent) and finished text edits refresh the full view
+      el.onchange = () => {
+        const v = (el.dataset.k === "schema" || el.dataset.k === "inputSchema") ? el.value.trim() : el.value;
+        s[el.dataset.k] = v;
+        renderBuild();
+      };
+    });
+    const fr = row.querySelector("[data-fresh]"); if (fr) fr.onchange = () => { s.fresh = fr.checked; };
+    const rw = row.querySelector("[data-raw]"); if (rw) rw.onchange = () => { s.raw = rw.checked; };
+    const cd = row.querySelector("[data-code]"); if (cd) cd.onchange = () => { s.code = cd.checked; if (cd.checked) { s.raw = false; s.fresh = false; s.model = ""; s.effort = ""; } renderBuild(); };
+    const gt = row.querySelector("[data-gate]"); if (gt) gt.onchange = () => { s.gate = gt.checked; if (gt.checked && (w.loops || []).length) { w.loops = []; toast("loops removed — human gates and loops can't combine"); } renderBuild(); };
+    row.querySelector('[data-act="del"]').onclick = () => { const id = s.id; w.steps.splice(i, 1); pruneDeps(w); if (w._selected === id) delete w._selected; if (!w.steps.length) w.steps.push({ id: w.nextId++, name: "Step 1", agent: "Claude", prompt: "", deps: [], x: 30, y: 24 }); renderBuild(); };
+    row.querySelector('[data-act="opt"]').onclick = ev => optimizeStep(w, s, ev.target);
+    const cbtn = row.querySelector('[data-act="ctr"]');
+    if (cbtn) cbtn.onclick = async () => {
+      // Scope = this step + its direct parents and children — the only steps
+      // that determine its contracts. Parents fix what arrives; children fix
+      // how the output is consumed. Nothing else goes along.
+      const parents = (s.deps || []).map(d => w.steps.find(x => x.id === d)).filter(Boolean);
+      const children = w.steps.filter(x => (x.deps || []).includes(s.id));
+      const scopeIds = new Set([s.id, ...parents.map(p => p.id), ...children.map(c => c.id)]);
+      const steps = [...parents, s, ...children].filter(x => !x.raw)
+        .map(x => ({ id: x.id, name: x.name, prompt: x.prompt,
+                     deps: (x.deps || []).filter(d => scopeIds.has(d)),
+                     input: x.inputSchema || "", output: x.schema || "" }));
+      try {
+        const data = await aiTask("contracts",
+          { steps, scoped: true, workdir: w.workdir, task: w.tasks, agent: assistAgent(), binary: settings.binary },
+          `Designing contracts for "${s.name}" from its parents and children`);
+        const v = data.steps[String(s.id)];
+        if (v && (v.input || v.output)) {
+          w._preContracts = w.steps.map(x => ({ id: x.id, schema: x.schema || "", inputSchema: x.inputSchema || "" }));
+          if (v.output) s.schema = v.output;
+          if (v.input) s.inputSchema = v.input;
+          toast(`✦ contracts proposed for "${s.name}" — review before running`, "ok", 5000);
+          renderBuild();
+        } else toast("the agent proposed no contract for this step (free text may be right here)");
+      } catch (e) { aiFail(e, "contracts"); }
+    };
+  });
+  document.getElementById("addStep").onclick = () => {
+    const id = w.nextId++;
+    w.steps.push({ id, name: "Step " + id, agent: "Claude", prompt: "", deps: [], x: 30 + ((w.steps.length * 40) % 500), y: 24 + ((w.steps.length * 60) % 300) });
+    w._selected = id;
+    renderBuild();
+  };
+
+  // Canvas: drag to move; click to select; link button then a target to wire.
+  const completeConnect = (fromId, toId) => {
+    delete w._connectFrom;
+    const byId = {}; w.steps.forEach(s => byId[s.id] = s);
+    const a = byId[fromId], b = byId[toId];
+    if (!a || !b) { renderBuild(); return; }
+    if ((b.deps || []).includes(a.id)) { b.deps = b.deps.filter(d => d !== a.id); toast(`disconnected ${a.name} → ${b.name}`); renderBuild(); return; }
+    if ((a.deps || []).includes(b.id)) { a.deps = a.deps.filter(d => d !== b.id); toast(`disconnected ${b.name} → ${a.name}`); renderBuild(); return; }
+    const li = (w.loops || []).findIndex(l => (l.from === a.id && l.to === b.id) || (l.from === b.id && l.to === a.id));
+    if (li >= 0) { w.loops.splice(li, 1); toast("loop removed"); renderBuild(); return; }
+    if (reachesVia(w, a.id, b.id)) {
+      // Backward wire (target is upstream) — that's a loop-back.
+      w.loops.push({ from: a.id, to: b.id, maxPasses: 8, breakAgent: a.agent || "Claude", breakCondition: "", breakCommand: "" });
+      toast(`↻ loop: after ${a.name}, go back to ${b.name} — set its break condition below`, "ok", 5000);
+    } else {
+      b.deps = [...(b.deps || []), a.id];
+      toast(`connected ${a.name} → ${b.name}`, "ok");
+    }
+    renderBuild();
+  };
+  buildForm.querySelectorAll(".cnode").forEach(node => {
+    const id = +node.dataset.node;
+    const s = w.steps.find(x => x.id === id);
+    if (!s) return;
+    let drag = null;
+    node.onpointerdown = e => {
+      if (e.target.closest("[data-link],[data-port],[data-nopt]")) return;
+      drag = { sx: e.clientX, sy: e.clientY, ox: s.x, oy: s.y, moved: false };
+      node.setPointerCapture(e.pointerId);
+    };
+    node.onpointermove = e => {
+      if (!drag) return;
+      const dx = e.clientX - drag.sx, dy = e.clientY - drag.sy;
+      if (Math.abs(dx) + Math.abs(dy) > 4) drag.moved = true;
+      if (!drag.moved) return;
+      s.x = Math.max(0, drag.ox + dx); s.y = Math.max(0, drag.oy + dy);
+      node.style.left = s.x + "px"; node.style.top = s.y + "px";
+      const wires = document.getElementById("wires");
+      if (wires) {
+        // The canvas extent grows with the graph — drag past the edge and it
+        // scrolls after you; the viewport itself is resizable by its handle.
+        const needW = s.x + CN_W + 60, needH = s.y + CN_H + 60;
+        if (needW > +wires.getAttribute("width")) { wires.setAttribute("width", needW); wires.style.width = needW + "px"; }
+        if (needH > +wires.getAttribute("height")) { wires.setAttribute("height", needH); wires.style.height = needH + "px"; }
+        wires.innerHTML = renderWires(w);
+      }
+    };
+    node.onpointerup = e => {
+      if (e.target.closest("[data-link],[data-port],[data-nopt]")) { drag = null; return; }
+      const moved = drag && drag.moved; drag = null;
+      if (moved) { renderBuild(); return; }
+      if (w._connectFrom != null && w._connectFrom !== id) { completeConnect(w._connectFrom, id); return; }
+      if (w._connectFrom === id) { delete w._connectFrom; renderBuild(); return; }
+      w._selected = id; renderBuild();
+    };
+    // Hover a step → its own wires light up, the rest dim: in a dense fan-in
+    // graph you can actually SEE what a node is connected to.
+    node.onmouseenter = () => {
+      document.querySelectorAll("#wires [data-edge]").forEach(p => {
+        const [f, t] = p.dataset.edge.split("-").map(Number);
+        if (f === id || t === id) { p.style.stroke = "var(--accent)"; p.style.strokeWidth = "2.2"; }
+        else p.style.opacity = ".18";
+      });
+      document.querySelectorAll("#wires [data-loopedge]").forEach(p => {
+        const l = (w.loops || [])[+p.dataset.loopedge];
+        if (l && (l.from === id || l.to === id)) p.style.strokeWidth = "2.2";
+        else p.style.opacity = ".18";
+      });
+    };
+    node.onmouseleave = () => {
+      document.querySelectorAll("#wires path").forEach(p => { p.style.stroke = ""; p.style.strokeWidth = ""; p.style.opacity = ""; });
+    };
+    node.querySelector("[data-link]").onclick = e => {
+      e.stopPropagation();
+      if (w._connectFrom != null && w._connectFrom !== id) { completeConnect(w._connectFrom, id); return; }
+      w._connectFrom = w._connectFrom === id ? undefined : id;
+      if (w._connectFrom === undefined) delete w._connectFrom;
+      renderBuild();
+    };
+    const nopt = node.querySelector("[data-nopt]");
+    if (nopt) nopt.onclick = e => { e.stopPropagation(); optimizeStep(w, s, nopt); };
+    // Drag from the ● port onto another step = wire it (backward = loop)
+    const port = node.querySelector("[data-port]");
+    port.onpointerdown = e => {
+      e.stopPropagation();
+      port.setPointerCapture(e.pointerId);
+      const wires = document.getElementById("wires");
+      const cv = document.getElementById("canvas");
+      const temp = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      temp.setAttribute("stroke", "var(--run)"); temp.setAttribute("stroke-width", "1.6");
+      temp.setAttribute("fill", "none"); temp.setAttribute("stroke-dasharray", "5 4");
+      wires.appendChild(temp);
+      const x1 = s.x + CN_W / 2, y1 = s.y + CN_H;
+      port.onpointermove = ev => {
+        const r = cv.getBoundingClientRect();
+        const x2 = ev.clientX - r.left + cv.scrollLeft, y2 = ev.clientY - r.top + cv.scrollTop;
+        temp.setAttribute("d", `M${x1},${y1} C${x1},${y1 + 30} ${x2},${y2 - 30} ${x2},${y2}`);
+      };
+      port.onpointerup = ev => {
+        port.onpointermove = null; port.onpointerup = null;
+        temp.remove();
+        port.releasePointerCapture(ev.pointerId);
+        const hit = document.elementFromPoint(ev.clientX, ev.clientY);
+        const target = hit && hit.closest(".cnode");
+        if (target && +target.dataset.node !== id) completeConnect(id, +target.dataset.node);
+      };
+    };
+  });
+
+  // Click a wire to remove it
+  buildForm.querySelectorAll("[data-edge]").forEach(p => p.onclick = () => {
+    const [from, to] = p.dataset.edge.split("-").map(Number);
+    const t = w.steps.find(x => x.id === to);
+    if (t) { t.deps = (t.deps || []).filter(d => d !== from); toast("disconnected"); renderBuild(); }
+  });
+  buildForm.querySelectorAll("[data-loopedge]").forEach(p => p.onclick = () => {
+    w.loops.splice(+p.dataset.loopedge, 1); toast("loop removed"); renderBuild();
+  });
+
+  const tidy = document.getElementById("tidyBtn");
+  if (tidy) tidy.onclick = () => { tidyLayout(w); renderBuild(); };
+
+  // Keyboard: Esc cancels connecting; Delete removes the selected step
+  document.onkeydown = e => {
+    const typing = /INPUT|TEXTAREA|SELECT/.test((document.activeElement || {}).tagName || "");
+    if ((e.metaKey || e.ctrlKey) && (e.key === "z" || e.key === "Z") && !typing && view === "build") {
+      e.preventDefault(); timeTravel(e.shiftKey ? 1 : -1); return;
+    }
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && view === "build") {
+      e.preventDefault(); launchChecked(w); return;
+    }
+    if (!typing && !e.metaKey && !e.ctrlKey && ["1", "2", "3"].includes(e.key)) {
+      showView(["build", "runs", "schedules"][+e.key - 1]); return;
+    }
+    if (e.key === "Escape" && w._connectFrom != null) { delete w._connectFrom; renderBuild(); }
+    else if ((e.key === "Delete" || e.key === "Backspace") && !typing && w._selected != null && view === "build") {
+      const id = w._selected;
+      w.steps = w.steps.filter(x => x.id !== id);
+      pruneDeps(w); delete w._selected;
+      if (!w.steps.length) w.steps.push({ id: w.nextId++, name: "Step 1", agent: "Claude", prompt: "", deps: [], x: 30, y: 24 });
+      renderBuild();
+    }
+  };
+
+  // Loops list
+  buildForm.querySelectorAll("[data-loop]").forEach(card => {
+    const l = (w.loops || [])[+card.dataset.loop];
+    if (!l) return;
+    card.querySelectorAll("[data-lk]").forEach(el => el.onchange = () => {
+      const k = el.dataset.lk;
+      l[k] = (k === "from" || k === "to") ? +el.value : k === "maxPasses" ? Math.max(1, +el.value || 1) : el.value;
+      if (k === "from" && !(l.from !== l.to && reachesVia(w, l.from, l.to))) {
+        // the new source invalidated the target — snap to a real ancestor
+        const s = w.steps.find(x => x.id === l.from);
+        l.to = (s && (s.deps || [])[0]) || l.to;
+      }
+      if (k === "from" || k === "to") renderBuild();
+    });
+  });
+  buildForm.querySelectorAll("[data-lbreak]").forEach(b => b.onclick = async () => {
+    const l = (w.loops || [])[+b.dataset.lbreak];
+    if (!l) return;
+    const inScope = w.steps.filter(s => (s.id === l.to || reachesVia(w, s.id, l.to)) && (s.id === l.from || reachesVia(w, l.from, s.id)));
+    if (!inScope.length) { toast("wire the loop's steps first", "err"); return; }
+    // Feed the literal sub-graph: execution order, in-loop wiring, endpoints,
+    // and the frozen outside inputs — the stop signal is designed from it.
+    const level = computeDepth(w);
+    inScope.sort((a, b) => (level[a.id] || 0) - (level[b.id] || 0));
+    const scopeIds = new Set(inScope.map(s => s.id));
+    const nm = id => (w.steps.find(x => x.id === id) || {}).name || ("Step " + id);
+    const frozen = [...new Set(inScope.flatMap(s => (s.deps || []).filter(d => !scopeIds.has(d))))].map(nm);
+    try {
+      const data = await aiTask("breaks",
+        { loop: { max_passes: l.maxPasses, restart_target: nm(l.to), feedback_source: nm(l.from), current_command: l.breakCommand || "", current_condition: l.breakCondition || "" },
+          steps: inScope.map(s => ({ name: s.name, waits_for: (s.deps || []).filter(d => scopeIds.has(d)).map(nm), prompt: s.prompt, output: s.schema || "" })),
+          frozen_inputs: frozen,
+          task: w.tasks, workdir: w.workdir, agent: assistAgent(), binary: settings.binary },
+        "Designing this loop's stop from its sub-graph");
+      if (data.break_command) { l.breakCommand = data.break_command; l.breakCondition = ""; l.breakAgent = ""; }
+      else { l.breakCondition = data.break_condition; l.breakCommand = ""; l.breakAgent = l.breakAgent || (AGENTS.includes("Claude") ? "Claude" : AGENTS[0]); }
+      toast(data.break_command ? "✦ deterministic gate proposed: " + data.break_command : "✦ judge condition proposed — review it", "ok", 6000);
+      renderBuild();
+    } catch (e) { aiFail(e, "break design"); }
+  });
+  buildForm.querySelectorAll("[data-delloop]").forEach(b => b.onclick = () => { w.loops.splice(+b.dataset.delloop, 1); renderBuild(); });
+  document.getElementById("addLoop").onclick = () => {
+    // A loop only exists between connected steps: pick the deepest step that
+    // has an upstream, looping back to its dependency. No wiring = no loop.
+    const level = computeDepth(w);
+    const candidates = w.steps.filter(s => (s.deps || []).length).sort((a, b) => (level[b.id] || 0) - (level[a.id] || 0));
+    if (!candidates.length) { toast("wire some steps first — a loop re-runs a connected path, so it needs at least one dependency arrow", "err", 6000); return; }
+    const from = candidates[0];
+    w.loops.push({ from: from.id, to: from.deps[0], maxPasses: 8, breakAgent: "Claude", breakCondition: "", breakCommand: "" });
+    renderBuild();
+  };
+}
+
+/* ---------------- serialize (steps -> engine graph) ---------------- */
+function serializeGraph(w) {
+  migrateLoops(w); pruneDeps(w); ensurePositions(w);
+  const level = computeDepth(w);
+  const maxLv = Math.max(0, ...w.steps.map(s => level[s.id] || 0));
+  const ordered = [...w.steps].sort((a, b) => (level[a.id] || 0) - (level[b.id] || 0));
+  const nodes = ordered.map(s => {
+    const n = { id: s.id, name: s.name, prompt: s.prompt, replicas: 1,
+                pos: [Math.max(0, Math.round(s.x / 40)), Math.max(0, Math.round(s.y / 40))],
+                level: level[s.id] || 0 };
+    if (s.code) { n.command = s.prompt; n.prompt = ""; }
+    else {
+      n.agents = [s.agent];
+      if ((s.model || "").trim()) n.model = s.model.trim();
+      if ((s.effort || "").trim()) n.effort = s.effort.trim();
+      if (s.fresh && (s.deps || []).length) n.fresh = true;
+      if (s.raw) n.raw = true;
+    }
+    if ((s.schema || "").trim() && !s.raw) n.schema = s.schema.trim();
+    if ((s.inputSchema || "").trim() && !s.raw) n.input_schema = s.inputSchema.trim();
+    if (s.gate && (level[s.id] || 0) < maxLv) n.gate = true;
+    return n;
+  });
+  // Edges = the depends-on sets (kept acyclic at edit time: a backward wire
+  // becomes a loop instead). No deps = independent root; fan-in/out free.
+  const edges = [];
+  ordered.forEach(s => (s.deps || []).forEach(d => edges.push({ from: d, to: s.id, scatter: false })));
+  const loops = (w.loops || []).map(l => ({ from: l.from, to: l.to, count: l.maxPasses || 8, breakAgent: l.breakAgent || "", breakCondition: l.breakCondition || "", breakCommand: l.breakCommand || "" }));
+  return { nodes, edges, loops };
+}
+function graphToWf(name, g) {
+  // Topologically order nodes (Kahn) so the step list is a valid order for
+  // any DAG; each step's depends-on set comes straight from the edges.
+  const nodes = (g.nodes || []).slice(), byId = {}; nodes.forEach(n => byId[n.id] = n);
+  const indeg = {}, out = {}; nodes.forEach(n => { indeg[n.id] = 0; out[n.id] = []; });
+  (g.edges || []).forEach(e => { if (indeg[e.to] != null && out[e.from]) { indeg[e.to]++; out[e.from].push(e.to); } });
+  const queue = nodes.filter(n => indeg[n.id] === 0).map(n => n.id), ordered = [], seen = new Set();
+  while (queue.length) { const id = queue.shift(); if (seen.has(id)) continue; seen.add(id); ordered.push(byId[id]); out[id].forEach(t => { if (--indeg[t] === 0) queue.push(t); }); }
+  nodes.forEach(n => { if (!seen.has(n.id)) ordered.push(n); });
+  const depsOf = {}; nodes.forEach(n => depsOf[n.id] = []);
+  (g.edges || []).forEach(e => { if (depsOf[e.to]) depsOf[e.to].push(e.from); });
+  // Level = longest-path depth from the roots (classic DAG layering).
+  const level = {};
+  const depth = id => { if (level[id] != null) return level[id]; level[id] = 0; const ds = depsOf[id] || []; if (ds.length) level[id] = 1 + Math.max(...ds.map(depth)); return level[id]; };
+  nodes.forEach(n => depth(n.id));
+  // Canvas coordinates: reuse saved pos when it looks like canvas pixels/40,
+  // else lay out by depth (TUI-authored files use small grid coords).
+  const maxPos = Math.max(0, ...nodes.map(n => Math.max(...((n.pos || [0, 0])))));
+  const rowsSeen = {};
+  const steps = ordered.map(n => {
+    const lv = level[n.id] || 0;
+    let x, y;
+    if (maxPos > 12 && n.pos) { x = n.pos[0] * 40; y = n.pos[1] * 40; }
+    else { rowsSeen[lv] = rowsSeen[lv] || 0; x = 30 + rowsSeen[lv] * 200; y = 24 + lv * 110; rowsSeen[lv]++; }
+    return { id: n.id, name: n.name || "Step", agent: (n.agents && n.agents[0]) || "Claude", prompt: (n.command || n.prompt || ""), code: !!(n.command || "").trim(), model: n.model || "", effort: n.effort || "", fresh: !!n.fresh, raw: !!n.raw, schema: n.schema || "", inputSchema: n.input_schema || "", gate: !!n.gate, deps: depsOf[n.id] || [], x, y };
+  });
+  const loops = (g.loops || []).map(lp => ({ from: lp.from, to: lp.to, breakAgent: lp.breakAgent || "Claude", breakCondition: lp.breakCondition || "", breakCommand: lp.breakCommand || "", maxPasses: lp.count || 8 }));
+  return { name, workdir: "", allowEdits: true, tasks: "", maxCalls: "", nextId: Math.max(0, ...steps.map(s => s.id)) + 1, steps, loops };
+}
+
+/* ---------------- save / open / settings ---------------- */
+function saveWorkflow() {
+  const def = (wf().name || "workflow").replace(/\s+/g, "_");
+  showModal(`<label>Save workflow as</label><input id="svName" value="${esc(def)}">
+    <div style="margin-top:12px;display:flex;justify-content:flex-end;gap:8px"><button id="svCancel">Cancel</button><button class="primary2" id="svOk">Save</button></div>`, box => {
+    const inp = box.querySelector("#svName"); inp.focus(); inp.select();
+    const go = async () => { const name = inp.value.trim(); if (!name) { toast("Enter a name", "err"); return; }
+      let r; try { r = await fetch("/pipeline", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, graph: serializeGraph(wf()) }) }); } catch (e) { toast("Cannot reach bridge: " + e, "err"); return; }
+      const j = await r.json(); closeModal(); toast(r.ok ? "Saved: " + j.saved : "Error: " + (j.error || r.status), r.ok ? "ok" : "err"); };
+    box.querySelector("#svCancel").onclick = closeModal; box.querySelector("#svOk").onclick = go;
+    inp.onkeydown = e => { if (e.key === "Enter") go(); };
+  });
+}
+async function openWorkflow() {
+  let pipelines = []; try { pipelines = (await (await fetch("/pipelines")).json()).pipelines || []; } catch (e) { toast("Cannot reach bridge", "err"); return; }
+  if (!pipelines.length) { toast("No saved pipelines yet.", "run"); return; }
+  showModal(`<label>Open pipeline</label>${pipelines.map(p => `<div><button style="width:100%;margin:3px 0;text-align:left" data-p="${esc(p)}">${esc(p)}</button></div>`).join("")}<div style="margin-top:10px"><button id="mCancel">Cancel</button></div>`, box => {
+    box.querySelectorAll("[data-p]").forEach(b => b.onclick = async () => { const j = await (await fetch("/pipeline?name=" + encodeURIComponent(b.dataset.p))).json(); if (j.graph) { wfs.push(graphToWf(j.name, j.graph)); active = wfs.length - 1; closeModal(); showView("build"); renderAll(); } else toast("Open error: " + (j.error || ""), "err"); });
+    box.querySelector("#mCancel").onclick = closeModal;
+  });
+}
+document.getElementById("btnSettings").onclick = () => {
+  showModal(`<label>Global settings</label>
+    <label>Parallelism (max concurrent tasks)</label><input id="stPar" type="number" min="1" value="${settings.parallel}">
+    <label>Binary path (blank = auto-detect)</label><input id="stBin" placeholder="target/release/houseofagents" value="${esc(settings.binary)}">
+    <label title="the agent used by every ✦ assist action (rewrite / improve prompts / contracts)">AI assist agent</label><select id="stAssist">${AGENTS.map(a => `<option ${a === assistAgent() ? "selected" : ""}>${a}</option>`).join("")}</select>
+    <div style="margin-top:12px;display:flex;justify-content:flex-end;gap:8px"><button id="stCancel">Cancel</button><button class="primary2" id="stSave">Save</button></div>`, box => {
+    box.querySelector("#stCancel").onclick = closeModal;
+    box.querySelector("#stSave").onclick = () => { settings.parallel = Math.max(1, +box.querySelector("#stPar").value || 1); settings.binary = box.querySelector("#stBin").value.trim(); settings.assistAgent = box.querySelector("#stAssist").value; try { localStorage.setItem("hoa_settings", JSON.stringify(settings)); } catch { } closeModal(); toast("Settings saved", "ok"); };
+  });
+};
+
+/* ---------------- modal + toasts ---------------- */
+function showModal(html, wire, opts) {
+  closeModal();   // single-instance: stacked modals fight each other and flicker
+  const m = document.createElement("div"); m.className = "modal"; m.id = "modal";
+  m.innerHTML = `<div class="mbox">${html}</div>`;
+  document.body.appendChild(m);
+  if (!(opts && opts.noBackdropClose)) m.onclick = e => { if (e.target === m) closeModal(); };
+  wire && wire(m.querySelector(".mbox"));
+}
+function closeModal() { const m = document.getElementById("modal"); if (m) m.remove(); }
+function toast(msg, kind = "", ms) { const host = document.getElementById("toasts"); const el = document.createElement("div"); el.className = "toast " + kind; el.textContent = msg; host.appendChild(el); while (host.children.length > 6) host.firstChild.remove(); setTimeout(() => { el.style.opacity = "0"; setTimeout(() => el.remove(), 250); }, ms || (kind === "err" ? 9000 : 3200)); }
+
+/* ---------------- runs dashboard (concurrent, tracked) ---------------- */
+let runs = [];          // newest cards on top; each run streams independently
+function renderDiff(t) { return esc(t).split("\n").map(l => { const c = l.startsWith("+") ? "add" : l.startsWith("-") ? "del" : (l.startsWith("@@") || l.startsWith("diff")) ? "hdr" : ""; return c ? `<span class="${c}">${l}</span>` : l; }).join("\n"); }
+function extractResult(ev) { const r = ev.results || ev.result; if (!r) return ""; if (typeof r === "string") return r; if (Array.isArray(r)) return r.map(x => x.content || JSON.stringify(x)).join("\n\n"); return Object.entries(r).map(([k, v]) => `# ${k}\n${typeof v === "string" ? v : JSON.stringify(v)}`).join("\n\n"); }
+
+function runWorkflow(w) {
+  if ("Notification" in window && Notification.permission === "default") Notification.requestPermission();
+  toast("▶ watching in Runs — the Build tab (top bar) takes you back anytime", "run", 5000);
+  const run = {
+    id: Date.now() + "-" + Math.random().toString(36).slice(2, 6),
+    wfName: w.name || "workflow",
+    task: ((w.tasks || "").split("\n")[0] || "").slice(0, 80) || "(step prompts only)",
+    edits: w.allowEdits, status: "running", runDir: null, branch: null,
+    steps: w.steps.map(s => ({ id: s.id, name: s.name, deps: (s.deps || []).slice(), state: "pending" })),
+    logText: "", panels: [], diffs: [],
+  };
+  runs.push(run);
+  selectedRunId = run.id;
+  renderRuns();
+  streamRun(run, w);   // fire-and-forget → concurrent with other runs
+}
+async function streamRun(run, w) {
+  // Runs are server-owned: launching returns an id, then we just watch.
+  // Reloading the page (or closing it) never kills a run — only ⏹ Stop does.
+  const payload = { parallel: settings.parallel, binary: settings.binary, workflows: [{ name: w.name || "workflow", workdir: w.workdir, allowEdits: w.allowEdits, memory: w.memory, maxCalls: w.maxCalls || null, tasks: w.tasks, graph: serializeGraph(w) }] };
+  let resp;
+  try { resp = await fetch("/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }); }
+  catch (e) { run.status = "error"; run.logText += "cannot reach bridge: " + e + "\n"; finishRun(run); return; }
+  if (!resp.ok) { run.status = "error"; run.logText += "bridge error: " + (await resp.text()) + "\n"; finishRun(run); return; }
+  run.serverId = (await resp.json()).run_id;
+  await pollRun(run);
+}
+async function pollRun(run) {
+  let since = run.cursor || 0, misses = 0;
+  while (true) {
+    let d;
+    try { d = await (await fetch(`/runs/${run.serverId}/events?since=${since}`)).json(); }
+    catch { if (++misses > 30) { run.logText += "lost contact with the bridge\n"; break; } await new Promise(r => setTimeout(r, 2000)); continue; }
+    if (d.error) { run.logText += d.error + "\n"; if (run.status === "running") run.status = "error"; break; }
+    misses = 0;
+    (d.events || []).forEach(ev => onRunEvent(run, ev));
+    since = run.cursor = d.next;
+    updateRun(run);
+    if (!["running", "gated"].includes(d.state) && since >= d.total) {
+      if (run.status === "running") run.status = d.state === "done" ? "completed" : d.state === "failed" ? "error" : d.state;
+      break;
+    }
+  }
+  if (run.status !== "gated") finishRun(run); else updateRun(run);
+}
+function stopRun(run) {
+  if (!run.serverId) return;
+  fetch(`/runs/${run.serverId}/stop`, { method: "POST" }).catch(() => { });
+  if (run.gateEl) run.gateEl.innerHTML = "";
+  run.gate = null;
+}
+// Reattach to server-owned runs after a reload — running fleets keep running.
+async function reattachRuns() {
+  try {
+    const d = await (await fetch("/runs")).json();
+    (d.runs || []).forEach(sr => {
+      if (runs.find(x => x.serverId === sr.id)) return;
+      const run = {
+        id: "srv-" + sr.id, serverId: sr.id, wfName: sr.wfName, task: sr.task || "",
+        edits: sr.edits, status: sr.state === "done" ? "completed" : sr.state === "failed" ? "error" : sr.state,
+        runDir: null, branch: null, cursor: 0,
+        steps: (sr.steps || []).map(s => ({ id: s.id, name: s.name, deps: s.deps || [], state: "pending" })),
+        logText: "", panels: [], diffs: [],
+      };
+      runs.push(run);
+  selectedRunId = run.id;
+      pollRun(run);   // replays the full event log → board/log/gate rebuild
+    });
+    if (view === "runs") renderRuns();
+  } catch { }
+}
+reattachRuns();
+function stepByName(run, n) { return run.steps.find(s => s.name === n); }
+// live tick so in-progress cards show elapsed time + Runs tab activity badge
+setInterval(() => {
+  runs.forEach(r => { if (r.status === "running") updateRun(r); });
+  const live = runs.filter(r => r.status === "running" || r.status === "gated").length;
+  const tab = document.querySelector('#viewSeg [data-view="runs"]');
+  if (tab) tab.textContent = live ? `Runs · ${live} ▶` : "Runs";
+  if (view === "runs" && live) renderRunList();
+}, 1000);
+
+// Mirror a run's live state onto the Build canvas when it's showing the same workflow
+function decorateCanvas(run) {
+  if (view !== "build") return;
+  const w = wf(); if (!w || run.wfName !== (w.name || "workflow")) return;
+  run.steps.forEach(rs => {
+    const s = w.steps.find(x => x.name === rs.name); if (!s) return;
+    const el = document.querySelector(`.cnode[data-node="${s.id}"]`); if (!el) return;
+    el.style.boxShadow = rs.state === "running" ? "0 0 0 2.5px var(--run)"
+      : rs.state === "error" ? "0 0 0 2.5px var(--err)"
+      : rs.state === "done" ? "0 0 0 1.5px var(--ok)" : "";
+  });
+}
+
+// Fetch and show one step's output from the run directory
+function onRunEvent(run, ev) {
+  switch (ev.event) {
+    case "worktree": run.branch = ev.branch; run.logText += `⑂ branch ${ev.branch}\n`; break;
+    case "run_dir": if (ev.path) run.runDir = ev.path; break;
+    case "task_started": run.status = "running"; toast(`▶ ${run.wfName}: started`, "run"); break;
+    case "block_started": { run.execCount = (run.execCount || 0) + 1; const s = stepByName(run, ev.label); if (s) { s.state = "running"; s.pass = ev.loop_pass || 0; s.t0 = Date.now(); run._rid = run._rid || {}; run._rid[ev.block_id] = s; } run.logText += `▶ ${ev.label} (${ev.agent}) pass ${ev.loop_pass}\n`; break; }
+    case "block_finished": { const s = stepByName(run, ev.label); if (s) { s.state = "done"; s.pass = ev.loop_pass || 0; if (s.t0) s.ms = (s.ms || 0) + (Date.now() - s.t0); } run.logText += `✔ ${ev.label}\n`; break; }
+    case "block_error": { const s = stepByName(run, ev.label); if (s) s.state = "error"; run.logText += `✖ ${ev.label}: ${ev.details || ev.error}\n`; toast(`✖ ${run.wfName}: ${ev.label}`, "err"); break; }
+    case "loop_break_eval": run.logText += `↺ pass ${ev.pass}: ${ev.decision}\n`; break;
+    case "block_log": if (ev.message) { run.logText += ev.message + "\n"; if (ev.message.startsWith("Session ID: ")) { const s = (run._rid || {})[ev.block_id]; if (s) s.sessionId = ev.message.slice(12).trim(); } } break;
+    case "warning": run.logText += "! " + ev.message + "\n"; break;
+    case "log": run.logText += ev.message + "\n"; break;
+    case "result": { run.status = ev.status === "ok" ? "completed" : "error"; run.runDir = ev.run_dir || run.runDir; const b = extractResult(ev); if (b) run.panels.push(b); else if (ev.error) run.panels.push(ev.error); toast(`${run.status === "completed" ? "✔" : "✖"} ${run.wfName}: ${ev.status}`, run.status === "completed" ? "ok" : "err"); notify(`${run.wfName}: ${ev.status}`, run.status === "completed" ? "run finished" : (ev.error || "run failed")); break; }
+    case "diff": if (ev.changed) run.diffs.push({ branch: ev.branch, diff: ev.diff }); else run.logText += `(no file changes on ${ev.branch})\n`; break;
+    case "task_error": run.status = "error"; run.logText += ev.error + "\n"; toast(`✖ ${run.wfName}`, "err"); break;
+    case "human_gate": run.status = "gated"; run.gate = { id: ev.gate, output: ev.output || "", next: ev.next_steps || [] }; run.logText += `⏸ human gate — review & approve to continue (next: ${(ev.next_steps || []).join(", ")})\n`; toast(`⏸ ${run.wfName}: waiting for your approval`, "run", 8000); notify(`${run.wfName} needs your approval`, "a human gate is waiting — review the hand-off in the Runs view"); break;
+  }
+  updateRun(run);
+}
+function ensureRunCard(run) {
+  if (run.el) return;
+  const el = document.createElement("div"); el.className = "card";
+  el.innerHTML = `<div class="h"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(run.wfName)} · <span style="color:var(--muted)">${esc(run.task)}</span></span><span style="display:flex;gap:6px;align-items:center;flex:none"><button class="againbtn" title="run this workflow again (a fresh run)" style="padding:1px 8px;font-size:10px;display:none">↻ Run again</button><button class="stopbtn" title="stop this run — kills the engine and all its agents" style="padding:1px 8px;font-size:10px">⏹ Stop</button><span class="badge2 b-run">running</span></span></div>
+    <div class="steps"></div>
+    <details><summary style="padding:5px 10px;font-size:11px;color:var(--accent)">activity</summary><div class="log"></div><div style="padding:4px 10px"><button class="rawlogbtn" style="padding:1px 8px;font-size:10px">full technical log</button></div></details>
+    <div class="gatebox"></div>
+    <div class="outputs"></div>`;
+  run.el = el; run.badgeEl = el.querySelector(".badge2"); run.stepsEl = el.querySelector(".steps"); run.logEl = el.querySelector(".log"); run.gateEl = el.querySelector(".gatebox"); run.outEl = el.querySelector(".outputs");
+  el.querySelector(".rawlogbtn").onclick = () => showModal(`<div style="font-weight:600;margin-bottom:8px">${esc(run.wfName)} — full log</div>
+    <pre style="max-height:64vh;overflow:auto;font-size:11px;white-space:pre-wrap;background:var(--well);border:1px solid var(--edge);border-radius:8px;padding:10px">${esc(run.logText)}</pre>
+    <div style="display:flex;justify-content:flex-end;margin-top:8px"><button id="flClose">Close</button></div>`, b => b.querySelector("#flClose").onclick = closeModal);
+  run.stopEl = el.querySelector(".stopbtn");
+  run.stopEl.onclick = () => stopRun(run);
+  run.againEl = el.querySelector(".againbtn");
+  run.againEl.onclick = () => {
+    const w = wfs.find(x => (x.name || "workflow") === run.wfName);
+    if (!w) { toast("workflow no longer exists in Build", "err"); return; }
+    launchChecked(w);
+  };
+}
+function updateRun(run) {
+  ensureRunCard(run); if (!run.el) return;
+  const st = run.status;
+  run.badgeEl.className = "badge2 " + (st === "completed" ? "b-ok" : st === "error" ? "b-err" : st === "running" || st === "gated" ? "b-run" : "b-pend");
+  run.badgeEl.textContent = (st === "completed" ? "✔ completed" : st === "gated" ? "⏸ awaiting approval" : st) + (run.execCount && st !== "running" && st !== "gated" ? ` · ${run.execCount} step run${run.execCount > 1 ? "s" : ""}` : "");
+  if (run.stopEl) run.stopEl.style.display = (st === "running" || st === "gated") ? "" : "none";
+  if (run.againEl) run.againEl.style.display = (st === "running" || st === "gated") ? "none" : "";
+  if (st === "gated" && run.gate && !run.gate.rendered) {
+    run.gate.rendered = true;
+    run.gateEl.innerHTML = `<div style="padding:8px 10px;border-top:1px solid var(--edge)">
+      <div style="font-size:11px;color:var(--accent);margin-bottom:4px">⏸ Human gate — review the hand-off below, edit it if needed, then approve. Next: ${esc(run.gate.next.join(" → ") || "(end)")}</div>
+      <textarea rows="7" style="width:100%;font-size:11px">${esc(run.gate.output)}</textarea>
+      <div style="margin-top:6px;display:flex;gap:8px">
+        <button data-approve>✔ Approve &amp; continue</button>
+        <button data-discard class="danger">✖ Discard run</button></div></div>`;
+    run.gateEl.querySelector("[data-approve]").onclick = async () => {
+      const out = run.gateEl.querySelector("textarea").value;
+      const id = run.gate.id;
+      run.gateEl.innerHTML = ""; run.gate = null; run.status = "running"; updateRun(run);
+      try {
+        const resp = await fetch(`/human-gates/${id}/continue`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ output: out }) });
+        const d = await resp.json();
+        if (!resp.ok) throw new Error(d.error || resp.statusText);
+        if (d.run_id && d.run_id !== run.serverId) { run.serverId = d.run_id; run.cursor = 0; pollRun(run); }
+        // otherwise the existing pollRun loop picks the new events up
+      } catch (e) { run.status = "error"; run.logText += "gate error: " + e.message + "\n"; finishRun(run); }
+    };
+    run.gateEl.querySelector("[data-discard]").onclick = async () => {
+      const id = run.gate.id;
+      run.gateEl.innerHTML = ""; run.gate = null;
+      try { await fetch(`/human-gates/${id}/discard`, { method: "POST" }); } catch { }
+      // the poll loop sees the server mark the run stopped and finishes the card
+    };
+  }
+  // Pipeline strip: the steps in execution order, colored by state.
+  const byId = {}; run.steps.forEach(x => { if (x.id != null) byId[x.id] = x; });
+  const fmtMs = ms => ms >= 60000 ? `${Math.floor(ms / 60000)}m${Math.floor((ms % 60000) / 1000)}s` : `${Math.floor(ms / 1000)}s`;
+  const chip = s => {
+    const waiting = (s.deps || []).filter(d => byId[d] && byId[d].state !== "done").map(d => byId[d].name);
+    const k = s.state === "error" ? "error" : s.state === "done" ? "done" : s.state === "running" ? "running" : waiting.length ? "blocked" : "todo";
+    const ic = { error: "✖", done: "✔", running: "◐", blocked: "⏸", todo: "○" }[k];
+    const t = s.state === "running" && s.t0 ? " " + fmtMs(Date.now() - s.t0) : s.ms ? " " + fmtMs(s.ms) : "";
+    const pass = s.pass > 0 ? ` ·${s.pass + 1}×` : "";
+    return `<span class="schip ${k}" title="${k === "blocked" ? "waiting for " + esc(waiting.join(", ")) : k}">${ic} ${esc(s.name)}${t}${pass}</span>`;
+  };
+  run.stepsEl.innerHTML = `<div class="strip">${run.steps.map(chip).join('<span style="color:var(--faint);align-self:center">→</span>')}</div>`;
+  decorateCanvas(run);
+  const atBottom = run.logEl.scrollTop + run.logEl.clientHeight >= run.logEl.scrollHeight - 4;
+  const milestones = run.logText.split("\n").filter(l =>
+    /^(▶|✔|✖|⏸|↻|⑂|⏹|✕)/.test(l) || /error|failed|budget|cancelled|no such run/i.test(l)).join("\n");
+  run.logEl.textContent = milestones || run.logText.split("\n").slice(-3).join("\n");
+  if (atBottom) run.logEl.scrollTop = run.logEl.scrollHeight;
+}
+function finishRun(run) {
+  updateRun(run);
+  if (!run.el || run.outDone) return;
+  run.outDone = true;
+  const host = run.outEl;
+  run.panels.forEach(p => { const d = document.createElement("div"); d.className = "log"; d.style.color = "var(--fg)"; d.textContent = p; host.appendChild(d); });
+  run.diffs.forEach(df => {
+    const d = document.createElement("details"); d.open = true;
+    d.innerHTML = `<summary style="padding:5px 10px;color:var(--accent);font-size:11px">diff → ${esc(df.branch)} <button data-mergecmd style="padding:0 7px;font-size:10px;margin-left:8px">copy merge cmd</button></summary><div class="diff">${renderDiff(df.diff)}</div>`;
+    d.querySelector("[data-mergecmd]").onclick = e => { e.preventDefault(); navigator.clipboard.writeText(`git merge ${df.branch}`).then(() => toast(`copied: git merge ${df.branch}`, "ok")); };
+    host.appendChild(d);
+  });
+  if (run.runDir) {
+    // Step results in EXECUTION order — the run's story, one row per step:
+    // status · duration · output, expandable to the full conversation.
+    fetch("/run-artifacts?dir=" + encodeURIComponent(run.runDir)).then(r => r.json()).then(d => {
+      const slugf = s => (s || "").replace(/[^a-zA-Z0-9]+/g, "_").toLowerCase();
+      const wrap = document.createElement("div");
+      wrap.innerHTML = `<div style="padding:8px 12px 2px;font-size:10.5px;font-weight:650;text-transform:uppercase;letter-spacing:.07em;color:var(--muted)">Step results</div>`;
+      run.steps.forEach(s => {
+        const outs = (d.files || []).filter(f => slugf(f.name).startsWith(slugf(s.name)));
+        const ins = (d.inputs || []).filter(f => slugf(f.name).startsWith(slugf(s.name)));
+        if (!outs.length && !ins.length) return;
+        const icon = s.state === "done" ? `<span style="color:var(--ok)">✔</span>` : s.state === "error" ? `<span style="color:var(--err)">✖</span>` : "○";
+        const dur = s.ms ? ` · ${s.ms >= 60000 ? Math.floor(s.ms / 60000) + "m" + Math.floor(s.ms % 60000 / 1000) + "s" : Math.floor(s.ms / 1000) + "s"}` : "";
+        const preview = (outs[outs.length - 1] || { content: "" }).content.trim().split("\n")[0].slice(0, 90);
+        const det = document.createElement("details");
+        det.innerHTML = `<summary style="padding:6px 12px;font-size:12px;cursor:pointer;display:flex;gap:8px;align-items:baseline">${icon} <b>${esc(s.name)}</b><span style="color:var(--muted);font-size:11px">${dur}</span><span style="color:var(--muted);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">${esc(preview)}</span></summary>
+          <div style="padding:0 12px 10px">
+            ${outs.map((f, i) => `${ins[i] ? `<details style="margin-bottom:6px"><summary style="font-size:10.5px;color:var(--muted);cursor:pointer">→ sent${outs.length > 1 ? " (pass " + (i + 1) + ")" : ""}</summary><pre style="max-height:200px;overflow:auto;font-size:11px;white-space:pre-wrap;background:var(--well);border:1px solid var(--edge);border-radius:8px;padding:8px;margin:4px 0 0">${esc(ins[i].content)}</pre></details>` : ""}
+            <pre style="max-height:260px;overflow:auto;font-size:11.5px;white-space:pre-wrap;background:var(--well);border:1px solid var(--edge);border-radius:8px;padding:8px;margin:0 0 6px">${esc(f.content)}</pre>`).join("")}
+            ${s.sessionId ? `<button data-tr="${esc(s.sessionId)}" style="padding:2px 9px;font-size:10.5px" title="the agent's complete session: its thinking, every tool call and result">⧉ full agent transcript</button>` : ""}
+          </div>`;
+        const tb = det.querySelector("[data-tr]");
+        if (tb) tb.onclick = async e => {
+          e.preventDefault();
+          try {
+            const t = await (await fetch("/step-transcript?session=" + encodeURIComponent(s.sessionId))).json();
+            if (t.error) throw new Error(t.error);
+            showModal(`<div style="font-weight:600;margin-bottom:8px">${esc(s.name)} — full agent transcript</div>
+              <pre style="max-height:64vh;overflow:auto;font-size:11px;line-height:1.6;white-space:pre-wrap;background:var(--well);border:1px solid var(--edge);border-radius:8px;padding:12px">${esc(t.transcript)}</pre>
+              <div style="display:flex;justify-content:flex-end;margin-top:8px"><button id="trClose">Close</button></div>`, b => b.querySelector("#trClose").onclick = closeModal);
+          } catch (err) { toast("transcript: " + err.message, "err", 5000); }
+        };
+        wrap.appendChild(det);
+      });
+      host.prepend(wrap);
+    }).catch(() => { });
+    const bar = document.createElement("div"); bar.style.cssText = "padding:6px 10px;font-size:11px;color:var(--muted);word-break:break-all";
+    bar.innerHTML = `run dir: <span style="color:var(--fg)">${esc(run.runDir)}</span> `;
+    host.appendChild(bar);
+  }
+}
+function renderRuns() {
+  const body = document.getElementById("runsBody");
+  if (!document.getElementById("runsSplit")) {
+    body.innerHTML = `<div class="runsplit" id="runsSplit">
+      <div class="runlist" id="runList"></div>
+      <div class="rundetail" id="runDetail"><div class="empty" style="margin-top:40px">No runs yet.<br><span style="font-size:12px">Press ▶ Run on a workflow — live and past runs appear on the left.</span></div></div>
+    </div>`;
+    loadRunHistory();
+  }
+  renderRunList();
+  const sel = runs.find(r => r.id === selectedRunId) || runs[0];
+  if (sel && sel.id !== mountedRunId) mountRun(sel);
+  runs.forEach(r => (r.outDone ? updateRun(r) : (r.status === "running" ? updateRun(r) : finishRun(r))));
+}
+let selectedRunId = null, mountedRunId = null, diskRuns = [];
+let schedList = [];
+async function refreshSchedCache() {
+  try { schedList = ((await (await fetch("/schedules")).json()).schedules || []); } catch { }
+  patchScheduleBtn();
+}
+function schedOfCurrent() {
+  const name = (wf() || {}).name || "workflow";
+  return schedList.find(s => s.name === name && ["running", "pending"].includes(s.state));
+}
+function patchScheduleBtn() {
+  const b = document.getElementById("btnSchedule");
+  if (!b) return;
+  const s = schedOfCurrent();
+  const fmtIv = x => x >= 3600 ? (x / 3600 | 0) + "h" : x >= 60 ? (x / 60 | 0) + "m" : x + "s";
+  if (s) {
+    b.textContent = `⏱ every ${fmtIv(s.interval_sec)} · run ${s.runs_done}/${s.max_runs}`;
+    b.title = `this workflow is scheduled${s.next_in != null ? " — next check in ~" + fmtIv(s.next_in) : ""} · click to manage in Schedules`;
+    b.style.borderColor = "var(--run)"; b.style.color = "var(--run)";
+    b.onclick = () => showView("schedules");
+  } else {
+    b.textContent = "Schedule…"; b.title = "Run THIS workflow on a schedule until a gate passes";
+    b.style.borderColor = ""; b.style.color = "";
+    b.onclick = openScheduleForm;
+  }
+}
+setInterval(refreshSchedCache, 10000);
+refreshSchedCache();
+function fmtAgo(t) { const s = (Date.now() / 1000 - t) | 0; return s < 60 ? s + "s ago" : s < 3600 ? (s / 60 | 0) + "m ago" : s < 86400 ? (s / 3600 | 0) + "h ago" : (s / 86400 | 0) + "d ago"; }
+function renderRunList() {
+  const host = document.getElementById("runList");
+  if (!host) return;
+  const live = [...runs].reverse().map(r => {
+    const done = r.steps.filter(s => s.state === "done").length;
+    return `<div class="runrow${(selectedRunId || (runs[runs.length-1]||{}).id) === r.id ? " sel" : ""}" data-run="${r.id}">
+      <div class="rr1"><span class="dot ${r.status === "completed" ? "completed" : r.status}"></span><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.wfName)}</span></div>
+      <div class="rr2"><span>${r.status === "running" ? "running" : r.status === "gated" ? "⏸ needs you" : esc(r.status)}</span><span>${done}/${r.steps.length} steps</span></div>
+    </div>`;
+  }).join("");
+  const disk = diskRuns.length ? `<div style="font-size:10px;font-weight:650;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin:14px 0 6px">Earlier · on disk</div>` +
+    diskRuns.map(r => `<div class="runrow" data-disk="${esc(r.path)}">
+      <div class="rr1"><span class="dot ${r.status === "ok" ? "completed" : "error"}"></span><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.name)}</span></div>
+      <div class="rr2"><span>${esc(r.date)}</span><span>${fmtAgo(r.mtime)}</span></div>
+    </div>`).join("") : "";
+  host.innerHTML = live + disk;
+  host.querySelectorAll("[data-run]").forEach(el => el.onclick = () => { selectedRunId = el.dataset.run; const r = runs.find(x => x.id === selectedRunId); if (r) mountRun(r); renderRunList(); });
+  host.querySelectorAll("[data-disk]").forEach(el => el.onclick = () => { selectedRunId = "disk"; mountDiskRun(el.dataset.disk); renderRunList(); });
+}
+async function loadRunHistory() {
+  try { diskRuns = ((await (await fetch("/runs-history")).json()).runs || []); renderRunList(); } catch { }
+}
+function mountRun(run) {
+  const det = document.getElementById("runDetail");
+  if (!det) return;
+  mountedRunId = run.id; selectedRunId = run.id;
+  ensureRunCard(run);
+  det.innerHTML = "";
+  det.appendChild(run.el);
+  updateRun(run);
+}
+async function mountDiskRun(dir) {
+  const det = document.getElementById("runDetail");
+  mountedRunId = "disk:" + dir;
+  det.innerHTML = `<div class="card"><div class="h"><span>${esc(dir.split("/").pop())}</span><span class="badge2 b-pend">on disk</span></div><div class="meta" style="padding-top:8px">loading…</div></div>`;
+  try {
+    const d = await (await fetch("/run-artifacts?dir=" + encodeURIComponent(dir))).json();
+    const ins = {}; (d.inputs || []).forEach(f => ins[f.name] = f.content);
+    const rows = (d.files || []).filter(f => f.name !== "prompt.md").map(f => `
+      <details><summary style="padding:6px 12px;font-size:12px;cursor:pointer"><b>${esc(f.name.replace(/\.md$/, "").replace(/_b\d+.*/, ""))}</b></summary>
+      <div style="padding:0 12px 10px">${ins[f.name] ? `<details style="margin-bottom:6px"><summary style="font-size:10.5px;color:var(--muted);cursor:pointer">→ sent</summary><pre style="max-height:200px;overflow:auto;font-size:11px;white-space:pre-wrap;background:var(--well);border:1px solid var(--edge);border-radius:8px;padding:8px;margin:4px 0 0">${esc(ins[f.name])}</pre></details>` : ""}
+      <pre style="max-height:280px;overflow:auto;font-size:11.5px;white-space:pre-wrap;background:var(--well);border:1px solid var(--edge);border-radius:8px;padding:8px;margin:0">${esc(f.content)}</pre></div></details>`).join("");
+    det.innerHTML = `<div class="card"><div class="h"><span>${esc(dir.split("/").pop())}</span><span class="badge2 b-pend">on disk</span></div>
+      <div style="padding:8px 12px 2px;font-size:10.5px;font-weight:650;text-transform:uppercase;letter-spacing:.07em;color:var(--muted)">Step results</div>${rows}
+      <div class="meta" style="padding-top:6px;word-break:break-all">run dir: ${esc(dir)}</div></div>`;
+  } catch (e) { det.innerHTML = `<div class="empty">could not load: ${esc(String(e))}</div>`; }
+}
+
+/* ---------------- schedules view ---------------- */
+let schedTimer = null, schedSeen = {};
+function stopSchedPoll() { if (schedTimer) { clearInterval(schedTimer); schedTimer = null; } }
+function openScheduleForm() {
+  const w = wf();
+  showModal(`<label>Schedule: ${esc(w.name || "workflow")}</label>
+    <label>Run every (minutes)</label><input id="scInt" type="number" min="1" value="5">
+    <label>Max runs (safety cap)</label><input id="scMax" type="number" min="1" value="20">
+    <label>Gate — how to decide when to stop (blank = never; stops at max runs)</label>
+    <div class="radios" style="margin:2px 0 4px"><label><input type="radio" name="scKind" value="command" checked>Shell command</label><label><input type="radio" name="scKind" value="agent">Agent judges</label></div>
+    <div id="scCmdBox">
+      <textarea id="scGate" rows="2" placeholder="e.g.  gh pr checks 123   |   make test   |   test -f done.flag"></textarea>
+      <div style="color:var(--muted);font-size:10px;margin-top:3px">Any shell command; <b>exit 0 = done/stop</b>, non-zero = run. Nothing integration-specific is built in.</div>
+    </div>
+    <div id="scAgentBox" style="display:none">
+      <label>Judge agent</label><select id="scAgent">${AGENTS.map(a => `<option>${a}</option>`).join("")}</select>
+      <label>Condition (the agent replies DONE/CONTINUE)</label>
+      <textarea id="scGateP" rows="2" placeholder="e.g. the PR's CI is green and there are no unresolved review comments"></textarea>
+    </div>
+    <div style="margin-top:12px;display:flex;justify-content:flex-end;gap:8px"><button id="scCancel">Cancel</button><button class="primary2" id="scStart">Start</button></div>`, box => {
+    box.querySelector("#scCancel").onclick = closeModal;
+    const sync = () => { const agent = box.querySelector("input[name=scKind]:checked").value === "agent"; box.querySelector("#scCmdBox").style.display = agent ? "none" : "block"; box.querySelector("#scAgentBox").style.display = agent ? "block" : "none"; };
+    box.querySelectorAll("input[name=scKind]").forEach(r => r.onchange = sync);
+    box.querySelector("#scStart").onclick = async () => {
+      const kind = box.querySelector("input[name=scKind]:checked").value;
+      const body = { workflow: { name: w.name, workdir: w.workdir, allowEdits: w.allowEdits, memory: w.memory, maxCalls: w.maxCalls || null, tasks: w.tasks, graph: serializeGraph(w) }, binary: settings.binary, interval_sec: Math.max(1, +box.querySelector("#scInt").value) * 60, max_runs: Math.max(1, +box.querySelector("#scMax").value), gate_kind: kind, gate: kind === "agent" ? box.querySelector("#scGateP").value.trim() : box.querySelector("#scGate").value.trim(), gate_agent: box.querySelector("#scAgent").value };
+      let r; try { r = await fetch("/schedules", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }); } catch (e) { toast("Cannot reach bridge", "err"); return; }
+      const j = await r.json(); if (r.ok) { closeModal(); toast(`scheduled: ${w.name || "workflow"}`, "run"); showView("schedules"); } else toast("Schedule error: " + (j.error || r.status), "err");
+    };
+  });
+}
+async function renderSchedules() {
+  let list = []; try { list = (await (await fetch("/schedules")).json()).schedules || []; } catch (_) { }
+  list.forEach(s => { if (schedSeen[s.id] && schedSeen[s.id] !== s.state && ["converged", "capped", "error", "stopped"].includes(s.state)) toast(`${s.name}: ${s.state}`, s.state === "converged" ? "ok" : s.state === "error" ? "err" : "run"); schedSeen[s.id] = s.state; });
+  if (view !== "schedules") return;
+  const badge = st => `<span class="badge2 ${st === "converged" ? "b-ok" : st === "error" || st === "capped" ? "b-err" : st === "running" ? "b-run" : "b-pend"}">${st}</span>`;
+  const fmtIv = s => s >= 3600 ? (s / 3600 | 0) + "h" : s >= 60 ? (s / 60 | 0) + "m" : s + "s";
+  const _openLogs = {};
+  document.querySelectorAll("#schedBody details[data-sid]").forEach(d => { if (d.open) _openLogs[d.dataset.sid] = d.querySelector(".log")?.scrollTop ?? 0; });
+  document.getElementById("schedBody").innerHTML =
+    (list.length ? list.map(s => `<div class="card">
+      <div class="h"><span style="display:flex;gap:8px;align-items:center"><span class="dot ${s.state === "running" ? "running" : s.state === "converged" ? "completed" : s.state === "error" || s.state === "capped" ? "error" : "pend"}"></span><b>${esc(s.name)}</b> ${badge(s.state)}</span>
+        <span style="display:flex;gap:6px;align-items:center">
+          <button data-now="${s.id}" title="run this schedule's workflow once, right now (shows up in Runs)" style="padding:2px 9px;font-size:11px">▶ once</button>
+          ${["running", "pending"].includes(s.state) ? `<button data-stop="${s.id}" style="padding:2px 9px;font-size:11px">Stop</button>` : `<button data-del="${s.id}" class="danger" style="padding:2px 9px;font-size:11px">Delete</button>`}
+        </span></div>
+      <div style="display:flex;gap:22px;flex-wrap:wrap;padding:9px 12px;font-size:12px">
+        <span><span style="color:var(--muted)">cadence</span><br>every ${fmtIv(s.interval_sec)} · run ${s.runs_done}/${s.max_runs}</span>
+        <span><span style="color:var(--muted)">next check</span><br>${s.state !== "running" ? "—" : s.next_in != null ? "in ~" + fmtIv(s.next_in) : "now (running the workflow)"}</span>
+        <span><span style="color:var(--muted)">gate — stops when</span><br>${s.gate ? (s.gate_kind === "agent" ? `${esc(s.gate_agent || "agent")} judges: “${esc(s.gate.slice(0, 70))}”` : `<code style="font-size:11px">${esc(s.gate.slice(0, 70))}</code> exits 0${s.last_gate_exit != null ? ` · last exit ${s.last_gate_exit}` : ""}`) : "never (runs to the cap)"}</span>
+        <span><span style="color:var(--muted)">workflow</span><br>${esc((s.steps || []).join(" → ").slice(0, 80) || "—")}</span>
+      </div>
+      <details data-sid="${s.id}"><summary style="padding:5px 12px;color:var(--accent);font-size:11px;cursor:pointer">activity</summary><div class="log">${esc((s.log || []).join("\n"))}</div></details>
+    </div>`).join("") : `<div class="empty">No schedules.<br><span style="font-size:12px">Open a workflow in Build and click Schedule… — it re-runs on a cadence until its gate passes.</span></div>`);
+  document.querySelectorAll("#schedBody details[data-sid]").forEach(d => { if (d.dataset.sid in _openLogs) { d.open = true; const l = d.querySelector(".log"); if (l) l.scrollTop = _openLogs[d.dataset.sid]; } });
+  document.querySelectorAll("[data-stop]").forEach(b => b.onclick = async () => { await fetch(`/schedules/${b.dataset.stop}/stop`, { method: "POST" }); renderSchedules(); });
+  document.querySelectorAll("[data-del]").forEach(b => b.onclick = async () => { await fetch(`/schedules/${b.dataset.del}/delete`, { method: "POST" }); renderSchedules(); });
+  document.querySelectorAll("[data-now]").forEach(b => b.onclick = async () => {
+    const r = await fetch(`/schedules/${b.dataset.now}/run-now`, { method: "POST" });
+    const d = await r.json();
+    if (!r.ok) { toast(d.error || "failed", "err"); return; }
+    toast("▶ launched — watch it in Runs", "ok");
+    reattachRuns();
+  });
+}
+
+/* ---------------- init ---------------- */
+function renderAll() { renderWfbar(); if (view === "build") renderBuild(); }
+renderWfbar(); showView(["build","runs","schedules"].includes(new URLSearchParams(location.search).get("view")) ? new URLSearchParams(location.search).get("view") : "build");
+</script>
+</body>
+</html>
