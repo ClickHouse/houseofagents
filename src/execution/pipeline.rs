@@ -27,6 +27,45 @@ pub(crate) type ProviderFactory = Arc<
         + Sync,
 >;
 
+/// Build a provider for a block, applying its per-block `model`/`effort`
+/// overrides on top of the agent's config. Effort is applied to both
+/// reasoning + thinking effort (each provider reads only the field it needs).
+/// If the overridden effort is invalid for the provider/mode (e.g. Anthropic
+/// API-mode `xhigh`), the effort override is dropped and the agent's configured
+/// effort is kept. `None`/empty overrides reuse the agent config unchanged.
+fn build_provider_with_overrides(
+    factory: &ProviderFactory,
+    kind: ProviderKind,
+    cfg: &crate::config::ProviderConfig,
+    model: &Option<String>,
+    effort: &Option<String>,
+    raw: bool,
+) -> Box<dyn provider::Provider> {
+    let has_model = model.as_deref().is_some_and(|s| !s.trim().is_empty());
+    let has_effort = effort.as_deref().is_some_and(|s| !s.trim().is_empty());
+    let mut p = if !has_model && !has_effort {
+        factory(kind, cfg)
+    } else {
+        let mut c = cfg.clone();
+        if has_model {
+            c.model = model.clone().unwrap();
+        }
+        if has_effort {
+            let use_cli = c.use_cli || kind.is_cli_only();
+            let e = effort.clone();
+            if provider::validate_effort_config(kind, use_cli, e.as_deref(), e.as_deref()).is_ok() {
+                c.reasoning_effort = e.clone();
+                c.thinking_effort = e;
+            }
+        }
+        factory(kind, &c)
+    };
+    if raw {
+        p.set_command_mode(true);
+    }
+    p
+}
+
 #[derive(Debug, Clone)]
 struct PipelineTaskMetadata {
     runtime_id: u32,
@@ -71,6 +110,12 @@ pub(crate) struct RuntimeReplicaInfo {
     pub display_label: String,
     pub session_key: String,
     pub filename_stem: String,
+    /// Per-block model override (empty/None = use the agent's config model).
+    pub model: Option<String>,
+    /// Per-block effort override applied to both reasoning + thinking effort.
+    pub effort: Option<String>,
+    /// Per-block raw/command mode (send prompt verbatim to the CLI).
+    pub raw: bool,
 }
 
 pub(crate) struct RuntimeReplicaTable {
@@ -126,6 +171,9 @@ pub(crate) fn build_runtime_table(def: &PipelineDefinition) -> RuntimeReplicaTab
                     display_label,
                     session_key,
                     filename_stem,
+                    model: None,
+                    effort: None,
+                    raw: false,
                 });
                 runtime_ids.push(next_id);
                 next_id += 1;
@@ -199,6 +247,9 @@ pub(crate) fn build_runtime_table(def: &PipelineDefinition) -> RuntimeReplicaTab
                     display_label,
                     session_key,
                     filename_stem,
+                    model: block.model.clone(),
+                    effort: block.effort.clone(),
+                    raw: block.raw,
                 });
 
                 runtime_ids.push(runtime_id);
@@ -328,6 +379,128 @@ fn scatter_replica_filename(
     }
 }
 
+/// Run a code block's shell command: `input` is piped to stdin, stdout is the
+/// block output. Non-zero exit or timeout is an error (stderr included).
+async fn run_code_block(
+    command: &str,
+    input: &str,
+    workdir: Option<&std::path::Path>,
+) -> Result<String, String> {
+    // ponytail: fixed 600s ceiling, same as the CLI default posture
+    const CODE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+    let mut cmd = tokio::process::Command::new("/bin/sh");
+    cmd.arg("-c")
+        .arg(command)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    if let Some(dir) = workdir {
+        cmd.current_dir(dir);
+    }
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to spawn code block: {e}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let input_owned = input.to_string();
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let _ = stdin.write_all(input_owned.as_bytes()).await;
+        });
+    }
+    match tokio::time::timeout(CODE_TIMEOUT, child.wait_with_output()).await {
+        Ok(Ok(out)) => {
+            if out.status.success() {
+                Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+            } else {
+                let err: String = String::from_utf8_lossy(&out.stderr)
+                    .chars()
+                    .take(2000)
+                    .collect();
+                Err(format!("code block exited with {}: {err}", out.status))
+            }
+        }
+        Ok(Err(e)) => Err(format!("code block failed: {e}")),
+        Err(_) => Err("code block timed out after 600s".into()),
+    }
+}
+
+/// Strip a surrounding markdown code fence (``` or ```json) from a block
+/// output, tolerating leading/trailing whitespace.
+fn strip_code_fence(content: &str) -> &str {
+    let t = content.trim();
+    if let Some(rest) = t.strip_prefix("```") {
+        let rest = rest.strip_prefix("json").unwrap_or(rest);
+        if let Some(inner) = rest.strip_suffix("```") {
+            return inner.trim();
+        }
+    }
+    t
+}
+
+/// Validate a block output against its contract: a flat JSON object mapping
+/// field name -> type ("string" | "number" | "boolean" | "array" | "object" |
+/// "any"; "?" suffix = optional). Extra fields in the output are allowed.
+/// Returns Err(reason) on violation — free text, invalid JSON, missing
+/// required fields, or type mismatches.
+/// ponytail: flat contract, no nesting/enum/range checks — swap in a JSON
+/// Schema crate if contracts ever need more.
+pub(crate) fn validate_output_contract(contract: &str, content: &str) -> Result<(), String> {
+    let spec: serde_json::Map<String, serde_json::Value> = serde_json::from_str(contract)
+        .map_err(|e| format!("invalid contract (not a JSON object): {e}"))?;
+    let val: serde_json::Value = serde_json::from_str(strip_code_fence(content))
+        .map_err(|_| "output is not a JSON object (free text is rejected)".to_string())?;
+    let obj = val
+        .as_object()
+        .ok_or_else(|| "output is valid JSON but not an object".to_string())?;
+    for (field, ty) in &spec {
+        // Keys like "bugs[].file" or "meta.date" describe nested shapes — they
+        // guide the model via the prompt but only top-level fields are enforced.
+        if field.contains("[]") || field.contains('.') {
+            continue;
+        }
+        let ty = ty
+            .as_str()
+            .ok_or_else(|| format!("invalid contract: type of '{field}' must be a string"))?;
+        let (ty, optional) = match ty.strip_suffix('?') {
+            Some(t) => (t, true),
+            None => (ty, false),
+        };
+        match obj.get(field) {
+            None | Some(serde_json::Value::Null) => {
+                if !optional {
+                    return Err(format!("missing required field '{field}'"));
+                }
+            }
+            Some(v) => {
+                let ok = match ty {
+                    "string" => v.is_string(),
+                    "number" => v.is_number(),
+                    "boolean" => v.is_boolean(),
+                    "array" => v.is_array(),
+                    "object" => v.is_object(),
+                    "any" => true,
+                    other => return Err(format!("invalid contract: unknown type '{other}'")),
+                };
+                if !ok {
+                    return Err(format!("field '{field}' must be {ty}"));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The instruction appended to a block's message when it declares an output
+/// contract.
+fn contract_instruction(contract: &str) -> String {
+    format!(
+        "\n\nOUTPUT CONTRACT (enforced): Respond with ONLY a single JSON object with these fields \
+         (name: type, \"?\" = optional): {contract}\nNo prose before or after the JSON. \
+         Free-text responses are rejected and retried."
+    )
+}
+
 /// Parse an evaluator response: returns `true` if the first word is "BREAK"
 /// (case-insensitive, ignoring trailing punctuation).
 fn parse_break_decision(content: &str) -> bool {
@@ -339,6 +512,28 @@ fn parse_break_decision(content: &str) -> bool {
                 .eq_ignore_ascii_case("BREAK")
         })
         .unwrap_or(false)
+}
+
+/// Deterministic loop break gate: run a shell command in `workdir` (falling
+/// back to the process cwd); exit 0 means the condition is met (break).
+/// Best-effort like the agent evaluator: spawn failure or timeout = CONTINUE.
+async fn evaluate_loop_break_command(command: &str, workdir: Option<&std::path::Path>) -> bool {
+    // ponytail: fixed 300s gate timeout, mirrors the web scheduler's shell gate
+    const GATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+    let mut cmd = tokio::process::Command::new("/bin/sh");
+    cmd.arg("-c")
+        .arg(command)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    if let Some(dir) = workdir {
+        cmd.current_dir(dir);
+    }
+    match tokio::time::timeout(GATE_TIMEOUT, cmd.status()).await {
+        Ok(Ok(status)) => status.success(),
+        _ => false,
+    }
 }
 
 /// Evaluate whether a loop should break early by asking a dedicated agent.
@@ -524,6 +719,37 @@ pub struct PipelineBlock {
     pub replicas: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sub_pipeline: Option<PipelineDefinition>,
+    /// Per-block LLM model override (None/empty = the agent's config model).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Per-block effort override (low/medium/high/xhigh/max); applied to both
+    /// reasoning and thinking effort. None = the agent's config effort.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// When true, the block ignores upstream step outputs and starts "fresh"
+    /// (task + its own prompt, like a root) while still running after its
+    /// upstreams per the connections. Useful for an unbiased review step.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fresh: bool,
+    /// When true, the block's prompt is sent to the CLI verbatim (no House of
+    /// Agents wrapping) so it can invoke a slash command like `/goal`. The
+    /// previous step's output is appended as the command's argument.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub raw: bool,
+    /// Output contract: a flat JSON object mapping field name to type
+    /// ("string" | "number" | "boolean" | "array" | "object" | "any";
+    /// a "?" suffix marks the field optional). When set, the block must
+    /// return ONLY a JSON object matching it — free text is rejected and
+    /// the agent is asked to retry (up to 2 retries), so downstream blocks
+    /// can consume the output mechanically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    /// Code block: run this shell command instead of an agent. Upstream
+    /// outputs are piped to stdin verbatim (the initial prompt for roots) and
+    /// stdout becomes the block's output — the "reduce with plain code, no
+    /// model, no tokens" node. Mutually exclusive with agents/raw/sub_pipeline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
 }
 
 /// Custom deserialize for backward compat: accepts both `agent` (legacy string)
@@ -552,10 +778,31 @@ impl<'de> Deserialize<'de> for PipelineBlock {
             #[serde(default = "default_one")]
             replicas: u32,
             #[serde(default)]
+            schema: Option<String>,
+            #[serde(default)]
+            command: Option<String>,
+            #[serde(default)]
             sub_pipeline: Option<PipelineDefinition>,
+            #[serde(default)]
+            model: Option<String>,
+            #[serde(default)]
+            effort: Option<String>,
+            #[serde(default)]
+            fresh: bool,
+            #[serde(default)]
+            raw: bool,
         }
         let raw = Raw::deserialize(deserializer)?;
-        let agents = if raw.sub_pipeline.is_some() {
+        let agents = if raw.command.as_deref().is_some_and(|c| !c.trim().is_empty()) {
+            // Code blocks run a shell command, not an agent. The synthetic
+            // "code" agent gives them a runtime entry + display label.
+            if raw.agents.as_ref().is_some_and(|v| !v.is_empty()) || raw.agent.is_some() {
+                return Err(serde::de::Error::custom(
+                    "a code block ('command') must not have 'agents' or 'agent' fields",
+                ));
+            }
+            vec!["code".to_string()]
+        } else if raw.sub_pipeline.is_some() {
             // Sub-pipeline blocks must not have agents
             if raw.agents.as_ref().is_some_and(|v| !v.is_empty()) || raw.agent.is_some() {
                 return Err(serde::de::Error::custom(
@@ -607,7 +854,13 @@ impl<'de> Deserialize<'de> for PipelineBlock {
             session_id: raw.session_id,
             position: raw.position,
             replicas: raw.replicas,
+            schema: raw.schema.filter(|s| !s.trim().is_empty()),
+            command: raw.command.filter(|s| !s.trim().is_empty()),
             sub_pipeline: raw.sub_pipeline,
+            model: raw.model.filter(|s| !s.trim().is_empty()),
+            effort: raw.effort.filter(|s| !s.trim().is_empty()),
+            fresh: raw.fresh,
+            raw: raw.raw,
         })
     }
 }
@@ -785,6 +1038,11 @@ pub struct LoopConnection {
     pub break_condition: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub break_agent: String,
+    /// Deterministic break gate: a shell command run after each pass (in the
+    /// run's workdir). Exit 0 = condition met, break the loop. Mutually
+    /// exclusive with break_agent.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub break_command: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -878,8 +1136,10 @@ impl PipelineDefinition {
     /// Visit all agent references recursively (including sub-pipelines and break agents).
     pub fn visit_all_agent_refs(&self, visitor: &mut dyn FnMut(&str, BlockId)) {
         for block in self.blocks.iter().chain(self.finalization_blocks.iter()) {
-            for agent in &block.agents {
-                visitor(agent, block.id);
+            if block.command.is_none() {
+                for agent in &block.agents {
+                    visitor(agent, block.id);
+                }
             }
             if let Some(ref sub) = block.sub_pipeline {
                 sub.visit_all_agent_refs(visitor);
@@ -1671,6 +1931,83 @@ pub(crate) fn validate_pipeline(def: &PipelineDefinition) -> Result<(), AppError
         }
     }
 
+    // Rule 1a-bis: output contracts must be well-formed and only appear on
+    // regular agent blocks (raw blocks bypass wrapping; sub-pipelines have
+    // their own internal blocks).
+    for block in def.blocks.iter().chain(def.finalization_blocks.iter()) {
+        if block.command.is_some() {
+            if block.raw {
+                return Err(AppError::Config(format!(
+                    "Block {}: command (code block) cannot be combined with raw mode",
+                    block.id
+                )));
+            }
+            if block.sub_pipeline.is_some() {
+                return Err(AppError::Config(format!(
+                    "Block {}: command (code block) cannot be combined with a sub-pipeline",
+                    block.id
+                )));
+            }
+        }
+        if let Some(ref contract) = block.schema {
+            if block.raw {
+                return Err(AppError::Config(format!(
+                    "Block {}: schema cannot be combined with raw (command) mode",
+                    block.id
+                )));
+            }
+            if block.sub_pipeline.is_some() {
+                return Err(AppError::Config(format!(
+                    "Block {}: schema is not supported on sub-pipeline blocks",
+                    block.id
+                )));
+            }
+            let spec: serde_json::Map<String, serde_json::Value> = serde_json::from_str(contract)
+                .map_err(|e| {
+                AppError::Config(format!(
+                    "Block {}: schema is not a JSON object: {e}",
+                    block.id
+                ))
+            })?;
+            for (field, ty) in &spec {
+                if field.contains("[]") || field.contains('.') {
+                    continue; // nested descriptor keys are documentation only
+                }
+                let ty = ty.as_str().unwrap_or("");
+                let base = ty.strip_suffix('?').unwrap_or(ty);
+                if !matches!(
+                    base,
+                    "string" | "number" | "boolean" | "array" | "object" | "any"
+                ) {
+                    return Err(AppError::Config(format!(
+                        "Block {}: schema field '{field}' has unknown type '{ty}' (use string/number/boolean/array/object/any, '?' suffix = optional)",
+                        block.id
+                    )));
+                }
+            }
+        }
+    }
+
+    // Rule 1b: blocks that share an explicit session_id must not declare
+    // conflicting per-block model/effort overrides — one continued conversation
+    // can't switch models (the pooled provider is shared).
+    let mut sess_override: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
+    for block in &def.blocks {
+        if let Some(sid) = &block.session_id {
+            match sess_override.get(sid) {
+                Some((m, e)) if *m != block.model || *e != block.effort => {
+                    return Err(AppError::Config(format!(
+                        "Blocks sharing session_id '{sid}' declare different model/effort overrides; a shared session must use a single model and effort"
+                    )));
+                }
+                Some(_) => {}
+                None => {
+                    sess_override.insert(sid.clone(), (block.model.clone(), block.effort.clone()));
+                }
+            }
+        }
+    }
+
     let exec_ids = def.execution_block_ids();
     let fin_ids = def.finalization_block_ids();
 
@@ -1886,6 +2223,13 @@ pub(crate) fn validate_pipeline(def: &PipelineDefinition) -> Result<(), AppError
             if lc.break_agent.is_empty() != lc.break_condition.is_empty() {
                 return Err(AppError::Config(format!(
                     "Loop {}→{}: break_agent and break_condition must both be set or both empty",
+                    lc.from, lc.to
+                )));
+            }
+            // break_command is the deterministic alternative to the agent judge
+            if !lc.break_command.is_empty() && !lc.break_agent.is_empty() {
+                return Err(AppError::Config(format!(
+                    "Loop {}→{}: use either break_command or break_agent, not both",
                     lc.from, lc.to
                 )));
             }
@@ -2249,6 +2593,7 @@ struct LoopRuntimeState {
     prompt: String,
     break_condition: String,
     break_agent: String,
+    break_command: String,
     sub_dag: LoopSubDag,
     block_completed_this_pass: HashMap<BlockId, u32>,
     extra_tasks_remaining: usize,
@@ -2300,13 +2645,15 @@ pub async fn run_pipeline(
     let default_max_tokens = config.default_max_tokens;
     let max_history_messages = config.max_history_messages;
     let max_history_bytes = config.max_history_bytes;
+    let workdir = prompt_context.workdir();
+    let allow_edits = prompt_context.allow_edits();
     let factory: ProviderFactory = Arc::new(move |kind, cfg| {
         let mut dirs = vec![run_dir.clone()];
         let pdir = profiles_dir();
         if pdir.is_dir() {
             dirs.push(pdir.display().to_string());
         }
-        provider::create_provider(
+        let mut p = provider::create_provider(
             kind,
             cfg,
             client.clone(),
@@ -2315,7 +2662,9 @@ pub async fn run_pipeline(
             max_history_bytes,
             cli_timeout_secs,
             dirs,
-        )
+        );
+        p.set_edit_context(workdir.clone(), allow_edits);
+        p
     });
     run_pipeline_with_provider_factory(
         def,
@@ -2346,6 +2695,12 @@ async fn run_pipeline_with_provider_factory(
         let _ = progress_tx.send(ProgressEvent::AllDone);
         return Ok(());
     }
+
+    // Hard agent-call budget (execution phase; code blocks are free).
+    // Exceeding it cancels the whole run — the runaway-spend stop.
+    let call_budget: Option<(Arc<std::sync::atomic::AtomicU32>, u32)> = prompt_context
+        .max_calls()
+        .map(|m| (Arc::new(std::sync::atomic::AtomicU32::new(0)), m));
 
     // Warn about missing profile files (soft — execution still proceeds)
     for block in &def.blocks {
@@ -2379,7 +2734,14 @@ async fn run_pipeline_with_provider_factory(
         let pool_key = (entry.agent.clone(), entry.session_key.clone());
         if let std::collections::hash_map::Entry::Vacant(vacant) = provider_pool.entry(pool_key) {
             if let Some((kind, cfg, _use_cli)) = agent_configs.get(&entry.agent) {
-                let p = provider_factory(*kind, cfg);
+                let p = build_provider_with_overrides(
+                    &provider_factory,
+                    *kind,
+                    cfg,
+                    &entry.model,
+                    &entry.effort,
+                    entry.raw,
+                );
                 vacant.insert(Arc::new(Mutex::new(p)));
             }
         }
@@ -2436,6 +2798,7 @@ async fn run_pipeline_with_provider_factory(
                                 prompt: lc.prompt.clone(),
                                 break_condition: lc.break_condition.clone(),
                                 break_agent: lc.break_agent.clone(),
+                                break_command: lc.break_command.clone(),
                                 sub_dag,
                                 block_completed_this_pass: HashMap::new(),
                                 extra_tasks_remaining: extra,
@@ -2580,7 +2943,10 @@ async fn run_pipeline_with_provider_factory(
                         None => { completed += replica_count; continue; }
                     };
 
-                    let any_missing_agent = block.agents.iter().any(|a| !agent_configs.contains_key(a));
+                    // Code blocks use no agent (the synthetic "code" name is
+                    // display-only), so they never need a provider.
+                    let any_missing_agent = block.command.is_none()
+                        && block.agents.iter().any(|a| !agent_configs.contains_key(a));
                     if any_missing_agent {
                         for &rid in rids {
                             let info = &rt.entries[rid as usize];
@@ -3420,6 +3786,97 @@ async fn run_pipeline_with_provider_factory(
                             )
                         };
 
+                        // Code block: run the shell command with the built input
+                        // on stdin — no agent, no tokens.
+                        if let Some(ref code_cmd) = block.command {
+                            let _ = progress_tx.send(ProgressEvent::BlockStarted {
+                                block_id: rid,
+                                agent_name: info.agent.clone(),
+                                label: info.display_label.clone(),
+                                iteration,
+                                loop_pass: current_loop_pass,
+                            });
+                            let cmd = code_cmd.clone();
+                            let input = message;
+                            let schema = block.schema.clone();
+                            let workdir = prompt_context.workdir();
+                            let ptx = progress_tx.clone();
+                            let task_output = output.clone();
+                            let task_filename = loop_replica_filename(info, current_loop_pass);
+                            let task_agent_name = info.agent.clone();
+                            let task_label = info.display_label.clone();
+                            let task_loop_pass = current_loop_pass;
+                            let task_handle = tasks.spawn(async move {
+                                let _ = tokio::fs::write(
+                                    task_output.run_dir().join(format!("_input_{task_filename}")),
+                                    &input,
+                                )
+                                .await;
+                                let res = run_code_block(&cmd, &input, workdir.as_deref()).await;
+                                let res = res.and_then(|out| match &schema {
+                                    Some(c) => validate_output_contract(c, &out)
+                                        .map(|_| out)
+                                        .map_err(|e| format!("Output contract violation: {e}")),
+                                    None => Ok(out),
+                                });
+                                match res {
+                                    Ok(content) => {
+                                        let path = task_output.run_dir().join(&task_filename);
+                                        if let Err(e) =
+                                            tokio::fs::write(&path, &content).await
+                                        {
+                                            let error = format!("Failed to write output: {e}");
+                                            let _ = ptx.send(ProgressEvent::BlockError {
+                                                block_id: rid,
+                                                agent_name: task_agent_name,
+                                                label: task_label,
+                                                iteration,
+                                                loop_pass: task_loop_pass,
+                                                error: error.clone(),
+                                                details: Some(error.clone()),
+                                            });
+                                            return (rid, Err(error));
+                                        }
+                                        let _ = ptx.send(ProgressEvent::BlockFinished {
+                                            block_id: rid,
+                                            agent_name: task_agent_name,
+                                            label: task_label,
+                                            iteration,
+                                            loop_pass: task_loop_pass,
+                                        });
+                                        (rid, Ok(content))
+                                    }
+                                    Err(error) => {
+                                        let _ = task_output.append_error(&format!(
+                                            "runtime {rid} code: {error}"
+                                        ));
+                                        let _ = ptx.send(ProgressEvent::BlockError {
+                                            block_id: rid,
+                                            agent_name: task_agent_name,
+                                            label: task_label,
+                                            iteration,
+                                            loop_pass: task_loop_pass,
+                                            error: error.clone(),
+                                            details: Some(error.clone()),
+                                        });
+                                        (rid, Err(error))
+                                    }
+                                }
+                            });
+                            task_metadata.insert(
+                                task_handle.id(),
+                                PipelineTaskMetadata {
+                                    runtime_id: rid,
+                                    source_block_id: block_id,
+                                    agent_name: info.agent.clone(),
+                                    label: info.display_label.clone(),
+                                    iteration,
+                                    loop_pass: current_loop_pass,
+                                },
+                            );
+                            continue;
+                        }
+
                         let pool_key = (info.agent.clone(), info.session_key.clone());
                         let provider_arc = match provider_pool.get(&pool_key) {
                             Some(p) => p.clone(),
@@ -3485,10 +3942,50 @@ async fn run_pipeline_with_provider_factory(
                         let task_multi_replica = block.replicas > 1;
                         let task_replica_index = info.replica_index;
                         let task_block_id = info.source_block_id;
+                        let task_schema = block.schema.clone();
+                        let task_budget = call_budget.clone();
                         let task_handle = tasks.spawn(async move {
                             let _permit = sem_clone.acquire().await.expect("semaphore closed");
+                            // Budget check: counts every agent invocation.
+                            let over_budget = |budget: &Option<(
+                                Arc<std::sync::atomic::AtomicU32>,
+                                u32,
+                            )>| {
+                                budget.as_ref().is_some_and(|(counter, max)| {
+                                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                                        >= *max
+                                })
+                            };
+                            if over_budget(&task_budget) {
+                                let max = task_budget.as_ref().map(|(_, m)| *m).unwrap_or(0);
+                                cancel_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                                let error = format!(
+                                    "Agent call budget exhausted ({max} calls) — run cancelled"
+                                );
+                                let _ = ptx.send(ProgressEvent::BlockError {
+                                    block_id: rid,
+                                    agent_name: task_agent_name.clone(),
+                                    label: task_label.clone(),
+                                    iteration,
+                                    loop_pass: task_loop_pass,
+                                    error: error.clone(),
+                                    details: Some(error.clone()),
+                                });
+                                let _ = task_output
+                                    .append_error(&format!("runtime {rid}: {error}"));
+                                return (rid, Err(error));
+                            }
                             let mut guard = provider_arc.lock().await;
                             guard.set_output_path(Some(task_output.run_dir().join(&task_filename)));
+                            // Conversation record: persist the composed message so
+                            // the UI can show what each step was actually sent.
+                            // Underscore prefix keeps it out of upstream-content
+                            // and artifact listings.
+                            let _ = tokio::fs::write(
+                                task_output.run_dir().join(format!("_input_{task_filename}")),
+                                &message_clone,
+                            )
+                            .await;
 
                             let (live_tx, mut live_rx) = mpsc::unbounded_channel::<String>();
                             guard.set_live_log_sender(Some(live_tx));
@@ -3558,27 +4055,92 @@ async fn run_pipeline_with_provider_factory(
 
                             let pre_send_session_id = guard.session_id().map(|s| s.to_string());
 
-                            let result = tokio::select! {
+                            let make_chunk_event = {
+                                let agent_name = task_agent_name.clone();
+                                let bid = rid;
+                                let it = iteration;
+                                let lp = task_loop_pass;
+                                move |chunk| ProgressEvent::BlockStreamChunk {
+                                    block_id: bid,
+                                    agent_name: agent_name.clone(),
+                                    iteration: it,
+                                    loop_pass: lp,
+                                    chunk,
+                                }
+                            };
+                            let mut result = tokio::select! {
                                 res = crate::execution::send_with_streaming(
                                     &mut **guard,
                                     &message_clone,
                                     &ptx,
-                                    {
-                                        let agent_name = task_agent_name.clone();
-                                        let bid = rid;
-                                        let it = iteration;
-                                        let lp = task_loop_pass;
-                                        move |chunk| ProgressEvent::BlockStreamChunk {
-                                            block_id: bid,
-                                            agent_name: agent_name.clone(),
-                                            iteration: it,
-                                            loop_pass: lp,
-                                            chunk,
-                                        }
-                                    },
+                                    make_chunk_event.clone(),
                                 ) => Some(res),
                                 _ = wait_for_cancel(&cancel_clone) => None
                             };
+
+                            // Output contract enforcement: reject free-form or
+                            // malformed output and ask the same agent to retry
+                            // (session context preserved), up to 2 retries.
+                            if let Some(ref contract) = task_schema {
+                                const MAX_CONTRACT_RETRIES: u32 = 2;
+                                let mut attempt = 0;
+                                // (error/cancel results fall through — handled below as usual)
+                                while let Some(Ok(resp)) = &result {
+                                    let violation =
+                                        match validate_output_contract(contract, &resp.content) {
+                                            Err(v) => v,
+                                            Ok(()) => break,
+                                        };
+                                    if attempt >= MAX_CONTRACT_RETRIES {
+                                        result = Some(Err(crate::error::AppError::Provider {
+                                            provider: task_agent_name.clone(),
+                                            message: format!(
+                                                "Output contract violation after {MAX_CONTRACT_RETRIES} retries: {violation}"
+                                            ),
+                                        }));
+                                        break;
+                                    }
+                                    attempt += 1;
+                                    if over_budget(&task_budget) {
+                                        cancel_clone
+                                            .store(true, std::sync::atomic::Ordering::SeqCst);
+                                        result = Some(Err(crate::error::AppError::Provider {
+                                            provider: task_agent_name.clone(),
+                                            message: "Agent call budget exhausted during contract retry — run cancelled".into(),
+                                        }));
+                                        break;
+                                    }
+                                    let _ = ptx.send(ProgressEvent::BlockLog {
+                                        block_id: rid,
+                                        agent_name: task_agent_name.clone(),
+                                        iteration,
+                                        loop_pass: task_loop_pass,
+                                        message: format!(
+                                            "Output rejected ({violation}) — retry {attempt}/{MAX_CONTRACT_RETRIES}"
+                                        ),
+                                    });
+                                    // Re-arm the output file: CLI providers consume
+                                    // the path on each send.
+                                    guard.set_output_path(Some(
+                                        task_output.run_dir().join(&task_filename),
+                                    ));
+                                    let retry_msg = format!(
+                                        "Your previous output was REJECTED: {violation}.\n\
+                                         Respond again with ONLY a single JSON object matching this contract \
+                                         (name: type, \"?\" = optional): {contract}\n\
+                                         No prose, no code fences."
+                                    );
+                                    result = tokio::select! {
+                                        res = crate::execution::send_with_streaming(
+                                            &mut **guard,
+                                            &retry_msg,
+                                            &ptx,
+                                            make_chunk_event.clone(),
+                                        ) => Some(res),
+                                        _ = wait_for_cancel(&cancel_clone) => None
+                                    };
+                                }
+                            }
 
                             guard.set_live_log_sender(None);
                             let post_send_session_id = guard.session_id().map(|s| s.to_string());
@@ -3912,7 +4474,28 @@ async fn run_pipeline_with_provider_factory(
                                 } else {
                                     // --- Early-break evaluation ---
                                     let should_break = if let Some(ls) = loop_state.get(&key) {
-                                        if ls.remaining > 0
+                                        if ls.remaining > 0 && !ls.break_command.is_empty() {
+                                            // Deterministic shell gate: exit 0 = break
+                                            let command = ls.break_command.clone();
+                                            let pass = ls.current_pass;
+                                            let result = evaluate_loop_break_command(
+                                                &command,
+                                                prompt_context.workdir().as_deref(),
+                                            )
+                                            .await;
+                                            let decision =
+                                                if result { "BREAK" } else { "CONTINUE" };
+                                            let _ =
+                                                progress_tx.send(ProgressEvent::LoopBreakEval {
+                                                    from: loop_from,
+                                                    to: loop_to,
+                                                    iteration,
+                                                    pass: pass + 1,
+                                                    agent_name: format!("$ {command}"),
+                                                    decision: decision.into(),
+                                                });
+                                            result
+                                        } else if ls.remaining > 0
                                             && !ls.break_agent.is_empty()
                                             && !ls.break_condition.is_empty()
                                         {
@@ -4306,12 +4889,79 @@ fn apply_profiles_scatter_augment(
     prompt_context.augment_prompt_for_agent(&full, use_cli)
 }
 
+/// Concatenate a block's upstream outputs verbatim (the initial prompt for
+/// roots) — the stdin for code (`command`) blocks: no wrapping, no headers.
+fn build_code_block_input(block: &PipelineBlock, context: &PipelineMessageContext<'_>) -> String {
+    let ups = upstream_of_non_scatter(context.def, block.id);
+    // `fresh` code blocks behave like roots: stdin is the task, not the deps.
+    if block.fresh || ups.is_empty() {
+        return context.def.initial_prompt.clone();
+    }
+    let mut c = String::new();
+    for uid in &ups {
+        if let Some(rids) = context.runtime_table.logical_to_runtime.get(uid) {
+            for &rid in rids {
+                if let Some(content) = context.block_outputs.get(&rid) {
+                    if !c.is_empty() {
+                        c.push_str("\n\n");
+                    }
+                    c.push_str(content);
+                }
+            }
+        }
+    }
+    c
+}
+
 fn build_pipeline_block_message(
     block: &PipelineBlock,
     use_cli: bool,
     context: &PipelineMessageContext<'_>,
 ) -> String {
-    let is_root = upstream_of_non_scatter(context.def, block.id).is_empty();
+    // Code blocks: raw upstream concat becomes the command's stdin.
+    if block.command.is_some() {
+        return build_code_block_input(block, context);
+    }
+    // `raw` (command) blocks send the prompt verbatim (e.g. `/goal`) with the
+    // previous step's output appended as the argument — no HoA wrapping, so the
+    // slash command is recognized at position 0.
+    if block.raw {
+        let mut m = block.prompt.clone();
+        // `fresh` raw steps send the command verbatim (no argument appended).
+        // Otherwise append the previous step's output (or the task if root) as
+        // the command's argument.
+        if !block.fresh {
+            let ups = upstream_of_non_scatter(context.def, block.id);
+            let arg = if ups.is_empty() {
+                context.def.initial_prompt.clone()
+            } else {
+                let mut c = String::new();
+                for uid in &ups {
+                    if let Some(rids) = context.runtime_table.logical_to_runtime.get(uid) {
+                        for &rid in rids {
+                            if let Some(content) = context.block_outputs.get(&rid) {
+                                if !c.is_empty() {
+                                    c.push_str("\n\n");
+                                }
+                                c.push_str(content);
+                            }
+                        }
+                    }
+                }
+                c
+            };
+            if !arg.is_empty() {
+                if !m.is_empty() {
+                    m.push_str("\n\n");
+                }
+                m.push_str(&arg);
+            }
+        }
+        return m;
+    }
+    // `fresh` blocks ignore upstream outputs and build a root-style message
+    // (task + own prompt), while still running after their upstreams.
+    let is_root = block.fresh || upstream_of_non_scatter(context.def, block.id).is_empty();
     let base_message = if is_root {
         if block.prompt.is_empty() {
             context.def.initial_prompt.clone()
@@ -4384,6 +5034,13 @@ fn build_pipeline_block_message(
     // If this block has an outgoing scatter connection, tell it to format output with delimiters
     let base_message = if let Some(delim) = outgoing_scatter_delimiter(context.def, block.id) {
         format!("{base_message}\n\n{}", scatter_source_instruction(delim))
+    } else {
+        base_message
+    };
+
+    // Output contract: instruct the exact JSON shape (enforced after send)
+    let base_message = if let Some(ref contract) = block.schema {
+        format!("{base_message}{}", contract_instruction(contract))
     } else {
         base_message
     };
@@ -4530,6 +5187,34 @@ fn build_loop_rerun_message_v2(
     scatter_injection: Option<&str>,
     block_map: &HashMap<BlockId, &PipelineBlock>,
 ) -> String {
+    // Code blocks in a loop: stdin = the feedback outputs from the loop source.
+    if block.command.is_some() {
+        let mut rids: Vec<_> = replica_outputs.keys().copied().collect();
+        rids.sort_unstable();
+        let mut c = String::new();
+        for rid in rids {
+            if !c.is_empty() {
+                c.push_str("\n\n");
+            }
+            c.push_str(&replica_outputs[&rid]);
+        }
+        if c.is_empty() {
+            c = def.initial_prompt.clone();
+        }
+        return c;
+    }
+    // Raw/command blocks stay raw across loop passes. `fresh` → verbatim command;
+    // otherwise append the task as the argument (no wrapping).
+    if block.raw {
+        let mut m = block.prompt.clone();
+        if !block.fresh && !def.initial_prompt.is_empty() {
+            if !m.is_empty() {
+                m.push_str("\n\n");
+            }
+            m.push_str(&def.initial_prompt);
+        }
+        return m;
+    }
     let mut message = String::new();
 
     // External upstream context (parents outside the loop sub-DAG)
@@ -4538,9 +5223,9 @@ fn build_loop_rerun_message_v2(
         .filter(|uid| !loop_sub_dag_blocks.contains(uid))
         .collect();
 
-    let is_root = upstream_of_non_scatter(def, block.id).is_empty();
+    let is_root = block.fresh || upstream_of_non_scatter(def, block.id).is_empty();
     if is_root {
-        // Root restart target: include initial_prompt
+        // Root restart target (or a `fresh` block): include only initial_prompt
         if !def.initial_prompt.is_empty() {
             message.push_str(&def.initial_prompt);
             message.push_str("\n\n");
@@ -4668,6 +5353,11 @@ fn build_loop_rerun_message_v2(
     if let Some(delim) = outgoing_scatter_delimiter(def, block.id) {
         message.push_str("\n\n");
         message.push_str(&scatter_source_instruction(delim));
+    }
+
+    // Output contract: instruct the exact JSON shape (enforced after send)
+    if let Some(ref contract) = block.schema {
+        message.push_str(&contract_instruction(contract));
     }
 
     apply_profiles_scatter_augment(
@@ -4817,6 +5507,9 @@ pub(crate) fn build_finalization_runtime_entries(
                         display_label,
                         session_key,
                         filename_stem,
+                        model: block.model.clone(),
+                        effort: block.effort.clone(),
+                        raw: block.raw,
                     });
                 }
             }
@@ -5432,7 +6125,14 @@ pub(crate) async fn run_pipeline_finalization(
                         }
                     };
 
-                    let mut provider = provider_factory(*kind, cfg);
+                    let mut provider = build_provider_with_overrides(
+                        &provider_factory,
+                        *kind,
+                        cfg,
+                        &entry.model,
+                        &entry.effort,
+                        entry.raw,
+                    );
                     let fin_filename = format!("{}.md", entry.filename_stem);
                     provider.set_output_path(Some(fin_dir.join(&fin_filename)));
                     let rid = entry.runtime_id;
@@ -5759,7 +6459,14 @@ pub(crate) async fn run_pipeline_finalization(
                     }
                 };
 
-                let mut provider = provider_factory(*kind, cfg);
+                let mut provider = build_provider_with_overrides(
+                    &provider_factory,
+                    *kind,
+                    cfg,
+                    &entry.model,
+                    &entry.effort,
+                    entry.raw,
+                );
                 let fin_filename = format!("{}.md", entry.filename_stem);
                 provider.set_output_path(Some(fin_dir.join(&fin_filename)));
                 let rid = entry.runtime_id;
@@ -5940,6 +6647,10 @@ mod tests {
 
     fn block(id: BlockId, col: u16, row: u16) -> PipelineBlock {
         PipelineBlock {
+            raw: false,
+            fresh: false,
+            model: None,
+            effort: None,
             id,
             name: format!("Block#{id}"),
             agents: vec!["Claude".into()],
@@ -5948,12 +6659,96 @@ mod tests {
             session_id: None,
             position: (col, row),
             replicas: 1,
+            command: None,
+            schema: None,
             sub_pipeline: None,
         }
     }
 
     fn conn(from: BlockId, to: BlockId) -> PipelineConnection {
         PipelineConnection::new(from, to)
+    }
+
+    fn cfg_cli() -> ProviderConfig {
+        ProviderConfig {
+            api_key: String::new(),
+            model: "base-model".into(),
+            reasoning_effort: None,
+            thinking_effort: None,
+            use_cli: true,
+            extra_cli_args: String::new(),
+        }
+    }
+
+    #[test]
+    fn runtime_table_carries_block_model_effort() {
+        let mut b = block(1, 0, 0);
+        b.model = Some("claude-opus-4-8".into());
+        b.effort = Some("xhigh".into());
+        let def = def_with(vec![b], vec![]);
+        let rt = build_runtime_table(&def);
+        assert_eq!(rt.entries[0].model.as_deref(), Some("claude-opus-4-8"));
+        assert_eq!(rt.entries[0].effort.as_deref(), Some("xhigh"));
+    }
+
+    #[test]
+    fn overrides_apply_model_and_effort_to_config() {
+        let seen = Arc::new(Mutex::new(None));
+        let seen2 = seen.clone();
+        let factory: ProviderFactory = Arc::new(move |kind, cfg| {
+            *seen2.lock().unwrap() = Some(cfg.clone());
+            Box::new(MockProvider::ok(kind, "ok", Arc::new(Mutex::new(vec![]))))
+        });
+        let _ = build_provider_with_overrides(
+            &factory,
+            ProviderKind::OpenAI,
+            &cfg_cli(),
+            &Some("gpt-x".into()),
+            &Some("high".into()),
+            false,
+        );
+        let c = seen.lock().unwrap().clone().unwrap();
+        assert_eq!(c.model, "gpt-x");
+        assert_eq!(c.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(c.thinking_effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn overrides_noop_when_blank_reuse_config_model() {
+        let seen = Arc::new(Mutex::new(None));
+        let seen2 = seen.clone();
+        let factory: ProviderFactory = Arc::new(move |kind, cfg| {
+            *seen2.lock().unwrap() = Some(cfg.clone());
+            Box::new(MockProvider::ok(kind, "ok", Arc::new(Mutex::new(vec![]))))
+        });
+        let _ = build_provider_with_overrides(
+            &factory,
+            ProviderKind::OpenAI,
+            &cfg_cli(),
+            &None,
+            &None,
+            false,
+        );
+        assert_eq!(seen.lock().unwrap().clone().unwrap().model, "base-model");
+    }
+
+    #[test]
+    fn validate_rejects_conflicting_session_overrides() {
+        let mut a = block(1, 0, 0);
+        a.session_id = Some("s".into());
+        a.model = Some("m1".into());
+        let mut b = block(2, 0, 1);
+        b.session_id = Some("s".into());
+        b.model = Some("m2".into());
+        assert!(validate_pipeline(&def_with(vec![a, b], vec![conn(1, 2)])).is_err());
+        // same override on the shared session is fine
+        let mut a2 = block(1, 0, 0);
+        a2.session_id = Some("s".into());
+        a2.model = Some("m1".into());
+        let mut b2 = block(2, 0, 1);
+        b2.session_id = Some("s".into());
+        b2.model = Some("m1".into());
+        assert!(validate_pipeline(&def_with(vec![a2, b2], vec![conn(1, 2)])).is_ok());
     }
 
     fn def_with(
@@ -6401,6 +7196,10 @@ to = 1
             initial_prompt: "base prompt".into(),
 
             blocks: vec![PipelineBlock {
+                raw: false,
+                fresh: false,
+                model: None,
+                effort: None,
                 id: 1,
                 name: "Root".into(),
                 agents: vec!["Claude".into()],
@@ -6409,6 +7208,8 @@ to = 1
                 session_id: None,
                 position: (0, 0),
                 replicas: 1,
+                command: None,
+                schema: None,
                 sub_pipeline: None,
             }],
             connections: vec![],
@@ -6444,6 +7245,196 @@ to = 1
         assert_eq!(api_message, "block prompt\n\nbase prompt");
     }
 
+    #[test]
+    fn fresh_block_ignores_upstream_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = OutputManager::new(dir.path(), Some("fresh")).unwrap();
+        let context = PromptRuntimeContext::new("the task".to_string(), false);
+        let btl = HashMap::new();
+        let blp = HashMap::new();
+
+        let build = |fresh: bool| -> String {
+            let mut b1 = block(1, 0, 0);
+            b1.prompt = "implement".into();
+            let mut b2 = block(2, 0, 1);
+            b2.prompt = "review".into();
+            b2.fresh = fresh;
+            let def = PipelineDefinition {
+                initial_prompt: "the task".into(),
+                blocks: vec![b1, b2],
+                connections: vec![conn(1, 2)],
+                session_configs: Vec::new(),
+                loop_connections: Vec::new(),
+                finalization_blocks: Vec::new(),
+                finalization_connections: Vec::new(),
+                data_feeds: Vec::new(),
+            };
+            let rt = build_runtime_table(&def);
+            let mut block_outputs = HashMap::new();
+            block_outputs.insert(rt.logical_to_runtime[&1][0], "SECRET_UPSTREAM".to_string());
+            let bm: HashMap<BlockId, &PipelineBlock> =
+                def.blocks.iter().map(|b| (b.id, b)).collect();
+            let ctx = PipelineMessageContext {
+                def: &def,
+                block_map: &bm,
+                block_outputs: &block_outputs,
+                output: &output,
+                prompt_context: &context,
+                runtime_table: &rt,
+                block_to_loop: &btl,
+                block_loop_pass: &blp,
+                scatter_injection: None,
+            };
+            build_pipeline_block_message(&def.blocks[1], false, &ctx)
+        };
+
+        let fresh_msg = build(true);
+        assert!(
+            !fresh_msg.contains("SECRET_UPSTREAM"),
+            "fresh block must not receive upstream output"
+        );
+        assert!(!fresh_msg.contains("Upstream outputs"));
+        assert!(fresh_msg.contains("the task") && fresh_msg.contains("review"));
+
+        let normal_msg = build(false);
+        assert!(
+            normal_msg.contains("SECRET_UPSTREAM"),
+            "non-fresh block should receive upstream output"
+        );
+    }
+
+    #[test]
+    fn fresh_code_block_ignores_upstream_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = OutputManager::new(dir.path(), Some("freshcode")).unwrap();
+        let context = PromptRuntimeContext::new("the task".to_string(), false);
+        let btl = HashMap::new();
+        let blp = HashMap::new();
+
+        let build = |fresh: bool| -> String {
+            let mut b1 = block(1, 0, 0);
+            b1.prompt = "implement".into();
+            let mut b2 = block(2, 0, 1);
+            b2.command = Some("wc -c".into());
+            b2.agents = vec!["code".into()];
+            b2.fresh = fresh;
+            let def = PipelineDefinition {
+                initial_prompt: "the task".into(),
+                blocks: vec![b1, b2],
+                connections: vec![conn(1, 2)],
+                session_configs: Vec::new(),
+                loop_connections: Vec::new(),
+                finalization_blocks: Vec::new(),
+                finalization_connections: Vec::new(),
+                data_feeds: Vec::new(),
+            };
+            let rt = build_runtime_table(&def);
+            let mut block_outputs = HashMap::new();
+            block_outputs.insert(rt.logical_to_runtime[&1][0], "SECRET_UPSTREAM".to_string());
+            let bm: HashMap<BlockId, &PipelineBlock> =
+                def.blocks.iter().map(|b| (b.id, b)).collect();
+            let ctx = PipelineMessageContext {
+                def: &def,
+                block_map: &bm,
+                block_outputs: &block_outputs,
+                output: &output,
+                prompt_context: &context,
+                runtime_table: &rt,
+                block_to_loop: &btl,
+                block_loop_pass: &blp,
+                scatter_injection: None,
+            };
+            build_code_block_input(&def.blocks[1], &ctx)
+        };
+
+        assert_eq!(
+            build(true),
+            "the task",
+            "fresh code block stdin must be the task only"
+        );
+        assert_eq!(
+            build(false),
+            "SECRET_UPSTREAM",
+            "non-fresh code block stdin is the deps' output"
+        );
+    }
+
+    #[test]
+    fn raw_block_sends_command_plus_upstream_verbatim() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = OutputManager::new(dir.path(), Some("raw")).unwrap();
+        let context = PromptRuntimeContext::new("the task".to_string(), false);
+        let mut b1 = block(1, 0, 0);
+        b1.prompt = "implement".into();
+        let mut b2 = block(2, 0, 1);
+        b2.prompt = "/goal".into();
+        b2.raw = true;
+        let def = PipelineDefinition {
+            initial_prompt: "the task".into(),
+            blocks: vec![b1, b2],
+            connections: vec![conn(1, 2)],
+            session_configs: Vec::new(),
+            loop_connections: Vec::new(),
+            finalization_blocks: Vec::new(),
+            finalization_connections: Vec::new(),
+            data_feeds: Vec::new(),
+        };
+        let rt = build_runtime_table(&def);
+        let mut block_outputs = HashMap::new();
+        block_outputs.insert(rt.logical_to_runtime[&1][0], "PLAN_TEXT".to_string());
+        let bm: HashMap<BlockId, &PipelineBlock> = def.blocks.iter().map(|b| (b.id, b)).collect();
+        let btl = HashMap::new();
+        let blp = HashMap::new();
+        let ctx = PipelineMessageContext {
+            def: &def,
+            block_map: &bm,
+            block_outputs: &block_outputs,
+            output: &output,
+            prompt_context: &context,
+            runtime_table: &rt,
+            block_to_loop: &btl,
+            block_loop_pass: &blp,
+            scatter_injection: None,
+        };
+        // CLI mode: must be verbatim `/goal\n\n<upstream>` — no "Working directory:",
+        // no "read upstream files", command at position 0.
+        let msg = build_pipeline_block_message(&def.blocks[1], true, &ctx);
+        assert_eq!(msg, "/goal\n\nPLAN_TEXT");
+
+        // raw + fresh → verbatim command only, nothing appended.
+        let mut b2f = block(2, 0, 1);
+        b2f.prompt = "/goal".into();
+        b2f.raw = true;
+        b2f.fresh = true;
+        let def2 = PipelineDefinition {
+            initial_prompt: "the task".into(),
+            blocks: vec![block(1, 0, 0), b2f],
+            connections: vec![conn(1, 2)],
+            session_configs: Vec::new(),
+            loop_connections: Vec::new(),
+            finalization_blocks: Vec::new(),
+            finalization_connections: Vec::new(),
+            data_feeds: Vec::new(),
+        };
+        let rt2 = build_runtime_table(&def2);
+        let bm2: HashMap<BlockId, &PipelineBlock> = def2.blocks.iter().map(|b| (b.id, b)).collect();
+        let ctx2 = PipelineMessageContext {
+            def: &def2,
+            block_map: &bm2,
+            block_outputs: &block_outputs,
+            output: &output,
+            prompt_context: &context,
+            runtime_table: &rt2,
+            block_to_loop: &btl,
+            block_loop_pass: &blp,
+            scatter_injection: None,
+        };
+        assert_eq!(
+            build_pipeline_block_message(&def2.blocks[1], true, &ctx2),
+            "/goal"
+        );
+    }
+
     #[tokio::test]
     async fn run_pipeline_panics_emit_block_error_and_append_error_log() {
         let dir = tempfile::tempdir().unwrap();
@@ -6452,6 +7443,10 @@ to = 1
             initial_prompt: "base prompt".into(),
 
             blocks: vec![PipelineBlock {
+                raw: false,
+                fresh: false,
+                model: None,
+                effort: None,
                 id: 1,
                 name: "Root".into(),
                 agents: vec!["Claude".into()],
@@ -6460,6 +7455,8 @@ to = 1
                 session_id: None,
                 position: (0, 0),
                 replicas: 1,
+                command: None,
+                schema: None,
                 sub_pipeline: None,
             }],
             connections: vec![],
@@ -6534,6 +7531,10 @@ to = 1
             initial_prompt: "base prompt".into(),
 
             blocks: vec![PipelineBlock {
+                raw: false,
+                fresh: false,
+                model: None,
+                effort: None,
                 id: 1,
                 name: "Root".into(),
                 agents: vec!["Claude".into()],
@@ -6542,6 +7543,8 @@ to = 1
                 session_id: None,
                 position: (0, 0),
                 replicas: 1,
+                command: None,
+                schema: None,
                 sub_pipeline: None,
             }],
             connections: vec![],
@@ -6711,6 +7714,10 @@ to = 1
     #[test]
     fn effective_session_key_returns_explicit_session_id() {
         let b = PipelineBlock {
+            raw: false,
+            fresh: false,
+            model: None,
+            effort: None,
             id: 1,
             name: "B".into(),
             agents: vec!["Claude".into()],
@@ -6719,6 +7726,8 @@ to = 1
             session_id: Some("shared".into()),
             position: (0, 0),
             replicas: 1,
+            command: None,
+            schema: None,
             sub_pipeline: None,
         };
         assert_eq!(b.effective_session_key(), "shared");
@@ -6737,6 +7746,10 @@ to = 1
         let mut def = def_with(
             vec![
                 PipelineBlock {
+                    raw: false,
+                    fresh: false,
+                    model: None,
+                    effort: None,
                     id: 1,
                     name: "A".into(),
                     agents: vec!["Claude".into()],
@@ -6745,9 +7758,15 @@ to = 1
                     session_id: Some("shared".into()),
                     position: (0, 0),
                     replicas: 1,
+                    command: None,
+                    schema: None,
                     sub_pipeline: None,
                 },
                 PipelineBlock {
+                    raw: false,
+                    fresh: false,
+                    model: None,
+                    effort: None,
                     id: 2,
                     name: "B".into(),
                     agents: vec!["Claude".into()],
@@ -6756,6 +7775,8 @@ to = 1
                     session_id: Some("shared".into()),
                     position: (1, 0),
                     replicas: 1,
+                    command: None,
+                    schema: None,
                     sub_pipeline: None,
                 },
             ],
@@ -6774,6 +7795,10 @@ to = 1
         let mut def = def_with(
             vec![
                 PipelineBlock {
+                    raw: false,
+                    fresh: false,
+                    model: None,
+                    effort: None,
                     id: 1,
                     name: "A".into(),
                     agents: vec!["Claude".into()],
@@ -6782,9 +7807,15 @@ to = 1
                     session_id: Some("shared".into()),
                     position: (0, 0),
                     replicas: 1,
+                    command: None,
+                    schema: None,
                     sub_pipeline: None,
                 },
                 PipelineBlock {
+                    raw: false,
+                    fresh: false,
+                    model: None,
+                    effort: None,
                     id: 2,
                     name: "B".into(),
                     agents: vec!["GPT".into()],
@@ -6793,6 +7824,8 @@ to = 1
                     session_id: Some("shared".into()),
                     position: (1, 0),
                     replicas: 1,
+                    command: None,
+                    schema: None,
                     sub_pipeline: None,
                 },
             ],
@@ -6815,6 +7848,10 @@ to = 1
         let mut def = def_with(
             vec![
                 PipelineBlock {
+                    raw: false,
+                    fresh: false,
+                    model: None,
+                    effort: None,
                     id: 1,
                     name: "Z".into(),
                     agents: vec!["GPT".into()],
@@ -6823,9 +7860,15 @@ to = 1
                     session_id: None,
                     position: (0, 0),
                     replicas: 1,
+                    command: None,
+                    schema: None,
                     sub_pipeline: None,
                 },
                 PipelineBlock {
+                    raw: false,
+                    fresh: false,
+                    model: None,
+                    effort: None,
                     id: 2,
                     name: "A".into(),
                     agents: vec!["Claude".into()],
@@ -6834,6 +7877,8 @@ to = 1
                     session_id: None,
                     position: (1, 0),
                     replicas: 1,
+                    command: None,
+                    schema: None,
                     sub_pipeline: None,
                 },
             ],
@@ -6850,6 +7895,10 @@ to = 1
         let def = def_with(
             vec![
                 PipelineBlock {
+                    raw: false,
+                    fresh: false,
+                    model: None,
+                    effort: None,
                     id: 1,
                     name: "Worker".into(),
                     agents: vec!["Claude".into()],
@@ -6858,9 +7907,15 @@ to = 1
                     session_id: None,
                     position: (0, 0),
                     replicas: 1,
+                    command: None,
+                    schema: None,
                     sub_pipeline: None,
                 },
                 PipelineBlock {
+                    raw: false,
+                    fresh: false,
+                    model: None,
+                    effort: None,
                     id: 2,
                     name: "Worker".into(),
                     agents: vec!["Claude".into()],
@@ -6869,6 +7924,8 @@ to = 1
                     session_id: None,
                     position: (1, 0),
                     replicas: 1,
+                    command: None,
+                    schema: None,
                     sub_pipeline: None,
                 },
             ],
@@ -7200,6 +8257,7 @@ keep_across_loop_passes = false
             prompt: String::new(),
             break_condition: String::new(),
             break_agent: String::new(),
+            break_command: String::new(),
         }
     }
 
@@ -7245,6 +8303,7 @@ keep_across_loop_passes = false
                 prompt: String::new(),
                 break_condition: String::new(),
                 break_agent: String::new(),
+                break_command: String::new(),
             }],
         );
         let err = validate_pipeline(&def).unwrap_err();
@@ -7383,6 +8442,7 @@ keep_across_loop_passes = false
                 prompt: String::new(),
                 break_condition: String::new(),
                 break_agent: String::new(),
+                break_command: String::new(),
             }],
         );
         migrate_loop_direction(&mut def);
@@ -7554,6 +8614,7 @@ keep_across_loop_passes = false
                 prompt: "review again".into(),
                 break_condition: String::new(),
                 break_agent: String::new(),
+                break_command: String::new(),
             }],
         );
         let toml_str = toml::to_string(&def).expect("serialize");
@@ -7578,6 +8639,7 @@ keep_across_loop_passes = false
                 prompt: "iterate".into(),
                 break_condition: "Stop when stable".into(),
                 break_agent: "Claude".into(),
+                break_command: String::new(),
             }],
         );
         let toml_str = toml::to_string(&def).expect("serialize");
@@ -7602,6 +8664,7 @@ keep_across_loop_passes = false
                 prompt: String::new(),
                 break_condition: String::new(),
                 break_agent: "Claude".into(),
+                break_command: String::new(),
             }],
         );
         let err = validate_pipeline(&def).unwrap_err();
@@ -7623,6 +8686,7 @@ keep_across_loop_passes = false
                 prompt: String::new(),
                 break_condition: "Stop when done".into(),
                 break_agent: String::new(),
+                break_command: String::new(),
             }],
         );
         let err = validate_pipeline(&def).unwrap_err();
@@ -8023,6 +9087,9 @@ keep_across_loop_passes = false
     #[test]
     fn test_loop_filename_generation() {
         let info = RuntimeReplicaInfo {
+            raw: false,
+            model: None,
+            effort: None,
             runtime_id: 0,
             source_block_id: 1,
             replica_index: 0,
@@ -8862,6 +9929,10 @@ keep_across_loop_passes = false
 
     fn fin_block(id: BlockId, col: u16, row: u16) -> PipelineBlock {
         PipelineBlock {
+            raw: false,
+            fresh: false,
+            model: None,
+            effort: None,
             id,
             name: format!("Fin#{id}"),
             agents: vec!["Claude".into()],
@@ -8870,6 +9941,8 @@ keep_across_loop_passes = false
             session_id: None,
             position: (col, row),
             replicas: 1,
+            command: None,
+            schema: None,
             sub_pipeline: None,
         }
     }
@@ -8980,6 +10053,7 @@ position = [0, 0]
             prompt: String::new(),
             break_condition: String::new(),
             break_agent: String::new(),
+            break_command: String::new(),
         });
         let err = validate_pipeline(&def).unwrap_err();
         assert!(
@@ -9316,6 +10390,10 @@ position = [0, 0]
 
         // Two-agent block so we get two output files from a single feed
         let two_agent_block = PipelineBlock {
+            raw: false,
+            fresh: false,
+            model: None,
+            effort: None,
             id: 1,
             name: "Block#1".into(),
             agents: vec!["A".into(), "Z".into()],
@@ -9324,6 +10402,8 @@ position = [0, 0]
             session_id: None,
             position: (0, 0),
             replicas: 1,
+            command: None,
+            schema: None,
             sub_pipeline: None,
         };
         let mut def = def_with(vec![two_agent_block], vec![]);
@@ -9396,6 +10476,548 @@ position = [0, 0]
     }
 
     #[tokio::test]
+    async fn test_max_calls_budget_cancels_run() {
+        // 2-block chain looping 5 extra passes = 12 potential calls; budget 2
+        // must cut it off with a budget error instead of running them all.
+        let dir = tempfile::tempdir().unwrap();
+        let output = OutputManager::new(dir.path(), Some("budget")).unwrap();
+        let def = def_with_loops(
+            vec![block(1, 0, 0), block(2, 1, 0)],
+            vec![conn(1, 2)],
+            vec![LoopConnection {
+                from: 2,
+                to: 1,
+                count: 5,
+                prompt: String::new(),
+                break_condition: String::new(),
+                break_agent: String::new(),
+                break_command: String::new(),
+            }],
+        );
+        let agent_configs = HashMap::from([(
+            "Claude".to_string(),
+            (
+                ProviderKind::Anthropic,
+                ProviderConfig {
+                    api_key: String::new(),
+                    model: "test".to_string(),
+                    reasoning_effort: None,
+                    thinking_effort: None,
+                    use_cli: false,
+                    extra_cli_args: String::new(),
+                },
+                false,
+            ),
+        )]);
+        let mut context = PromptRuntimeContext::new(def.initial_prompt.clone(), false);
+        context.set_max_calls(Some(2));
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let (tx, rx) = mpsc::unbounded_channel();
+        let recv_clone = received.clone();
+        let _ = run_pipeline_with_provider_factory(
+            &def,
+            0,
+            agent_configs,
+            &context,
+            &output,
+            tx,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(move |_kind, _cfg| {
+                let responses = (0..20)
+                    .map(|_| crate::execution::test_utils::ok_response("output"))
+                    .collect();
+                Box::new(MockProvider::with_responses(
+                    ProviderKind::Anthropic,
+                    responses,
+                    recv_clone.clone(),
+                ))
+            }),
+        )
+        .await;
+        let events = collect_progress_events(rx);
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                ProgressEvent::BlockError { error, .. } if error.contains("budget exhausted")
+            )),
+            "budget error must be emitted: {events:?}"
+        );
+        assert!(
+            received.lock().unwrap().len() <= 2,
+            "no more than 2 agent calls may happen, got {}",
+            received.lock().unwrap().len()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_code_block_stdin_stdout_and_errors() {
+        assert_eq!(
+            run_code_block("tr a-z A-Z", "hello", None).await.unwrap(),
+            "HELLO"
+        );
+        let e = run_code_block("exit 3", "", None).await.unwrap_err();
+        assert!(e.contains("exited with"), "{e}");
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            run_code_block("pwd", "", Some(dir.path()))
+                .await
+                .unwrap()
+                .trim(),
+            dir.path().canonicalize().unwrap().display().to_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_code_block_reduces_upstream_output() {
+        // Agent block → code block (`tr a-z A-Z`): the code block must receive
+        // the agent's raw output on stdin and its stdout becomes block output.
+        let dir = tempfile::tempdir().unwrap();
+        let output = OutputManager::new(dir.path(), Some("code-block")).unwrap();
+        let mut code = block(2, 1, 0);
+        code.agents = vec![];
+        code.command = Some("tr a-z A-Z".into());
+        // Re-derive agents the way the deserializer does
+        code.agents = vec!["code".into()];
+        let def = def_with(vec![block(1, 0, 0), code], vec![conn(1, 2)]);
+
+        let agent_configs = HashMap::from([(
+            "Claude".to_string(),
+            (
+                ProviderKind::Anthropic,
+                ProviderConfig {
+                    api_key: String::new(),
+                    model: "test".to_string(),
+                    reasoning_effort: None,
+                    thinking_effort: None,
+                    use_cli: false,
+                    extra_cli_args: String::new(),
+                },
+                false,
+            ),
+        )]);
+        let context = PromptRuntimeContext::new(def.initial_prompt.clone(), false);
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let (tx, rx) = mpsc::unbounded_channel();
+        let recv_clone = received.clone();
+        run_pipeline_with_provider_factory(
+            &def,
+            0,
+            agent_configs,
+            &context,
+            &output,
+            tx,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(move |_kind, _cfg| {
+                Box::new(MockProvider::ok(
+                    ProviderKind::Anthropic,
+                    "finding one\nfinding two",
+                    recv_clone.clone(),
+                ))
+            }),
+        )
+        .await
+        .expect("pipeline should complete");
+
+        let events = collect_progress_events(rx);
+        assert!(
+            events.iter().any(|e| matches!(e, ProgressEvent::AllDone)),
+            "AllDone must be emitted"
+        );
+        let finished = events
+            .iter()
+            .filter(|e| matches!(e, ProgressEvent::BlockFinished { .. }))
+            .count();
+        assert_eq!(
+            finished, 2,
+            "agent block + code block must both finish: {events:?}"
+        );
+        let code_out = std::fs::read_dir(output.run_dir())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .find(|e| {
+                let n = e.file_name().to_string_lossy().to_string();
+                n.contains("_code") && !n.starts_with('_')
+            })
+            .expect("code block output file");
+        let content = std::fs::read_to_string(code_out.path()).unwrap();
+        assert_eq!(content.trim(), "FINDING ONE\nFINDING TWO");
+    }
+
+    #[test]
+    fn test_validate_rejects_command_with_raw_or_subpipeline() {
+        let mut b = block(1, 0, 0);
+        b.command = Some("cat".into());
+        b.raw = true;
+        let def = def_with(vec![b], vec![]);
+        assert!(validate_pipeline(&def)
+            .unwrap_err()
+            .to_string()
+            .contains("raw"));
+    }
+
+    #[test]
+    fn test_output_contract_validation() {
+        let c = r#"{"price": "number", "plan": "string", "notes": "string?"}"#;
+        assert!(validate_output_contract(c, r#"{"price": 9.5, "plan": "pro"}"#).is_ok());
+        assert!(
+            validate_output_contract(c, "```json\n{\"price\": 1, \"plan\": \"x\"}\n```").is_ok(),
+            "code fences are tolerated"
+        );
+        assert!(
+            validate_output_contract(c, r#"{"price": 9.5, "plan": "pro", "extra": 1}"#).is_ok(),
+        );
+        let e = validate_output_contract(c, r#"{"plan": "pro"}"#).unwrap_err();
+        assert!(e.contains("missing required field 'price'"), "{e}");
+        let e = validate_output_contract(c, r#"{"price": "cheap", "plan": "pro"}"#).unwrap_err();
+        assert!(e.contains("'price' must be number"), "{e}");
+        let e = validate_output_contract(c, "The price is $9.50 for the pro plan").unwrap_err();
+        assert!(e.contains("not a JSON object"), "{e}");
+        let e = validate_output_contract(c, "[1, 2]").unwrap_err();
+        assert!(e.contains("not an object"), "{e}");
+        // nested descriptor keys ("bugs[].file", "meta.date") document shape
+        // for the model but are not enforced as top-level fields
+        let nested = r#"{"bugs": "array", "bugs[].file": "string", "meta.date": "string"}"#;
+        assert!(validate_output_contract(nested, r#"{"bugs": [{"file": "a.rs"}]}"#).is_ok());
+        let e = validate_output_contract(nested, r#"{"other": 1}"#).unwrap_err();
+        assert!(e.contains("missing required field 'bugs'"), "{e}");
+    }
+
+    #[test]
+    fn test_validate_rejects_schema_on_raw_block_and_bad_types() {
+        let mut b = block(1, 0, 0);
+        b.raw = true;
+        b.schema = Some(r#"{"x": "string"}"#.into());
+        let def = def_with(vec![b], vec![]);
+        assert!(validate_pipeline(&def)
+            .unwrap_err()
+            .to_string()
+            .contains("raw"));
+
+        let mut b = block(1, 0, 0);
+        b.schema = Some(r#"{"x": "integer"}"#.into());
+        let def = def_with(vec![b], vec![]);
+        assert!(validate_pipeline(&def)
+            .unwrap_err()
+            .to_string()
+            .contains("unknown type"));
+    }
+
+    #[tokio::test]
+    async fn test_contract_rejects_free_text_and_retries() {
+        // First response is prose (violates the contract), second is valid
+        // JSON: the block must retry once and finish OK with the JSON output.
+        let dir = tempfile::tempdir().unwrap();
+        let output = OutputManager::new(dir.path(), Some("contract-retry")).unwrap();
+        let mut b = block(1, 0, 0);
+        b.schema = Some(r#"{"price": "number", "plan": "string"}"#.into());
+        let def = def_with(vec![b], vec![]);
+
+        let agent_configs = HashMap::from([(
+            "Claude".to_string(),
+            (
+                ProviderKind::Anthropic,
+                ProviderConfig {
+                    api_key: String::new(),
+                    model: "test".to_string(),
+                    reasoning_effort: None,
+                    thinking_effort: None,
+                    use_cli: false,
+                    extra_cli_args: String::new(),
+                },
+                false,
+            ),
+        )]);
+        let context = PromptRuntimeContext::new(def.initial_prompt.clone(), false);
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let (tx, rx) = mpsc::unbounded_channel();
+        let recv_clone = received.clone();
+        run_pipeline_with_provider_factory(
+            &def,
+            0,
+            agent_configs,
+            &context,
+            &output,
+            tx,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(move |_kind, _cfg| {
+                Box::new(MockProvider::with_responses(
+                    ProviderKind::Anthropic,
+                    vec![
+                        crate::execution::test_utils::ok_response(
+                            "The price is $9.50 on the pro plan.",
+                        ),
+                        crate::execution::test_utils::ok_response(
+                            r#"{"price": 9.5, "plan": "pro"}"#,
+                        ),
+                    ],
+                    recv_clone.clone(),
+                ))
+            }),
+        )
+        .await
+        .expect("pipeline should complete");
+
+        let events = collect_progress_events(rx);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ProgressEvent::BlockFinished { .. })),
+            "block must finish after successful retry"
+        );
+        // The retry prompt must have been sent (2 messages total) and quote the violation
+        let msgs = received.lock().unwrap();
+        assert_eq!(msgs.len(), 2, "one rejection retry expected");
+        assert!(msgs[1].contains("REJECTED"), "{}", msgs[1]);
+        // The block's on-disk output is the valid JSON
+        let md = std::fs::read_dir(output.run_dir())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .find(|e| e.path().extension().is_some_and(|x| x == "md"))
+            .expect("block output file must exist");
+        let content = std::fs::read_to_string(md.path()).unwrap();
+        assert!(content.contains("\"price\""), "{content}");
+    }
+
+    #[tokio::test]
+    async fn test_contract_fails_block_after_retries_exhausted() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = OutputManager::new(dir.path(), Some("contract-fail")).unwrap();
+        let mut b = block(1, 0, 0);
+        b.schema = Some(r#"{"price": "number"}"#.into());
+        let def = def_with(vec![b], vec![]);
+
+        let agent_configs = HashMap::from([(
+            "Claude".to_string(),
+            (
+                ProviderKind::Anthropic,
+                ProviderConfig {
+                    api_key: String::new(),
+                    model: "test".to_string(),
+                    reasoning_effort: None,
+                    thinking_effort: None,
+                    use_cli: false,
+                    extra_cli_args: String::new(),
+                },
+                false,
+            ),
+        )]);
+        let context = PromptRuntimeContext::new(def.initial_prompt.clone(), false);
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let (tx, rx) = mpsc::unbounded_channel();
+        let recv_clone = received.clone();
+        run_pipeline_with_provider_factory(
+            &def,
+            0,
+            agent_configs,
+            &context,
+            &output,
+            tx,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(move |_kind, _cfg| {
+                Box::new(MockProvider::with_responses(
+                    ProviderKind::Anthropic,
+                    vec![
+                        crate::execution::test_utils::ok_response("free text 1"),
+                        crate::execution::test_utils::ok_response("free text 2"),
+                        crate::execution::test_utils::ok_response("free text 3"),
+                    ],
+                    recv_clone.clone(),
+                ))
+            }),
+        )
+        .await
+        .expect("pipeline completes (block errors, run continues)");
+
+        let events = collect_progress_events(rx);
+        let err = events.iter().find_map(|e| match e {
+            ProgressEvent::BlockError { error, .. } => Some(error.clone()),
+            _ => None,
+        });
+        let err = err.expect("block must error after exhausting retries");
+        assert!(err.contains("contract violation"), "{err}");
+        assert_eq!(received.lock().unwrap().len(), 3, "initial + 2 retries");
+    }
+
+    #[tokio::test]
+    async fn test_break_command_gate() {
+        // exit 0 breaks, non-zero continues, workdir is honored
+        assert!(evaluate_loop_break_command("true", None).await);
+        assert!(!evaluate_loop_break_command("false", None).await);
+        assert!(!evaluate_loop_break_command("exit 3", None).await);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("done.flag"), "x").unwrap();
+        assert!(evaluate_loop_break_command("test -f done.flag", Some(dir.path())).await);
+        assert!(!evaluate_loop_break_command("test -f done.flag", None).await);
+    }
+
+    #[test]
+    fn test_validate_rejects_break_command_with_break_agent() {
+        let def = def_with_loops(
+            vec![block(1, 0, 0), block(2, 1, 0)],
+            vec![conn(1, 2)],
+            vec![LoopConnection {
+                from: 2,
+                to: 1,
+                count: 2,
+                prompt: String::new(),
+                break_condition: "done".into(),
+                break_agent: "Claude".into(),
+                break_command: "true".into(),
+            }],
+        );
+        let err = validate_pipeline(&def).unwrap_err();
+        assert!(err.to_string().contains("not both"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_break_command_exit_zero_breaks_loop() {
+        // Same shape as the agent-judge test, but the gate is `true` (exit 0):
+        // the loop must break after pass 0 without consulting any agent.
+        let dir = tempfile::tempdir().unwrap();
+        let output = OutputManager::new(dir.path(), Some("cmd-break")).unwrap();
+        let def = def_with_loops(
+            vec![block(1, 0, 0), block(2, 1, 0)],
+            vec![conn(1, 2)],
+            vec![LoopConnection {
+                from: 2,
+                to: 1,
+                count: 5,
+                prompt: String::new(),
+                break_condition: String::new(),
+                break_agent: String::new(),
+                break_command: "true".into(),
+            }],
+        );
+        let agent_configs = HashMap::from([(
+            "Claude".to_string(),
+            (
+                ProviderKind::Anthropic,
+                ProviderConfig {
+                    api_key: String::new(),
+                    model: "test".to_string(),
+                    reasoning_effort: None,
+                    thinking_effort: None,
+                    use_cli: false,
+                    extra_cli_args: String::new(),
+                },
+                false,
+            ),
+        )]);
+        let context = PromptRuntimeContext::new(def.initial_prompt.clone(), false);
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let (tx, rx) = mpsc::unbounded_channel();
+        let recv_clone = received.clone();
+        run_pipeline_with_provider_factory(
+            &def,
+            0,
+            agent_configs,
+            &context,
+            &output,
+            tx,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(move |_kind, _cfg| {
+                Box::new(MockProvider::ok(
+                    ProviderKind::Anthropic,
+                    "output",
+                    recv_clone.clone(),
+                ))
+            }),
+        )
+        .await
+        .expect("pipeline should complete without error");
+
+        let events = collect_progress_events(rx);
+        assert!(
+            events.iter().any(|e| matches!(e, ProgressEvent::AllDone)),
+            "AllDone event must be emitted after command break"
+        );
+        let a_finished = events
+            .iter()
+            .filter(
+                |e| matches!(e, ProgressEvent::BlockFinished { block_id, .. } if *block_id == 0),
+            )
+            .count();
+        assert_eq!(a_finished, 1, "A should finish once (only pass 0)");
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                ProgressEvent::LoopBreakEval { decision, .. } if decision == "BREAK"
+            )),
+            "gate must report BREAK"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_break_command_nonzero_runs_full_count() {
+        // Gate `false` never passes: the loop must run pass 0 + `count` extras.
+        let dir = tempfile::tempdir().unwrap();
+        let output = OutputManager::new(dir.path(), Some("cmd-continue")).unwrap();
+        let def = def_with_loops(
+            vec![block(1, 0, 0), block(2, 1, 0)],
+            vec![conn(1, 2)],
+            vec![LoopConnection {
+                from: 2,
+                to: 1,
+                count: 2,
+                prompt: String::new(),
+                break_condition: String::new(),
+                break_agent: String::new(),
+                break_command: "false".into(),
+            }],
+        );
+        let agent_configs = HashMap::from([(
+            "Claude".to_string(),
+            (
+                ProviderKind::Anthropic,
+                ProviderConfig {
+                    api_key: String::new(),
+                    model: "test".to_string(),
+                    reasoning_effort: None,
+                    thinking_effort: None,
+                    use_cli: false,
+                    extra_cli_args: String::new(),
+                },
+                false,
+            ),
+        )]);
+        let context = PromptRuntimeContext::new(def.initial_prompt.clone(), false);
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let (tx, rx) = mpsc::unbounded_channel();
+        let recv_clone = received.clone();
+        run_pipeline_with_provider_factory(
+            &def,
+            0,
+            agent_configs,
+            &context,
+            &output,
+            tx,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(move |_kind, _cfg| {
+                Box::new(MockProvider::ok(
+                    ProviderKind::Anthropic,
+                    "output",
+                    recv_clone.clone(),
+                ))
+            }),
+        )
+        .await
+        .expect("pipeline should complete without error");
+
+        let events = collect_progress_events(rx);
+        assert!(
+            events.iter().any(|e| matches!(e, ProgressEvent::AllDone)),
+            "AllDone event must be emitted"
+        );
+        let a_finished = events
+            .iter()
+            .filter(
+                |e| matches!(e, ProgressEvent::BlockFinished { block_id, .. } if *block_id == 0),
+            )
+            .count();
+        assert_eq!(a_finished, 3, "A should run pass 0 + 2 loop passes");
+    }
+
+    #[tokio::test]
     async fn test_early_break_completes_and_emits_all_done() {
         // A(1)→B(2)→C(3) with loop_back(B, A, count=5) and break_agent="Claude".
         // The mock provider always returns "BREAK", so the evaluator breaks
@@ -9413,6 +11035,7 @@ position = [0, 0]
                 prompt: String::new(),
                 break_condition: "always break".into(),
                 break_agent: "Claude".into(),
+                break_command: String::new(),
             }],
         );
 
@@ -9515,6 +11138,10 @@ position = [0, 0]
         sub_def: PipelineDefinition,
     ) -> PipelineBlock {
         PipelineBlock {
+            raw: false,
+            fresh: false,
+            model: None,
+            effort: None,
             id,
             name: format!("Sub#{id}"),
             agents: vec![],
@@ -9523,6 +11150,8 @@ position = [0, 0]
             session_id: None,
             position: (col, row),
             replicas: 1,
+            command: None,
+            schema: None,
             sub_pipeline: Some(sub_def),
         }
     }
@@ -9535,6 +11164,10 @@ position = [0, 0]
             session_configs: vec![],
             loop_connections: vec![],
             finalization_blocks: vec![PipelineBlock {
+                raw: false,
+                fresh: false,
+                model: None,
+                effort: None,
                 id: 200,
                 name: "Consolidate".into(),
                 agents: vec!["Claude".into()],
@@ -9543,6 +11176,8 @@ position = [0, 0]
                 session_id: None,
                 position: (0, 1),
                 replicas: 1,
+                command: None,
+                schema: None,
                 sub_pipeline: None,
             }],
             finalization_connections: vec![],
@@ -9651,6 +11286,10 @@ position = [0, 0]
         let mut sub_def = minimal_sub_def();
         // Add a second finalization leaf (not connected)
         sub_def.finalization_blocks.push(PipelineBlock {
+            raw: false,
+            fresh: false,
+            model: None,
+            effort: None,
             id: 201,
             name: "Second".into(),
             agents: vec!["Claude".into()],
@@ -9659,6 +11298,8 @@ position = [0, 0]
             session_id: None,
             position: (1, 1),
             replicas: 1,
+            command: None,
+            schema: None,
             sub_pipeline: None,
         });
         sub_def.data_feeds.push(DataFeed {
@@ -9752,6 +11393,10 @@ position = [0, 0]
         let sub_def = PipelineDefinition {
             initial_prompt: "inner".into(),
             blocks: vec![PipelineBlock {
+                raw: false,
+                fresh: false,
+                model: None,
+                effort: None,
                 id: 100,
                 name: "InnerBlock".into(),
                 agents: vec!["Gemini".into()],
@@ -9760,12 +11405,18 @@ position = [0, 0]
                 session_id: None,
                 position: (0, 0),
                 replicas: 1,
+                command: None,
+                schema: None,
                 sub_pipeline: None,
             }],
             connections: vec![],
             session_configs: vec![],
             loop_connections: vec![],
             finalization_blocks: vec![PipelineBlock {
+                raw: false,
+                fresh: false,
+                model: None,
+                effort: None,
                 id: 200,
                 name: "Consolidate".into(),
                 agents: vec!["GPT".into()],
@@ -9774,6 +11425,8 @@ position = [0, 0]
                 session_id: None,
                 position: (0, 1),
                 replicas: 1,
+                command: None,
+                schema: None,
                 sub_pipeline: None,
             }],
             finalization_connections: vec![],
@@ -9809,6 +11462,7 @@ position = [0, 0]
             count: 2,
             prompt: "iterate".into(),
             break_agent: "Evaluator".into(),
+            break_command: String::new(),
             break_condition: "stop if done".into(),
         });
         let mut agents: Vec<String> = Vec::new();
@@ -10687,6 +12341,9 @@ position = [0, 0]
     #[test]
     fn scatter_replica_filename_pass_0() {
         let info = RuntimeReplicaInfo {
+            raw: false,
+            model: None,
+            effort: None,
             runtime_id: 0,
             source_block_id: 2,
             replica_index: 0,
@@ -10706,6 +12363,9 @@ position = [0, 0]
     #[test]
     fn scatter_replica_filename_pass_gt_0() {
         let info = RuntimeReplicaInfo {
+            raw: false,
+            model: None,
+            effort: None,
             runtime_id: 1,
             source_block_id: 2,
             replica_index: 1,
@@ -10787,6 +12447,7 @@ position = [0, 0]
             count: 2,
             prompt: String::new(),
             break_agent: String::new(),
+            break_command: String::new(),
             break_condition: String::new(),
         });
         let mut sc = PipelineConnection::new(4, 2);
@@ -10865,6 +12526,9 @@ position = [0, 0]
 
         // Query for r1 stem — must NOT match r10 files
         let info_r1 = RuntimeReplicaInfo {
+            raw: false,
+            model: None,
+            effort: None,
             runtime_id: 0,
             source_block_id: 2,
             replica_index: 1,
@@ -10886,6 +12550,9 @@ position = [0, 0]
 
         // Query for r10 stem — must NOT match r1 files
         let info_r10 = RuntimeReplicaInfo {
+            raw: false,
+            model: None,
+            effort: None,
             runtime_id: 1,
             source_block_id: 2,
             replica_index: 10,
@@ -10924,6 +12591,9 @@ position = [0, 0]
         let blp = HashMap::new();
 
         let info = RuntimeReplicaInfo {
+            raw: false,
+            model: None,
+            effort: None,
             runtime_id: 0,
             source_block_id: 2,
             replica_index: 0,
@@ -10967,6 +12637,9 @@ position = [0, 0]
         let blp = HashMap::new(); // pass 0
 
         let info = RuntimeReplicaInfo {
+            raw: false,
+            model: None,
+            effort: None,
             runtime_id: 0,
             source_block_id: 2,
             replica_index: 0,
@@ -11007,6 +12680,9 @@ position = [0, 0]
         blp.insert(2, 2u32); // upstream block 2 is on loop pass 2
 
         let info = RuntimeReplicaInfo {
+            raw: false,
+            model: None,
+            effort: None,
             runtime_id: 0,
             source_block_id: 2,
             replica_index: 0,
@@ -11359,6 +13035,7 @@ position = [0, 0]
                 prompt: "iterate".into(),
                 break_condition: String::new(),
                 break_agent: String::new(),
+                break_command: String::new(),
             }],
             finalization_blocks: Vec::new(),
             finalization_connections: Vec::new(),
@@ -11713,6 +13390,7 @@ position = [0, 0]
                 prompt: String::new(),
                 break_condition: "always break".into(),
                 break_agent: "Claude".into(),
+                break_command: String::new(),
             }],
         );
 
@@ -11831,6 +13509,10 @@ position = [0, 0]
         let mut def = def_with(vec![block(1, 0, 0)], vec![]);
         def.finalization_blocks = vec![
             PipelineBlock {
+                raw: false,
+                fresh: false,
+                model: None,
+                effort: None,
                 id: 10,
                 name: "RunSummary".into(),
                 agents: vec!["Claude".into()],
@@ -11839,9 +13521,15 @@ position = [0, 0]
                 session_id: None,
                 position: (0, 1),
                 replicas: 1,
+                command: None,
+                schema: None,
                 sub_pipeline: None,
             },
             PipelineBlock {
+                raw: false,
+                fresh: false,
+                model: None,
+                effort: None,
                 id: 20,
                 name: "GlobalSummary".into(),
                 agents: vec!["Claude".into()],
@@ -11850,6 +13538,8 @@ position = [0, 0]
                 session_id: None,
                 position: (1, 1),
                 replicas: 1,
+                command: None,
+                schema: None,
                 sub_pipeline: None,
             },
         ];
@@ -12009,6 +13699,10 @@ position = [0, 0]
 
         let mut def = def_with(vec![block(1, 0, 0)], vec![]);
         def.finalization_blocks = vec![PipelineBlock {
+            raw: false,
+            fresh: false,
+            model: None,
+            effort: None,
             id: 10,
             name: "Summary".into(),
             agents: vec!["Claude".into()],
@@ -12017,6 +13711,8 @@ position = [0, 0]
             session_id: None,
             position: (0, 1),
             replicas: 1,
+            command: None,
+            schema: None,
             sub_pipeline: None,
         }];
         def.data_feeds = vec![DataFeed {
@@ -12109,6 +13805,7 @@ position = [0, 0]
                 prompt: String::new(),
                 break_condition: "always break".into(),
                 break_agent: "Claude".into(),
+                break_command: String::new(),
             }],
         );
 

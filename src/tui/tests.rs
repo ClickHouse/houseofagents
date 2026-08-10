@@ -338,6 +338,10 @@ fn start_pipeline_execution_rejects_opencode_api_mode_agent() {
     app.cli_available.insert(ProviderKind::OpenCode, true);
     app.pipeline.pipeline_def.initial_prompt = "test".into();
     app.pipeline.pipeline_def.blocks = vec![PipelineBlock {
+        raw: false,
+        fresh: false,
+        model: None,
+        effort: None,
         id: 1,
         name: "Worker".into(),
         agents: vec!["OC".into()],
@@ -346,6 +350,8 @@ fn start_pipeline_execution_rejects_opencode_api_mode_agent() {
         session_id: None,
         position: (0, 0),
         replicas: 1,
+        command: None,
+        schema: None,
         sub_pipeline: None,
     }];
 
@@ -1698,6 +1704,10 @@ fn handle_paste_ignored_outside_prompt_text() {
 fn pipeline_move_selected_block_moves_into_empty_cell() {
     let mut app = test_app();
     app.pipeline.pipeline_def.blocks = vec![pipeline_mod::PipelineBlock {
+        raw: false,
+        fresh: false,
+        model: None,
+        effort: None,
         id: 1,
         name: "one".into(),
         agents: vec!["agent".into()],
@@ -1706,6 +1716,8 @@ fn pipeline_move_selected_block_moves_into_empty_cell() {
         session_id: None,
         position: (2, 2),
         replicas: 1,
+        command: None,
+        schema: None,
         sub_pipeline: None,
     }];
     app.pipeline.pipeline_block_cursor = Some(1);
@@ -1721,6 +1733,10 @@ fn pipeline_move_selected_block_swaps_when_target_occupied() {
     let mut app = test_app();
     app.pipeline.pipeline_def.blocks = vec![
         pipeline_mod::PipelineBlock {
+            raw: false,
+            fresh: false,
+            model: None,
+            effort: None,
             id: 1,
             name: "one".into(),
             agents: vec!["agent".into()],
@@ -1729,9 +1745,15 @@ fn pipeline_move_selected_block_swaps_when_target_occupied() {
             session_id: None,
             position: (2, 2),
             replicas: 1,
+            command: None,
+            schema: None,
             sub_pipeline: None,
         },
         pipeline_mod::PipelineBlock {
+            raw: false,
+            fresh: false,
+            model: None,
+            effort: None,
             id: 2,
             name: "two".into(),
             agents: vec!["agent".into()],
@@ -1740,6 +1762,8 @@ fn pipeline_move_selected_block_swaps_when_target_occupied() {
             session_id: None,
             position: (3, 2),
             replicas: 1,
+            command: None,
+            schema: None,
             sub_pipeline: None,
         },
     ];
@@ -1770,6 +1794,10 @@ fn pipeline_builder_arrow_navigates_shift_arrow_moves_block() {
     let mut app = test_app();
     app.pipeline.pipeline_def.blocks = vec![
         pipeline_mod::PipelineBlock {
+            raw: false,
+            fresh: false,
+            model: None,
+            effort: None,
             id: 1,
             name: "one".into(),
             agents: vec!["agent".into()],
@@ -1778,9 +1806,15 @@ fn pipeline_builder_arrow_navigates_shift_arrow_moves_block() {
             session_id: None,
             position: (2, 2),
             replicas: 1,
+            command: None,
+            schema: None,
             sub_pipeline: None,
         },
         pipeline_mod::PipelineBlock {
+            raw: false,
+            fresh: false,
+            model: None,
+            effort: None,
             id: 2,
             name: "two".into(),
             agents: vec!["agent".into()],
@@ -1789,6 +1823,8 @@ fn pipeline_builder_arrow_navigates_shift_arrow_moves_block() {
             session_id: None,
             position: (3, 2),
             replicas: 1,
+            command: None,
+            schema: None,
             sub_pipeline: None,
         },
     ];
@@ -1923,6 +1959,10 @@ fn pipeline_app_with_block() -> App {
     app.screen = Screen::Pipeline;
     app.pipeline.pipeline_focus = PipelineFocus::Builder;
     app.pipeline.pipeline_def.blocks.push(PipelineBlock {
+        raw: false,
+        fresh: false,
+        model: None,
+        effort: None,
         id: 1,
         name: "B1".into(),
         agents: vec!["Claude".into()],
@@ -1931,6 +1971,8 @@ fn pipeline_app_with_block() -> App {
         session_id: None,
         position: (0, 0),
         replicas: 1,
+        command: None,
+        schema: None,
         sub_pipeline: None,
     });
     app.pipeline.pipeline_block_cursor = Some(1);
@@ -2425,6 +2467,10 @@ fn pipeline_step_labels_expands_replicas() {
 
         blocks: vec![
             PipelineBlock {
+                raw: false,
+                fresh: false,
+                model: None,
+                effort: None,
                 id: 1,
                 name: "Writer".into(),
                 agents: vec!["Claude".into()],
@@ -2433,9 +2479,15 @@ fn pipeline_step_labels_expands_replicas() {
                 session_id: None,
                 position: (0, 0),
                 replicas: 3,
+                command: None,
+                schema: None,
                 sub_pipeline: None,
             },
             PipelineBlock {
+                raw: false,
+                fresh: false,
+                model: None,
+                effort: None,
                 id: 2,
                 name: "Reviewer".into(),
                 agents: vec!["GPT".into()],
@@ -2444,6 +2496,8 @@ fn pipeline_step_labels_expands_replicas() {
                 session_id: None,
                 position: (1, 0),
                 replicas: 1,
+                command: None,
+                schema: None,
                 sub_pipeline: None,
             },
         ],
@@ -2469,6 +2523,10 @@ fn pipeline_step_labels_unnamed_blocks_no_agent_duplication() {
         initial_prompt: "go".into(),
 
         blocks: vec![PipelineBlock {
+            raw: false,
+            fresh: false,
+            model: None,
+            effort: None,
             id: 5,
             name: String::new(),
             agents: vec!["Claude".into()],
@@ -2477,6 +2535,8 @@ fn pipeline_step_labels_unnamed_blocks_no_agent_duplication() {
             session_id: None,
             position: (0, 0),
             replicas: 1,
+            command: None,
+            schema: None,
             sub_pipeline: None,
         }],
         connections: vec![],
@@ -2498,6 +2558,10 @@ fn pipeline_step_labels_multi_agent_no_duplication() {
         initial_prompt: "go".into(),
 
         blocks: vec![PipelineBlock {
+            raw: false,
+            fresh: false,
+            model: None,
+            effort: None,
             id: 1,
             name: "Writer".into(),
             agents: vec!["Claude".into(), "GPT".into()],
@@ -2506,6 +2570,8 @@ fn pipeline_step_labels_multi_agent_no_duplication() {
             session_id: None,
             position: (0, 0),
             replicas: 1,
+            command: None,
+            schema: None,
             sub_pipeline: None,
         }],
         connections: vec![],
@@ -2532,6 +2598,10 @@ fn pipeline_app_with_two_blocks() -> App {
     app.screen = Screen::Pipeline;
     app.pipeline.pipeline_focus = PipelineFocus::Builder;
     app.pipeline.pipeline_def.blocks.push(PipelineBlock {
+        raw: false,
+        fresh: false,
+        model: None,
+        effort: None,
         id: 1,
         name: "A".into(),
         agents: vec!["Claude".into()],
@@ -2540,9 +2610,15 @@ fn pipeline_app_with_two_blocks() -> App {
         session_id: None,
         position: (0, 0),
         replicas: 1,
+        command: None,
+        schema: None,
         sub_pipeline: None,
     });
     app.pipeline.pipeline_def.blocks.push(PipelineBlock {
+        raw: false,
+        fresh: false,
+        model: None,
+        effort: None,
         id: 2,
         name: "B".into(),
         agents: vec!["GPT".into()],
@@ -2551,6 +2627,8 @@ fn pipeline_app_with_two_blocks() -> App {
         session_id: None,
         position: (1, 0),
         replicas: 1,
+        command: None,
+        schema: None,
         sub_pipeline: None,
     });
     app.pipeline.pipeline_block_cursor = Some(1);
@@ -2580,6 +2658,7 @@ fn test_o_opens_edit_on_existing_loop() {
             prompt: "review again".into(),
             break_condition: String::new(),
             break_agent: String::new(),
+            break_command: String::new(),
         });
     app.pipeline.pipeline_block_cursor = Some(1);
     handle_key(&mut app, key(KeyCode::Char('o')));
@@ -2637,6 +2716,7 @@ fn test_delete_block_cleans_loops() {
             prompt: String::new(),
             break_condition: String::new(),
             break_agent: String::new(),
+            break_command: String::new(),
         });
     // Delete block 1
     app.pipeline.pipeline_block_cursor = Some(1);
@@ -2658,6 +2738,7 @@ fn test_x_includes_loop_connections() {
             prompt: String::new(),
             break_condition: String::new(),
             break_agent: String::new(),
+            break_command: String::new(),
         });
     app.pipeline.pipeline_block_cursor = Some(1);
     handle_key(&mut app, key(KeyCode::Char('x')));
@@ -2683,6 +2764,7 @@ fn test_regular_connect_allows_loop_pair() {
             prompt: String::new(),
             break_condition: String::new(),
             break_agent: String::new(),
+            break_command: String::new(),
         });
     // Adding another regular connection between loop endpoint blocks is allowed
     // (as long as it doesn't create a cycle — but same-direction won't)
@@ -2709,6 +2791,7 @@ fn test_loop_edit_saves_on_enter() {
             prompt: String::new(),
             break_condition: String::new(),
             break_agent: String::new(),
+            break_command: String::new(),
         });
     // Open loop edit popup via 'o' on block 1
     app.pipeline.pipeline_block_cursor = Some(1);
@@ -2736,6 +2819,7 @@ fn test_loop_edit_esc_discards() {
             prompt: String::new(),
             break_condition: String::new(),
             break_agent: String::new(),
+            break_command: String::new(),
         });
     // Open loop edit popup via 'o' on block 1
     app.pipeline.pipeline_block_cursor = Some(1);
@@ -2915,6 +2999,10 @@ fn setup_analysis_prompt_pipeline() {
     app.pipeline.pipeline_def.initial_prompt = "Research topic".into();
     app.pipeline.pipeline_def.blocks = vec![
         PipelineBlock {
+            raw: false,
+            fresh: false,
+            model: None,
+            effort: None,
             id: 1,
             name: "Research".into(),
             agents: vec!["Claude".into()],
@@ -2923,9 +3011,15 @@ fn setup_analysis_prompt_pipeline() {
             session_id: None,
             position: (0, 0),
             replicas: 1,
+            command: None,
+            schema: None,
             sub_pipeline: None,
         },
         PipelineBlock {
+            raw: false,
+            fresh: false,
+            model: None,
+            effort: None,
             id: 2,
             name: "Analyze".into(),
             agents: vec!["OpenAI".into()],
@@ -2934,6 +3028,8 @@ fn setup_analysis_prompt_pipeline() {
             session_id: Some("shared-1".into()),
             position: (1, 0),
             replicas: 1,
+            command: None,
+            schema: None,
             sub_pipeline: None,
         },
     ];
@@ -2960,6 +3056,10 @@ fn setup_analysis_prompt_pipeline_with_replicas() {
     use crate::execution::pipeline::PipelineBlock;
     app.pipeline.pipeline_def.initial_prompt = "test".into();
     app.pipeline.pipeline_def.blocks = vec![PipelineBlock {
+        raw: false,
+        fresh: false,
+        model: None,
+        effort: None,
         id: 1,
         name: "Worker".into(),
         agents: vec!["Claude".into()],
@@ -2968,6 +3068,8 @@ fn setup_analysis_prompt_pipeline_with_replicas() {
         session_id: None,
         position: (0, 0),
         replicas: 3,
+        command: None,
+        schema: None,
         sub_pipeline: None,
     }];
 
@@ -3157,6 +3259,10 @@ fn setup_analysis_pipeline_agent_invalid_runtime() {
     use crate::execution::pipeline::PipelineBlock;
     app.pipeline.pipeline_def.initial_prompt = "test".into();
     app.pipeline.pipeline_def.blocks = vec![PipelineBlock {
+        raw: false,
+        fresh: false,
+        model: None,
+        effort: None,
         id: 1,
         name: "A".into(),
         agents: vec!["CliAgent".into()],
@@ -3165,6 +3271,8 @@ fn setup_analysis_pipeline_agent_invalid_runtime() {
         session_id: None,
         position: (0, 0),
         replicas: 1,
+        command: None,
+        schema: None,
         sub_pipeline: None,
     }];
     start_setup_analysis(&mut app);
@@ -3209,6 +3317,10 @@ fn setup_analysis_invalid_pipeline() {
     use crate::execution::pipeline::{PipelineBlock, PipelineConnection};
     app.pipeline.pipeline_def.initial_prompt = "test".into();
     app.pipeline.pipeline_def.blocks = vec![PipelineBlock {
+        raw: false,
+        fresh: false,
+        model: None,
+        effort: None,
         id: 1,
         name: "A".into(),
         agents: vec!["Claude".into()],
@@ -3217,6 +3329,8 @@ fn setup_analysis_invalid_pipeline() {
         session_id: None,
         position: (0, 0),
         replicas: 1,
+        command: None,
+        schema: None,
         sub_pipeline: None,
     }];
     // Self-edge
@@ -3243,6 +3357,10 @@ fn setup_analysis_empty_pipeline_initial_prompt() {
 
     use crate::execution::pipeline::PipelineBlock;
     app.pipeline.pipeline_def.blocks = vec![PipelineBlock {
+        raw: false,
+        fresh: false,
+        model: None,
+        effort: None,
         id: 1,
         name: "A".into(),
         agents: vec!["Claude".into()],
@@ -3251,6 +3369,8 @@ fn setup_analysis_empty_pipeline_initial_prompt() {
         session_id: None,
         position: (0, 0),
         replicas: 1,
+        command: None,
+        schema: None,
         sub_pipeline: None,
     }];
     app.pipeline.pipeline_def.initial_prompt.clear();
@@ -3277,6 +3397,10 @@ fn setup_analysis_pipeline_unavailable_agent() {
     use crate::execution::pipeline::PipelineBlock;
     app.pipeline.pipeline_def.initial_prompt = "test".into();
     app.pipeline.pipeline_def.blocks = vec![PipelineBlock {
+        raw: false,
+        fresh: false,
+        model: None,
+        effort: None,
         id: 1,
         name: "A".into(),
         agents: vec!["MissingAgent".into()],
@@ -3285,6 +3409,8 @@ fn setup_analysis_pipeline_unavailable_agent() {
         session_id: None,
         position: (0, 0),
         replicas: 1,
+        command: None,
+        schema: None,
         sub_pipeline: None,
     }];
     start_setup_analysis(&mut app);
@@ -3376,6 +3502,10 @@ fn test_delete_internal_block_prunes_loop() {
     app.pipeline.pipeline_focus = PipelineFocus::Builder;
     app.pipeline.pipeline_def.blocks = vec![
         PipelineBlock {
+            raw: false,
+            fresh: false,
+            model: None,
+            effort: None,
             id: 1,
             name: "A".into(),
             agents: vec!["Claude".into()],
@@ -3384,9 +3514,15 @@ fn test_delete_internal_block_prunes_loop() {
             session_id: None,
             position: (0, 0),
             replicas: 1,
+            command: None,
+            schema: None,
             sub_pipeline: None,
         },
         PipelineBlock {
+            raw: false,
+            fresh: false,
+            model: None,
+            effort: None,
             id: 2,
             name: "B".into(),
             agents: vec!["Claude".into()],
@@ -3395,9 +3531,15 @@ fn test_delete_internal_block_prunes_loop() {
             session_id: None,
             position: (1, 0),
             replicas: 1,
+            command: None,
+            schema: None,
             sub_pipeline: None,
         },
         PipelineBlock {
+            raw: false,
+            fresh: false,
+            model: None,
+            effort: None,
             id: 3,
             name: "C".into(),
             agents: vec!["Claude".into()],
@@ -3406,6 +3548,8 @@ fn test_delete_internal_block_prunes_loop() {
             session_id: None,
             position: (2, 0),
             replicas: 1,
+            command: None,
+            schema: None,
             sub_pipeline: None,
         },
     ];
@@ -3418,6 +3562,7 @@ fn test_delete_internal_block_prunes_loop() {
         prompt: String::new(),
         break_condition: String::new(),
         break_agent: String::new(),
+        break_command: String::new(),
     }];
 
     // Select block 2 (internal to the loop sub-DAG) and press 'd'
@@ -3914,6 +4059,10 @@ fn pipeline_app_with_fin_and_feeds(n: usize) -> App {
 
     for i in 1..=n {
         app.pipeline.pipeline_def.blocks.push(PipelineBlock {
+            raw: false,
+            fresh: false,
+            model: None,
+            effort: None,
             id: i as u32,
             name: format!("Exec{i}"),
             agents: vec!["Claude".into()],
@@ -3922,6 +4071,8 @@ fn pipeline_app_with_fin_and_feeds(n: usize) -> App {
             session_id: None,
             position: ((i - 1) as u16, 0),
             replicas: 1,
+            command: None,
+            schema: None,
             sub_pipeline: None,
         });
         app.pipeline.pipeline_def.data_feeds.push(DataFeed {
@@ -3936,6 +4087,10 @@ fn pipeline_app_with_fin_and_feeds(n: usize) -> App {
         .pipeline_def
         .finalization_blocks
         .push(PipelineBlock {
+            raw: false,
+            fresh: false,
+            model: None,
+            effort: None,
             id: fin_id,
             name: "Fin".into(),
             agents: vec!["Claude".into()],
@@ -3944,6 +4099,8 @@ fn pipeline_app_with_fin_and_feeds(n: usize) -> App {
             session_id: None,
             position: (0, 1),
             replicas: 1,
+            command: None,
+            schema: None,
             sub_pipeline: None,
         });
 
@@ -4193,6 +4350,10 @@ fn canvas_f_on_exec_with_multi_feeds_shows_error() {
         .pipeline_def
         .finalization_blocks
         .push(PipelineBlock {
+            raw: false,
+            fresh: false,
+            model: None,
+            effort: None,
             id: 10,
             name: "Fin2".into(),
             agents: vec!["Claude".into()],
@@ -4201,6 +4362,8 @@ fn canvas_f_on_exec_with_multi_feeds_shows_error() {
             session_id: None,
             position: (1, 1),
             replicas: 1,
+            command: None,
+            schema: None,
             sub_pipeline: None,
         });
     app.pipeline.pipeline_def.data_feeds.push(DataFeed {
@@ -4239,6 +4402,7 @@ fn loop_edit_backtab_cycles_fields_backward() {
             prompt: String::new(),
             break_condition: String::new(),
             break_agent: String::new(),
+            break_command: String::new(),
         });
     app.pipeline.pipeline_block_cursor = Some(1);
     handle_key(&mut app, key(KeyCode::Char('o')));
@@ -4293,6 +4457,7 @@ fn loop_edit_count_fresh_replaces_on_first_digit() {
             prompt: String::new(),
             break_condition: String::new(),
             break_agent: String::new(),
+            break_command: String::new(),
         });
     app.pipeline.pipeline_block_cursor = Some(1);
     handle_key(&mut app, key(KeyCode::Char('o')));
@@ -4325,6 +4490,7 @@ fn loop_edit_count_empty_defaults_to_1_on_save() {
             prompt: String::new(),
             break_condition: String::new(),
             break_agent: String::new(),
+            break_command: String::new(),
         });
     app.pipeline.pipeline_block_cursor = Some(1);
     handle_key(&mut app, key(KeyCode::Char('o')));
@@ -4366,6 +4532,7 @@ fn loop_edit_break_agent_cursor_does_not_change_selection() {
             prompt: String::new(),
             break_condition: String::new(),
             break_agent: String::new(),
+            break_command: String::new(),
         });
     app.pipeline.pipeline_block_cursor = Some(1);
     handle_key(&mut app, key(KeyCode::Char('o')));
@@ -4415,6 +4582,7 @@ fn loop_edit_saves_confirmed_selection_not_cursor() {
             prompt: String::new(),
             break_condition: "stop when done".into(),
             break_agent: "BreakBot".into(),
+            break_command: String::new(),
         });
     app.pipeline.pipeline_block_cursor = Some(1);
     handle_key(&mut app, key(KeyCode::Char('o')));
@@ -4542,6 +4710,10 @@ fn tab_cycles_prompt_and_builder_inside_sub_pipeline() {
     app.screen = Screen::Pipeline;
     app.pipeline.pipeline_focus = PipelineFocus::Builder;
     app.pipeline.pipeline_def.blocks.push(PipelineBlock {
+        raw: false,
+        fresh: false,
+        model: None,
+        effort: None,
         id: 1,
         name: "MySub".into(),
         agents: vec![],
@@ -4550,6 +4722,8 @@ fn tab_cycles_prompt_and_builder_inside_sub_pipeline() {
         session_id: None,
         position: (0, 0),
         replicas: 1,
+        command: None,
+        schema: None,
         sub_pipeline: Some(PipelineDefinition::default()),
     });
     app.pipeline.pipeline_block_cursor = Some(1);
@@ -4593,6 +4767,10 @@ fn e_key_opens_edit_popup_for_sub_pipeline_block() {
     app.screen = Screen::Pipeline;
     app.pipeline.pipeline_focus = PipelineFocus::Builder;
     app.pipeline.pipeline_def.blocks.push(PipelineBlock {
+        raw: false,
+        fresh: false,
+        model: None,
+        effort: None,
         id: 1,
         name: "MySub".into(),
         agents: vec![],
@@ -4601,6 +4779,8 @@ fn e_key_opens_edit_popup_for_sub_pipeline_block() {
         session_id: None,
         position: (0, 0),
         replicas: 1,
+        command: None,
+        schema: None,
         sub_pipeline: Some(PipelineDefinition::default()),
     });
     app.pipeline.pipeline_block_cursor = Some(1);
@@ -4651,6 +4831,10 @@ fn sub_pipeline_edit_popup_saves_name_and_replicas() {
     app.screen = Screen::Pipeline;
     app.pipeline.pipeline_focus = PipelineFocus::Builder;
     app.pipeline.pipeline_def.blocks.push(PipelineBlock {
+        raw: false,
+        fresh: false,
+        model: None,
+        effort: None,
         id: 1,
         name: "MySub".into(),
         agents: vec![],
@@ -4659,6 +4843,8 @@ fn sub_pipeline_edit_popup_saves_name_and_replicas() {
         session_id: None,
         position: (0, 0),
         replicas: 1,
+        command: None,
+        schema: None,
         sub_pipeline: Some(PipelineDefinition::default()),
     });
     app.pipeline.pipeline_next_id = 2;
@@ -4686,6 +4872,10 @@ fn sub_pipeline_replicas_not_capped_by_stale_agent_selection() {
     app.pipeline.pipeline_focus = PipelineFocus::Builder;
     // Regular block with 2 agents (leaves stale agent_selection = [true, true])
     app.pipeline.pipeline_def.blocks.push(PipelineBlock {
+        raw: false,
+        fresh: false,
+        model: None,
+        effort: None,
         id: 1,
         name: "Regular".into(),
         agents: vec!["a1".into(), "a2".into()],
@@ -4694,10 +4884,16 @@ fn sub_pipeline_replicas_not_capped_by_stale_agent_selection() {
         session_id: None,
         position: (0, 0),
         replicas: 1,
+        command: None,
+        schema: None,
         sub_pipeline: None,
     });
     // Sub-pipeline block
     app.pipeline.pipeline_def.blocks.push(PipelineBlock {
+        raw: false,
+        fresh: false,
+        model: None,
+        effort: None,
         id: 2,
         name: "Sub".into(),
         agents: vec![],
@@ -4706,6 +4902,8 @@ fn sub_pipeline_replicas_not_capped_by_stale_agent_selection() {
         session_id: None,
         position: (1, 0),
         replicas: 1,
+        command: None,
+        schema: None,
         sub_pipeline: Some(PipelineDefinition::default()),
     });
     app.pipeline.pipeline_next_id = 3;

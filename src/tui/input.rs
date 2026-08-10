@@ -887,6 +887,10 @@ pub(super) fn handle_pipeline_builder_key(app: &mut App, key: KeyEvent) {
                 .pipeline_def
                 .blocks
                 .push(pipeline_mod::PipelineBlock {
+                    raw: false,
+                    fresh: false,
+                    model: None,
+                    effort: None,
                     id,
                     name: format!("Block#{id}"),
                     agents: vec![default_agent],
@@ -895,6 +899,8 @@ pub(super) fn handle_pipeline_builder_key(app: &mut App, key: KeyEvent) {
                     session_id: None,
                     position: pos,
                     replicas: 1,
+                    command: None,
+                    schema: None,
                     sub_pipeline: None,
                 });
             app.pipeline.pipeline_block_cursor = Some(id);
@@ -915,6 +921,10 @@ pub(super) fn handle_pipeline_builder_key(app: &mut App, key: KeyEvent) {
                 .pipeline_def
                 .finalization_blocks
                 .push(pipeline_mod::PipelineBlock {
+                    raw: false,
+                    fresh: false,
+                    model: None,
+                    effort: None,
                     id,
                     name: format!("Fin#{id}"),
                     agents: vec![default_agent],
@@ -923,6 +933,8 @@ pub(super) fn handle_pipeline_builder_key(app: &mut App, key: KeyEvent) {
                     session_id: None,
                     position: pos,
                     replicas: 1,
+                    command: None,
+                    schema: None,
                     sub_pipeline: None,
                 });
             app.pipeline.pipeline_block_cursor = Some(id);
@@ -940,6 +952,10 @@ pub(super) fn handle_pipeline_builder_key(app: &mut App, key: KeyEvent) {
                 .pipeline_def
                 .blocks
                 .push(pipeline_mod::PipelineBlock {
+                    raw: false,
+                    fresh: false,
+                    model: None,
+                    effort: None,
                     id,
                     name: format!("Sub#{id}"),
                     agents: vec![],
@@ -948,6 +964,8 @@ pub(super) fn handle_pipeline_builder_key(app: &mut App, key: KeyEvent) {
                     session_id: None,
                     position: pos,
                     replicas: 1,
+                    command: None,
+                    schema: None,
                     sub_pipeline: Some(pipeline_mod::PipelineDefinition::default()),
                 });
             app.pipeline.pipeline_block_cursor = Some(id);
@@ -2481,6 +2499,7 @@ fn handle_pipeline_loop_connect_key(app: &mut App, key: KeyEvent) {
                                         prompt: String::new(),
                                         break_condition: String::new(),
                                         break_agent: String::new(),
+                                        break_command: String::new(),
                                     },
                                 );
                                 app.pipeline.pipeline_loop_connecting_from = None;

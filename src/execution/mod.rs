@@ -8,6 +8,7 @@ pub(crate) mod test_utils;
 use crate::provider::ProviderKind;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -23,6 +24,9 @@ pub struct PromptRuntimeContext {
     diagnostics_suffix: Option<&'static str>,
     cli_working_directory_prefix: Option<String>,
     memory_context: Option<String>,
+    workdir: Option<PathBuf>,
+    allow_edits: bool,
+    max_calls: Option<u32>,
 }
 
 impl PromptRuntimeContext {
@@ -42,11 +46,46 @@ impl PromptRuntimeContext {
             diagnostics_suffix: diagnostics_enabled.then_some(DIAGNOSTIC_SUFFIX),
             cli_working_directory_prefix,
             memory_context: None,
+            workdir: None,
+            allow_edits: false,
+            max_calls: None,
         }
     }
 
     pub fn raw_prompt(&self) -> &str {
         &self.raw_prompt
+    }
+
+    /// Set the explicit working directory and edit mode for CLI agents. When a
+    /// workdir is given it also becomes the "Working directory:" the agents are
+    /// told about (overriding the inherited process cwd).
+    pub fn set_edit_context(&mut self, workdir: Option<PathBuf>, allow_edits: bool) {
+        if let Some(ref dir) = workdir {
+            self.cli_working_directory_prefix = Some(format!(
+                "Working directory: {}\nYou have access to the data and files in this directory for context.",
+                dir.display()
+            ));
+        }
+        self.workdir = workdir;
+        self.allow_edits = allow_edits;
+    }
+
+    pub fn workdir(&self) -> Option<PathBuf> {
+        self.workdir.clone()
+    }
+
+    pub fn allow_edits(&self) -> bool {
+        self.allow_edits
+    }
+
+    /// Hard budget: maximum agent invocations for this run (code blocks are
+    /// free). Exceeding it cancels the run — the runaway-spend stop.
+    pub fn set_max_calls(&mut self, max: Option<u32>) {
+        self.max_calls = max.filter(|&m| m > 0);
+    }
+
+    pub fn max_calls(&self) -> Option<u32> {
+        self.max_calls
     }
 
     pub fn set_memory_context(&mut self, context: String) {

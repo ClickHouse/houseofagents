@@ -641,6 +641,10 @@ fn build_pipeline_prompt(app: &App, prompt: &mut String) {
                     line.push_str("...");
                 }
             }
+            if !lc.break_command.is_empty() {
+                let snippet = truncate_chars(&lc.break_command, 100);
+                line.push_str(&format!(", break_command: {snippet}"));
+            }
             line.push(')');
             prompt.push_str(&line);
             prompt.push('\n');

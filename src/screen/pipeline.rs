@@ -3247,6 +3247,10 @@ mod routing_tests {
 
     fn block_at(id: u32, col: u16, row: u16) -> PipelineBlock {
         PipelineBlock {
+            raw: false,
+            fresh: false,
+            model: None,
+            effort: None,
             id,
             name: String::new(),
             agents: vec!["test".into()],
@@ -3255,6 +3259,8 @@ mod routing_tests {
             session_id: None,
             position: (col, row),
             replicas: 1,
+            command: None,
+            schema: None,
             sub_pipeline: None,
         }
     }
